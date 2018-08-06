@@ -17,7 +17,11 @@ import Servant.Utils.Links
 #endif
 
 import           Network.URI                          ( parseURI
-                                                      , parseRelativeReference)
+                                                      , parseRelativeReference
+                                                      , pathSegments
+                                                      )
+
+import Text.Printf
 import           Data.Proxy
 import           Servant.API                   hiding (GET)
 import           Data.List                            (isInfixOf)
@@ -28,7 +32,7 @@ import           Data.Maybe
 import           GHC.Generics
 import           JavaScript.Web.XMLHttpRequest
 import           Miso                          hiding (defaultOptions)
-import           Miso.String                   hiding (splitAt, isInfixOf)
+import           Miso.String                   hiding (last, splitAt, isInfixOf)
 import           Prelude                       hiding (head, concat, unwords)
 import           Control.Monad
 
@@ -103,11 +107,37 @@ viewModel model@Model {..}
     | otherwise = view
   where
     url = uriparser . parseURI
+    pager = read (last $ pathSegments uri) :: Integer
 
-    about = div_ [] [
-            div_ [] [ text "about" ]
-          , button_ [ onClick goHome ] [ text "go home Y" ]
-          ]
+    about = div_ [ style_ $ M.fromList [
+                  (pack "text-align", pack "center")
+                , (pack "margin", pack "50px")
+                ]
+               ] [
+
+        h1_ [class_ $ pack "title" ] [ text $ pack "Haskell IRC Log Search" ]
+        ,
+           case info of
+          Nothing -> div_ attrs [ text $ pack "ABC" ]
+          Just APIInfo{..} ->
+            div_ [] [
+               br_ [] []
+               , th_ [] [ text $ ""]
+               , table_ [ class_ $ pack "table is-striped" ] [
+                 thead_ [] [td_ [] [i] | i <- ["Date", "Time", "User", "Post"]]
+               , tbody_ [] $ results_ rows
+                 ]
+               ]
+            ]
+
+      where
+        attrs = [ onClick $ FetchGitHub "  "
+                , onMouseOver $ SetQuery (toMisoString $ "rowid+%3E+" ++ show pager ++ "+AND+rowid+%3C+" ++ show ((pager + 100)))
+                , autofocus_ True
+                , class_ $ pack "button is-large is-outlined"
+                ] ++ [ disabled_ False | isJust info ]
+
+
 
     the404 = div_ [] [
             text "the 404 :("
@@ -122,7 +152,7 @@ viewModel model@Model {..}
         h1_ [class_ $ pack "title" ] [ text $ pack "Haskell IRC Log Search" ]
 
       , input_ attrs [
-          text $ pack "Fetch JSON from https://api.github.com via XHR"
+          text $ pack ""
           ]
 
       , case info of
@@ -143,7 +173,7 @@ viewModel model@Model {..}
         attrs = [ onKeyDown $ \case
           EnterButton -> FetchGitHub "  "
           _           -> NoOp
-                , onInput SetQuery
+                , onInput (\x -> SetQuery $ toMisoString $ "post+like+%22%25" ++ (printf "%s" (show x) :: String) ++ "%25%22+limit+14")
                 , autofocus_ True
                 , class_ $ pack "button is-large is-outlined"
                 ] ++ [ disabled_ False | isJust info ]
@@ -181,7 +211,7 @@ getGitHubAPIInfo q = do
     Right j -> pure j
   where
     req = Request { reqMethod = GET
-                  , reqURI = pack $ "https://logs.beuke.org/irc-logs-b0881a8.json?sql=select+*+from+db+where+post+like+%22%25" ++ (fromMisoString q) ++ "%25%22+limit+14"
+                  , reqURI = pack $ "https://logs.beuke.org/irc-logs-b0881a8.json?sql=select+*+from+db+where+" ++ (fromMisoString q)
                   , reqLogin = Nothing
                   , reqHeaders = []
                   , reqWithCredentials = False
@@ -190,28 +220,7 @@ getGitHubAPIInfo q = do
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+{- https://logs.beuke.org/irc-logs-b0881a8.json?sql=select+*+from+db+where+rowid+%3E+0+AND+rowid+%3C+51 -}
 
 
 -- | HasURI typeclass
