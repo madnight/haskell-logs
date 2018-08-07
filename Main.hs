@@ -95,13 +95,31 @@ updateModel (ChangeURI u) m = m <# do
 
 updateModel (HandleURI u) m = m { uri = u } <# do
   let pager = read (last $ pathSegments u) :: Integer
-  if ("index" `isInfixOf` show u) then 
+  if ("index" `isInfixOf` show u) then
    SetGitHub <$> getGitHubAPIInfo ((toMisoString $ "rowid+%3E+" ++ show (pager * 100)++ "+AND+rowid+%3C+" ++ show (((pager * 100) + 100))))
-  else 
+  else
    pure NoOp
 
 updateModel NoOp m =
   noEff m
+
+clickGoto :: Integer -> Attribute Action
+clickGoto = onClick . goto . ("/haskell-logs/index/" ++) . show
+
+pagLink :: Integer -> View Action
+pagLink index | index < 0 = div_ [] []
+              | index > 151275 = div_ [] []
+              | otherwise =  li_ [clickGoto index]
+                    [a_ [class_ $ pack "pagination-link"
+                       , textProp "aria-label" $ pack ""
+                       ] [text . pack $ show index]]
+
+pagDots :: View Action
+pagDots = li_ [] [span_ [class_ $ pack "pagination-ellipsis" ] [text $ pack "..."]]
+
+pagCurrent :: Integer -> View Action
+pagCurrent index = i_ [] [a_ [class_ $ pack "pagination-link is-current", textProp "aria-label" $ pack "", textProp "aria-current" $ pack "page"] [text . pack $ show index]]
+
 
 
 -- | View function, with routing
@@ -111,11 +129,8 @@ viewModel model@Model {..}
     | otherwise = view
   where
 
-    pag = read (last $ pathSegments uri) :: Integer
     url = uriparser . parseURI
     pager = read (last $ pathSegments uri) :: Integer
-
-    onClick' action = on "click" emptyDecoder $ \() -> action
 
     about = div_ [ style_ $ M.fromList [
                   (pack "text-align", pack "center")
@@ -123,7 +138,26 @@ viewModel model@Model {..}
                 ]
                ] [
 
-        h1_ [class_ $ pack "title" ] [ text $ pack "Haskell IRC Log Index" ]
+        h1_ [class_ $ pack "title"] [ text $ pack "Haskell IRC Log Index" ]
+        , nav_ [class_ $ pack "pagination"
+              , textProp "role" $ pack "navigation"
+              , textProp "aria-label" $ pack "pagination"
+              ] [
+
+            a_  [class_ $ pack "pagination-previous", clickGoto $ pager-1] [text "Previous"]
+          , a_  [class_ $ pack "pagination-next", clickGoto $ pager+1] [text "Next Page"]
+          , ul_  [class_ $ pack "pagination-list"] [
+            pagLink      0
+          , pagDots
+          , pagLink    $ pager - 2
+          , pagLink    $ pager - 1
+          , pagCurrent $ pager + 0
+          , pagLink    $ pager + 1
+          , pagLink    $ pager + 2
+          , pagDots
+          , pagLink      151275
+          ]
+          ]
         ,
            case info of
           Nothing -> div_ [] [ text $ pack "Loading ...." ]
