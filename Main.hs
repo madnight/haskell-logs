@@ -21,7 +21,6 @@ import           Network.URI                          ( parseURI
                                                       , pathSegments
                                                       )
 
-import Text.Printf
 import           Data.Proxy
 import           Servant.API                   hiding (GET)
 import           Data.List                            (isInfixOf)
@@ -32,12 +31,14 @@ import           Data.Maybe
 import           GHC.Generics
 import           JavaScript.Web.XMLHttpRequest
 import           Miso                          hiding (defaultOptions)
-import           Miso.String                   hiding (last, splitAt, isInfixOf)
+import           Miso.String                   hiding (tail, last, splitAt, isInfixOf)
 import           Prelude                       hiding (head, concat, unwords)
 import           Control.Monad
 
 replaceAtIndex n item ls = a ++ (item:b)
     where (a, (_:b)) = splitAt n ls
+
+maxIndexSize = 151275
 
 -- | Model
 data Model =
@@ -104,22 +105,45 @@ updateModel NoOp m =
   noEff m
 
 clickGoto :: Integer -> Attribute Action
-clickGoto = onClick . goto . ("/haskell-logs/index/" ++) . show
+clickGoto index | index < 0 = onClick NoOp
+                | index > maxIndexSize = onClick NoOp
+                | otherwise = onClick $ goto $ "/haskell-logs/index/" ++ show index
+
+{- clickGoto :: Integer -> Attribute Action -}
+{- clickGoto index = onClick $ goto $ "/haskell-logs/index/" ++ show index -}
+
 
 pagLink :: Integer -> View Action
 pagLink index | index < 0 = div_ [] []
-              | index > 151275 = div_ [] []
+              | index > maxIndexSize = div_ [] []
               | otherwise =  li_ [clickGoto index]
                     [a_ [class_ $ pack "pagination-link"
                        , textProp "aria-label" $ pack ""
                        ] [text . pack $ show index]]
 
-pagDots :: View Action
-pagDots = li_ [] [span_ [class_ $ pack "pagination-ellipsis" ] [text $ pack "..."]]
+
+pagLinkLeft index p | index < 3 = div_ [] []
+                    | otherwise = pagLink p
+
+pagLinkRight index p | index > (maxIndexSize-3) = div_ [] []
+                     | otherwise = pagLink p
+
+
+pagDotsLeft index | index < 3 = div_ [] []
+                  | otherwise = li_ [] [span_ [class_ $ pack "pagination-ellipsis" ] [text $ pack "..."]]
+
+pagDotsRight index | index > maxIndexSize-3 = div_ [] []
+                   | otherwise = li_ [] [span_ [class_ $ pack "pagination-ellipsis" ] [text $ pack "..."]]
 
 pagCurrent :: Integer -> View Action
 pagCurrent index = i_ [] [a_ [class_ $ pack "pagination-link is-current", textProp "aria-label" $ pack "", textProp "aria-current" $ pack "page"] [text . pack $ show index]]
 
+
+pagPrevNext True index a b = a_  [class_ $ pack a , clickGoto index, disabled_ True] [text b]
+pagPrevNext False index a b = a_  [class_ $ pack a , clickGoto index] [text b]
+
+pagPrev index = pagPrevNext (index < 0) index "pagination-previous" "Previous"
+pagNext index = pagPrevNext (index > maxIndexSize) index "pagination-next" "Next Page"
 
 
 -- | View function, with routing
@@ -144,18 +168,19 @@ viewModel model@Model {..}
               , textProp "aria-label" $ pack "pagination"
               ] [
 
-            a_  [class_ $ pack "pagination-previous", clickGoto $ pager-1] [text "Previous"]
-          , a_  [class_ $ pack "pagination-next", clickGoto $ pager+1] [text "Next Page"]
-          , ul_  [class_ $ pack "pagination-list"] [
-            pagLink      0
-          , pagDots
-          , pagLink    $ pager - 2
-          , pagLink    $ pager - 1
-          , pagCurrent $ pager + 0
-          , pagLink    $ pager + 1
-          , pagLink    $ pager + 2
-          , pagDots
-          , pagLink      151275
+            pagPrev $ pager - 1
+          , pagNext $ pager + 1
+          , ul_  [class_ $ pack "pagination-list"]
+          [
+            pagLinkLeft     pager 0
+          , pagDotsLeft     pager
+          , pagLink       $ pager - 2
+          , pagLink       $ pager - 1
+          , pagCurrent    $ pager + 0
+          , pagLink       $ pager + 1
+          , pagLink       $ pager + 2
+          , pagDotsRight    pager
+          , pagLinkRight    pager maxIndexSize
           ]
           ]
         ,
@@ -165,7 +190,7 @@ viewModel model@Model {..}
             div_ [] [
                br_ [] []
                , th_ [] [ text
-               $ pack ("Index Entries [" ++ show (pager * 100)  ++ ".." ++ (show ((pager * 100) + 100)) ++ "] ")]
+               $ pack ("Log Entries [" ++ show (pager * 100)  ++ ".." ++ (show ((pager * 100) + 100)) ++ "] ")]
                , th_ [] [ text $ ""]
                , table_ [ class_ $ pack "table is-striped" ] [
                  thead_ [] [td_ [] [i] | i <- ["Date", "Time", "User", "Post"]]
@@ -217,12 +242,13 @@ viewModel model@Model {..}
 pattern EnterButton :: KeyCode
 pattern EnterButton = KeyCode 13
 
-results_ :: [[MisoString]] -> [View action]
-results_ (x:xs) = tr_ [] (tdd $ ircName x) : results_ xs
+results_ :: [[MisoString]] -> [View Action]
+results_ ((a:b:c:d:e):xs) = tr_ [clickGoto ((read (fromMisoString a) :: Integer) `div` 100)] (tdd $ fromatRow (a:b:c:d:e)) : results_ xs
+{- results_ ((a:b:c:d:e):xs) = tr_ [clickGoto 50] (tdd $ fromatRow (a:b:c:d:e)) : results_ xs -}
 results_ _ = []
 
-ircName :: [MisoString] -> [MisoString]
-ircName (a:b:c:d) = a : b : concat ["<", c, ">"] : d
+fromatRow :: [MisoString] -> [MisoString]
+fromatRow (a:b:c:d:e) = b : c : concat ["<", d, ">"] : e
 
 tdd :: [MisoString] -> [View action]
 tdd (x:xs) = td_ [] [text $ x] : tdd xs
@@ -246,7 +272,7 @@ getGitHubAPIInfo q = do
     Right j -> pure j
   where
     req = Request { reqMethod = GET
-                  , reqURI = pack $ "https://logs.beuke.org/irc-logs-b0881a8.json?sql=select+*+from+db+where+" ++ (fromMisoString q)
+                  , reqURI = pack $ "https://logs.beuke.org/irc-logs-b0881a8.json?sql=select+cast%28rowid+as+text%29%2C+*+from+db+where+" ++ (fromMisoString q)
                   , reqLogin = Nothing
                   , reqHeaders = []
                   , reqWithCredentials = False
