@@ -31,18 +31,25 @@ import           Data.Maybe
 import           GHC.Generics
 import           JavaScript.Web.XMLHttpRequest
 import           Miso                          hiding (defaultOptions)
-import           Miso.String                   hiding (tail, last, splitAt, isInfixOf)
+import           Miso.String                   hiding (null, index, tail, last, splitAt, isInfixOf)
 import           Prelude                       hiding (head, concat, unwords)
 import           Control.Monad
+
+import GHCJS.Types
+import GHCJS.Foreign.Callback
 
 replaceAtIndex n item ls = a ++ (item:b)
     where (a, (_:b)) = splitAt n ls
 
 maxIndexSize = 151275
 
+foreign import javascript unsafe "setTimeout(function(){document.getElementById($1) ? document.getElementById($1).scrollIntoView() : null;}, 500);"
+   scrollIntoView :: JSString -> IO ()
+
 -- | Model
 data Model =
   Model { info  :: Maybe APIInfo
+        , index :: Maybe APIInfo
         , uri   :: URI
          -- ^ current URI of application
         , query :: MisoString
@@ -53,6 +60,8 @@ data Action
   = FetchGitHub MisoString
   | SetGitHub APIInfo
   | SetQuery MisoString
+  | FetchIndex MisoString
+  | SetIndex APIInfo
   | HandleURI URI
   | ChangeURI URI
   | NoOp
@@ -65,7 +74,7 @@ main = do
    currentURI <- getCurrentURI
    print currentURI
    startApp
-           App { model = Model { info = Nothing, query = "", uri = currentURI }
+           App { model = Model { info = Nothing, index = Nothing, query = "", uri = currentURI }
                , initialAction = NoOp
                , mountPoint = Nothing
                , ..
@@ -80,6 +89,12 @@ main = do
 
 -- | Update your model
 updateModel :: Action -> Model -> Effect Action Model
+
+updateModel (FetchIndex s) m = m <# do
+  SetIndex <$> getGitHubAPIInfo (query m)
+
+updateModel (SetIndex apiInfo) m =
+  noEff m { index = Just apiInfo }
 
 updateModel (FetchGitHub s) m = m <# do
   SetGitHub <$> getGitHubAPIInfo (query m)
@@ -96,8 +111,15 @@ updateModel (ChangeURI u) m = m <# do
 
 updateModel (HandleURI u) m = m { uri = u } <# do
   let pager = read (last $ pathSegments u) :: Integer
-  if ("index" `isInfixOf` show u) then
-   SetGitHub <$> getGitHubAPIInfo ((toMisoString $ "rowid+%3E+" ++ show (pager * 100)++ "+AND+rowid+%3C+" ++ show (((pager * 100) + 100))))
+  let anchor = uriFragment u
+  if ("index" `isInfixOf` show u) then do
+   x <- SetIndex <$> getGitHubAPIInfo ((toMisoString $ "rowid+%3E+" ++ show (pager * 100)++ "+AND+rowid+%3C+" ++ show (((pager * 100) + 100))))
+   if (not . null $ anchor) then do
+       scrollIntoView $ toMisoString (tail anchor) 
+       pure x
+     else pure x
+   pure x
+   {- pure NoOp -}
   else
    pure NoOp
 
@@ -109,8 +131,8 @@ clickGoto index | index < 0 = onClick NoOp
                 | index > maxIndexSize = onClick NoOp
                 | otherwise = onClick $ goto $ "/haskell-logs/index/" ++ show index
 
-{- clickGoto :: Integer -> Attribute Action -}
-{- clickGoto index = onClick $ goto $ "/haskell-logs/index/" ++ show index -}
+clickGoto' :: String -> Attribute Action
+clickGoto' str = onClick $ goto $ "/haskell-logs/index/" ++ str
 
 
 pagLink :: Integer -> View Action
@@ -156,6 +178,8 @@ viewModel model@Model {..}
     url = uriparser . parseURI
     pager = read (last $ pathSegments uri) :: Integer
 
+    onLoaded action = on "onload" emptyDecoder $ \() -> action
+
     about = div_ [ style_ $ M.fromList [
                   (pack "text-align", pack "center")
                 , (pack "margin", pack "50px")
@@ -184,7 +208,7 @@ viewModel model@Model {..}
           ]
           ]
         ,
-           case info of
+           case index of
           Nothing -> div_ [] [ text $ pack "Loading ...." ]
           Just APIInfo{..} ->
             div_ [] [
@@ -194,7 +218,7 @@ viewModel model@Model {..}
                , th_ [] [ text $ ""]
                , table_ [ class_ $ pack "table is-striped" ] [
                  thead_ [] [td_ [] [i] | i <- ["Date", "Time", "User", "Post"]]
-               , tbody_ [] $ results_ rows
+               , tbody_ [onLoaded $ HandleURI uri ] $ results_ rows
                  ]
                ]
             ]
@@ -211,9 +235,7 @@ viewModel model@Model {..}
                ] [
         h1_ [class_ $ pack "title" ] [ text $ pack "Haskell IRC Log Search" ]
 
-      , input_ attrs [
-          text $ pack ""
-          ]
+      , input_ attrs [ text $ pack "" ]
 
       , case info of
           Nothing -> div_ [] [ text $ pack "" ]
@@ -242,8 +264,11 @@ viewModel model@Model {..}
 pattern EnterButton :: KeyCode
 pattern EnterButton = KeyCode 13
 
+pager :: MisoString -> String
+pager x = show ((read (fromMisoString x) :: Integer) `div` 100) ++ "#" ++ (fromMisoString x)
+
 results_ :: [[MisoString]] -> [View Action]
-results_ ((a:b:c:d:e):xs) = tr_ [clickGoto ((read (fromMisoString a) :: Integer) `div` 100)] (tdd $ fromatRow (a:b:c:d:e)) : results_ xs
+results_ ((a:b:c:d:e):xs) = tr_ [id_ (fromMisoString a), clickGoto' $ pager a] (tdd $ fromatRow (a:b:c:d:e)) : results_ xs
 {- results_ ((a:b:c:d:e):xs) = tr_ [clickGoto 50] (tdd $ fromatRow (a:b:c:d:e)) : results_ xs -}
 results_ _ = []
 
