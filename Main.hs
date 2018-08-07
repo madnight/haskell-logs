@@ -94,7 +94,11 @@ updateModel (ChangeURI u) m = m <# do
   pure NoOp
 
 updateModel (HandleURI u) m = m { uri = u } <# do
-  pure NoOp
+  let pager = read (last $ pathSegments u) :: Integer
+  if ("index" `isInfixOf` show u) then 
+   SetGitHub <$> getGitHubAPIInfo ((toMisoString $ "rowid+%3E+" ++ show (pager * 100)++ "+AND+rowid+%3C+" ++ show (((pager * 100) + 100))))
+  else 
+   pure NoOp
 
 updateModel NoOp m =
   noEff m
@@ -103,11 +107,15 @@ updateModel NoOp m =
 -- | View function, with routing
 viewModel :: Model -> View Action
 viewModel model@Model {..}
-    | "about" `isInfixOf` show uri = about
+    | "index" `isInfixOf` show uri = about
     | otherwise = view
   where
+
+    pag = read (last $ pathSegments uri) :: Integer
     url = uriparser . parseURI
     pager = read (last $ pathSegments uri) :: Integer
+
+    onClick' action = on "click" emptyDecoder $ \() -> action
 
     about = div_ [ style_ $ M.fromList [
                   (pack "text-align", pack "center")
@@ -115,13 +123,15 @@ viewModel model@Model {..}
                 ]
                ] [
 
-        h1_ [class_ $ pack "title" ] [ text $ pack "Haskell IRC Log Search" ]
+        h1_ [class_ $ pack "title" ] [ text $ pack "Haskell IRC Log Index" ]
         ,
            case info of
-          Nothing -> div_ attrs [ text $ pack "ABC" ]
+          Nothing -> div_ [] [ text $ pack "Loading ...." ]
           Just APIInfo{..} ->
             div_ [] [
                br_ [] []
+               , th_ [] [ text
+               $ pack ("Index Entries [" ++ show (pager * 100)  ++ ".." ++ (show ((pager * 100) + 100)) ++ "] ")]
                , th_ [] [ text $ ""]
                , table_ [ class_ $ pack "table is-striped" ] [
                  thead_ [] [td_ [] [i] | i <- ["Date", "Time", "User", "Post"]]
@@ -129,15 +139,6 @@ viewModel model@Model {..}
                  ]
                ]
             ]
-
-      where
-        attrs = [ onClick $ FetchGitHub "  "
-                , onMouseOver $ SetQuery (toMisoString $ "rowid+%3E+" ++ show pager ++ "+AND+rowid+%3C+" ++ show ((pager + 100)))
-                , autofocus_ True
-                , class_ $ pack "button is-large is-outlined"
-                ] ++ [ disabled_ False | isJust info ]
-
-
 
     the404 = div_ [] [
             text "the 404 :("
@@ -173,7 +174,7 @@ viewModel model@Model {..}
         attrs = [ onKeyDown $ \case
           EnterButton -> FetchGitHub "  "
           _           -> NoOp
-                , onInput (\x -> SetQuery $ toMisoString $ "post+like+%22%25" ++ (printf "%s" (show x) :: String) ++ "%25%22+limit+14")
+                , onInput (\x -> SetQuery $ toMisoString $ "post+like+%22%25" ++ (fromMisoString x :: String) ++ "%25%22+limit+14")
                 , autofocus_ True
                 , class_ $ pack "button is-large is-outlined"
                 ] ++ [ disabled_ False | isJust info ]
@@ -237,7 +238,7 @@ goto :: String -> Action
 goto = ChangeURI . uriparser . parseRelativeReference
 
 goAbout :: Action
-goAbout = goto "/haskell-logs/about"
+goAbout = goto "/haskell-logs/index"
 
 goHome  :: Action
 goHome = goto "/haskell-logs"

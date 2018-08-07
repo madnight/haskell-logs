@@ -44,6 +44,17 @@
   (major1) == 0 && (major2) == 9 && (minor) <= 0)
 #endif /* MIN_VERSION_aeson */
 
+/* package json-0.9.1 */
+#ifndef VERSION_json
+#define VERSION_json "0.9.1"
+#endif /* VERSION_json */
+#ifndef MIN_VERSION_json
+#define MIN_VERSION_json(major1,major2,minor) (\
+  (major1) <  0 || \
+  (major1) == 0 && (major2) <  9 || \
+  (major1) == 0 && (major2) == 9 && (minor) <= 1)
+#endif /* MIN_VERSION_json */
+
 /* package containers-0.5.6.3 */
 #ifndef VERSION_containers
 #define VERSION_containers "0.5.6.3"
