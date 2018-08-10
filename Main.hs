@@ -44,13 +44,13 @@ data Model =
 
 -- | Action
 data Action where
-    QueryAPI    :: Action
-    SetAPIResponse   :: APIResult    -> Action
-    SetQuery    :: M.MisoString -> Action
-    SetIndex    :: APIResult    -> Action
-    HandleURI   :: URI          -> Action
-    ChangeURI   :: URI          -> Action
-    NoOp        :: Action
+    QueryAPI       :: Action
+    SetAPIResponse :: APIResult    -> Action
+    SetQuery       :: M.MisoString -> Action
+    SetIndex       :: APIResult    -> Action
+    HandleURI      :: URI          -> Action
+    ChangeURI      :: URI          -> Action
+    NoOp           :: Action
   deriving (Show, Eq)
 
 data APIResult = APIResult
@@ -191,13 +191,13 @@ header s = h1_ [class_ $ M.pack "title"] [text $ M.pack s]
 pagination :: Model -> View Action
 pagination model@Model {..} =
   let pager = read (last $ pathSegments uri) :: Integer
-      if' p t f = if p then t else f
       pgNext = pgPrevNext "pagination-next" "Next Page" <*> (> maxIndexSize)
       pgPrev = pgPrevNext "pagination-previous" "Previous" <*> (< 0)
-      pgDotsRight i = if   i > maxIndexSize - 3 then emptyDiv else dots
-      pgLinkRight i = if' (i > (maxIndexSize - 3)) emptyDiv . pgLink
-      pgDotsLeft  i = if   i < 3 then emptyDiv else dots
-      pgLinkLeft  i = if' (i < 3) emptyDiv . pgLink
+      b ==> f = if b then f else emptyDiv
+      pgDotsRight i   = (i <= maxIndexSize - 3) ==> dots
+      pgLinkRight i p = (i <= maxIndexSize - 3) ==> pgLink p
+      pgDotsLeft  i   = (i >=                3) ==> dots
+      pgLinkLeft  i p = (i >=                3) ==> pgLink p
   in
     nav_
         [ class_ $ M.pack "pagination"
