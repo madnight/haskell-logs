@@ -9,7 +9,7 @@
 {-# LANGUAGE ScopedTypeVariables       #-}
 {-# LANGUAGE TypeFamilies              #-}
 {-# LANGUAGE TypeOperators             #-}
-{-# LANGUAGE PostfixOperators #-}
+{-# LANGUAGE PostfixOperators          #-}
 
 module Main where
 
@@ -188,7 +188,7 @@ notFound404 =
 
 headerStyle :: Attribute action
 headerStyle = style_ $ fromList
-            [("text-align", "center"), ("margin", "50px")]
+            [("text-align", "center")]
 
 buttonStyle :: Attribute action
 buttonStyle = style_ $ fromList
@@ -252,7 +252,7 @@ indexView model@Model {..} =
             ]
           , th_ [] []
           , table_
-            [class_ "table is-striped"]
+            [class_ "table"]
             [ thead_ [] [ td_ [] [i] | i <- ["Date", "Time", "User", "Post"]]
             , tbody_ [onLoaded $ HandleURI uri] $ results_ rows
             ]
@@ -274,7 +274,7 @@ searchInput model@Model {..} = input_ ([ onKeyDown $ \case
            ]
          )
        , autofocus_ True
-       , class_ "button is-large is-outlined"
+       , class_ "input"
        ] ++ [ disabled_ False | isJust searchResult ])
        [text ""]
 
@@ -291,8 +291,8 @@ searchView model@Model {..} =
       , if (null rows) then if loader then loadDiv_
         else text $ M.pack "No results found."
         else if loader then loadDiv_ else table_
-        [class_ "table is-striped"]
-        [ thead_ [] [ td_ [] [i] | i <- ["Date", "Time", "User", "Post"] ]
+        [class_ "table"]
+        [ thead_ [] [tr_ [] [td_ [] [i] | i <- ["Date", "Time", "User", "Post"] ] ]
         , tbody_ [] $ results_ rows
         ]
       ]
