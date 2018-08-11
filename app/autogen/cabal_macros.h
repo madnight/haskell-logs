@@ -220,15 +220,15 @@
   (major1) == 1 && (major2) == 24 && (minor) <= 0)
 #endif /* MIN_TOOL_VERSION_hscolour */
 
-/* tool pkg-config-1.5.2 */
+/* tool pkg-config-1.5.3 */
 #ifndef TOOL_VERSION_pkg_config
-#define TOOL_VERSION_pkg_config "1.5.2"
+#define TOOL_VERSION_pkg_config "1.5.3"
 #endif /* TOOL_VERSION_pkg_config */
 #ifndef MIN_TOOL_VERSION_pkg_config
 #define MIN_TOOL_VERSION_pkg_config(major1,major2,minor) (\
   (major1) <  1 || \
   (major1) == 1 && (major2) <  5 || \
-  (major1) == 1 && (major2) == 5 && (minor) <= 2)
+  (major1) == 1 && (major2) == 5 && (minor) <= 3)
 #endif /* MIN_TOOL_VERSION_pkg_config */
 
 /* tool runghc-7.10.3 */
