@@ -9,6 +9,7 @@
 {-# LANGUAGE ScopedTypeVariables       #-}
 {-# LANGUAGE TypeFamilies              #-}
 {-# LANGUAGE TypeOperators             #-}
+{-# LANGUAGE PostfixOperators #-}
 
 module Main where
 
@@ -25,7 +26,7 @@ import           Miso                          hiding (defaultOptions)
 import qualified Miso.String                   as M
 import           Network.URI                   hiding (query)
 
-foreign import javascript safe
+foreign import javascript unsafe
     " setTimeout(                             \
     \   function() {                          \
     \    var e = document.getElementById($1); \
@@ -36,6 +37,7 @@ foreign import javascript safe
 -- | Model
 data Model =
   Model { searchResult  :: Maybe APIResult
+        , loader        :: Bool
         , index         :: Maybe APIResult
         , uri           :: URI
          -- ^ current URI of application
@@ -53,11 +55,11 @@ data Action where
     NoOp           :: Action
   deriving (Show, Eq)
 
-data APIResult = APIResult
-  { database :: M.MisoString
-  , rows     :: [[M.MisoString]]
-  , query_ms :: Float
-  } deriving (Show, Eq, Generic)
+data APIResult =
+  APIResult { database :: M.MisoString
+            , rows     :: [[M.MisoString]]
+            , query_ms :: Float
+            } deriving (Show, Eq, Generic)
 
 instance FromJSON APIResult where
   parseJSON = genericParseJSON
@@ -70,6 +72,7 @@ main = do
    startApp App { model =
                     Model { searchResult = Nothing
                           , index = Nothing
+                          , loader = False
                           , query = ""
                           , uri = currentURI
                           }
@@ -88,8 +91,11 @@ main = do
 maxIndexSize :: Integer
 maxIndexSize = 151275
 
-fMS :: M.ToMisoString str => M.MisoString -> str
-fMS = M.fromMisoString
+(!) :: M.ToMisoString s => M.MisoString -> s
+(!) = M.fromMisoString
+
+p :: M.ToMisoString s => s -> M.MisoString
+p = M.toMisoString
 
 pattern EnterButton :: KeyCode
 pattern EnterButton = KeyCode 13
@@ -100,23 +106,23 @@ updateModel :: Action -> Model -> Effect Action Model
 updateModel (SetIndex apiInfo) m =
   noEff m { index = Just apiInfo }
 
-updateModel QueryAPI m = m <# do
+updateModel QueryAPI m = m { loader = True } <# do
   SetAPIResponse <$> queryLogDatabase (query m)
 
 updateModel (SetQuery q) m =
   noEff m { query = q }
 
 updateModel (SetAPIResponse apiInfo) m =
-  noEff m { searchResult = Just apiInfo }
+  noEff m { searchResult = Just apiInfo, loader = False }
 
 updateModel (ChangeURI u) m = m <# do
   pushURI u
   pure NoOp
 
 updateModel (HandleURI u) m = m { uri = u } <# do
-  let pager = read (last $ pathSegments u) :: Integer
+  let pager  = read (last $ pathSegments u) :: Integer
   let anchor = uriFragment u
-  let query = M.toMisoString $ intercalate "+"
+  let query  = p $ intercalate "+"
           ["rowid", ">"
           , show (pager * 100)
           , "AND"
@@ -126,7 +132,7 @@ updateModel (HandleURI u) m = m { uri = u } <# do
           ]
   if "index" `isInfixOf` show u then do
       result <- SetIndex <$> queryLogDatabase query
-      unless (null anchor) (scrollIntoView $ M.toMisoString (tail anchor))
+      unless (null anchor) (scrollIntoView (p $ tail anchor))
       pure result
   else
       pure NoOp
@@ -151,21 +157,21 @@ pgLink i
   | otherwise = li_
     [clickGoto i]
     [ a_
-        [class_ $ M.pack "pagination-link", textProp "aria-label" $ M.pack ""]
+        [class_ "pagination-link", textProp "aria-label" ""]
         [text . M.pack $ show i]
     ]
 
 dots :: View action
 dots = li_ [] [span_
-              [class_ $ M.pack "pagination-ellipsis" ]
-              [text $ M.pack "..."]]
+              [class_ "pagination-ellipsis" ]
+              [text "..."]]
 
 pgCurrent :: Integer -> View Action
 pgCurrent i = i_ []
   [ a_
-      [ class_ $ M.pack "pagination-link is-current"
-      , textProp "aria-label" $ M.pack ""
-      , textProp "aria-current" $ M.pack "page"
+      [ class_ "pagination-link is-current"
+      , textProp "aria-label" ""
+      , textProp "aria-current" "page"
       ]
       [text . M.pack $ show i]
   ]
@@ -181,12 +187,15 @@ notFound404 =
   [text "go home Y"]]
 
 headerStyle :: Attribute action
-headerStyle = style_ $ fromList [
-      (M.pack "text-align", M.pack "center")
-    , (M.pack "margin", M.pack "50px")]
+headerStyle = style_ $ fromList
+            [("text-align", "center"), ("margin", "50px")]
+
+buttonStyle :: Attribute action
+buttonStyle = style_ $ fromList
+           [("text-align", "left"), ("margin-bottom", "5px")]
 
 header :: String -> View action
-header s = h1_ [class_ $ M.pack "title"] [text $ M.pack s]
+header s = h1_ [class_ "title"] [text $ M.pack s]
 
 pagination :: Model -> View Action
 pagination model@Model {..} =
@@ -200,21 +209,21 @@ pagination model@Model {..} =
       pgLinkLeft  i p = (i >=                3) ==> pgLink p
   in
     nav_
-        [ class_ $ M.pack "pagination"
-        , textProp "role" $ M.pack "navigation"
-        , textProp "aria-label" $ M.pack "pagination"
+        [ class_ "pagination"
+        , textProp "role" "navigation"
+        , textProp "aria-label" "pagination"
         ]
         [ pgPrev $ pager - 1
         , pgNext $ pager + 1
         , ul_
-          [class_ $ M.pack "pagination-list"]
-          [ pgLinkLeft pager 0
-          , pgDotsLeft pager
-          , pgLink $ pager - 2
-          , pgLink $ pager - 1
+          [class_ "pagination-list"]
+          [ pgLinkLeft  pager 0
+          , pgDotsLeft  pager
+          , pgLink    $ pager - 2
+          , pgLink    $ pager - 1
           , pgCurrent $ pager + 0
-          , pgLink $ pager + 1
-          , pgLink $ pager + 2
+          , pgLink    $ pager + 1
+          , pgLink    $ pager + 2
           , pgDotsRight pager
           , pgLinkRight pager maxIndexSize
           ]
@@ -228,9 +237,10 @@ indexView model@Model {..} =
     div_
       [ headerStyle ]
       [ header "Haskell IRC Log Index"
+      , div_ [buttonStyle] [a_ [buttonStyle, class_ "button", onClick $ goto "/haskell-logs"] [text "Back to Search"]]
       , pagination model
       , case index of
-        Nothing             -> div_ [] [text $ M.pack "Loading ...."]
+        Nothing             -> div_ [] [text "Loading ...."]
         Just APIResult {..} -> div_ [] [ br_ [] [] , th_ []
             [ text $ M.pack
                 (  "Log Entries ["
@@ -242,7 +252,7 @@ indexView model@Model {..} =
             ]
           , th_ [] []
           , table_
-            [class_ $ M.pack "table is-striped"]
+            [class_ "table is-striped"]
             [ thead_ [] [ td_ [] [i] | i <- ["Date", "Time", "User", "Post"]]
             , tbody_ [onLoaded $ HandleURI uri] $ results_ rows
             ]
@@ -253,20 +263,20 @@ searchInput :: Model -> View Action
 searchInput model@Model {..} = input_ ([ onKeyDown $ \case
          EnterButton -> QueryAPI
          _           -> NoOp
-       , onInput (\x -> SetQuery $ M.toMisoString $ intercalate "+"
+       , onInput (\x -> SetQuery . p $ intercalate "+"
            [ "post"
            , "like"
            , "\"%"
-           , fMS x :: String
+           , (x!) :: String
            , "%\""
            , "limit"
            , "14"
            ]
          )
        , autofocus_ True
-       , class_ $ M.pack "button is-large is-outlined"
+       , class_ "button is-large is-outlined"
        ] ++ [ disabled_ False | isJust searchResult ])
-       [text $ M.pack ""]
+       [text ""]
 
 searchView :: Model -> View Action
 searchView model@Model {..} =
@@ -275,16 +285,19 @@ searchView model@Model {..} =
     [ header "Haskell IRC Log Search"
   , searchInput model
   , case searchResult of
-    Nothing             -> div_ [] [text $ M.pack ""]
-    Just APIResult {..} -> div_ [] [ br_ [] [] , th_ []
-        [text $ M.pack ("Search Results (" ++ show (round query_ms) ++ " ms)")]
-      , table_
-        [class_ $ M.pack "table is-striped"]
+    Nothing             -> if loader then loadDiv_ else emptyDiv
+    Just APIResult {..} -> div_ [] [ br_ [] [] , if not loader then th_ []
+        [text $ M.pack ("Search Results (" ++ show (round query_ms) ++ " ms)")] else emptyDiv
+      , if (null rows) then if loader then loadDiv_
+        else text $ M.pack "No results found."
+        else if loader then loadDiv_ else table_
+        [class_ "table is-striped"]
         [ thead_ [] [ td_ [] [i] | i <- ["Date", "Time", "User", "Post"] ]
         , tbody_ [] $ results_ rows
         ]
       ]
   ]
+  where loadDiv_ = div_ [class_ "loader", id_ "loader"] [text ""]
 
 viewModel :: Model -> View Action
 viewModel model@Model {..}
@@ -294,20 +307,14 @@ viewModel model@Model {..}
 results_ :: [[M.MisoString]] -> [View Action]
 results_ ((a:b:c:d:e):xs) =
  let formatRow (a:b:c:d:e) = b:c: M.concat ["<", d, ">"] :e
- in tr_ [id_ (fMS a), clickGoto' $ pager a]
+ in tr_ [id_ (a!), clickGoto' $ pager a]
       (tdd $ formatRow (a:b:c:d:e))
     : results_ xs
  where
-   pager s = show ((read (fMS s) :: Integer) `div` 100) ++ "#" ++ fMS s
+   pager s = show ((read (s!) :: Integer) `div` 100) ++ "#" ++ (s!)
    tdd (x:xs) = td_ [] [text x] : tdd xs
    tdd _      = []
 results_ _ = []
-
-parseURI :: String -> URI
-parseURI =  uriparser . parseRelativeReference
- where
-   uriparser (Just x) = x
-   uriparser Nothing = error "404"
 
 goto :: String -> Action
 goto = ChangeURI . uriparser . parseRelativeReference
@@ -336,7 +343,7 @@ queryLogDatabase q = do
       , "from"
       , "db"
       , "where"
-      , fMS q
+      , (q!)
       ]
     , reqLogin           = Nothing
     , reqHeaders         = []
