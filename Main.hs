@@ -122,14 +122,9 @@ updateModel (ChangeURI u) m = m <# do
 updateModel (HandleURI u) m = m { uri = u } <# do
   let pager  = read (last $ pathSegments u) :: Integer
   let anchor = uriFragment u
-  let query  = p $ intercalate "+"
-          ["rowid", ">"
-          , show (pager * 100)
-          , "AND"
-          , "rowid"
-          , "<"
-          , show (pager * 100 + 100)
-          ]
+  let query  = p $ queryReplace
+                <$> "rowid > " ++ show (pager * 100) ++ "AND rowid <" ++
+                                 show (pager * 100  + 100)
   if "index" `isInfixOf` show u then do
       result <- SetIndex <$> queryLogDatabase query
       unless (null anchor) (scrollIntoView (p $ tail anchor))
@@ -158,7 +153,7 @@ pgLink i
     [clickGoto i]
     [ a_
         [class_ "pagination-link", textProp "aria-label" ""]
-        [text . M.pack $ show i]
+        [text . p $ show i]
     ]
 
 dots :: View action
@@ -173,13 +168,13 @@ pgCurrent i = i_ []
       , textProp "aria-label" ""
       , textProp "aria-current" "page"
       ]
-      [text . M.pack $ show i]
+      [text . p $ show i]
   ]
 
 pgPrevNext :: String -> M.MisoString -> Integer -> Bool -> View Action
 pgPrevNext a b i True =
-  a_ [class_ $ M.pack a, clickGoto i, disabled_ True] [text b]
-pgPrevNext a b i False = a_ [class_ $ M.pack a, clickGoto i] [text b]
+  a_ [class_ $ p a, clickGoto i, disabled_ True] [text b]
+pgPrevNext a b i False = a_ [class_ $ p a, clickGoto i] [text b]
 
 notFound404 :: View Action
 notFound404 =
@@ -195,7 +190,7 @@ buttonStyle = style_ $ fromList
            [("text-align", "left"), ("margin-bottom", "5px")]
 
 header :: String -> View action
-header s = h1_ [class_ "title"] [text $ M.pack s]
+header s = h1_ [class_ "title"] [text $ p s]
 
 pagination :: Model -> View Action
 pagination model@Model {..} =
@@ -237,12 +232,14 @@ indexView model@Model {..} =
     div_
       [ headerStyle ]
       [ header "Haskell IRC Log Index"
-      , div_ [buttonStyle] [a_ [buttonStyle, class_ "button", onClick $ goto "/haskell-logs"] [text "Back to Search"]]
+      , div_ [buttonStyle] [a_ [buttonStyle, class_ "button"
+                           , onClick $ goto "/haskell-logs"]
+                           [text "Back to Search"]]
       , pagination model
       , case index of
         Nothing             -> div_ [] [text "Loading ...."]
         Just APIResult {..} -> div_ [] [ br_ [] [] , th_ []
-            [ text $ M.pack
+            [ text $ p
                 (  "Log Entries ["
                 ++ show (pager * 100)
                 ++ ".."
@@ -263,16 +260,8 @@ searchInput :: Model -> View Action
 searchInput model@Model {..} = input_ ([ onKeyDown $ \case
          EnterButton -> QueryAPI
          _           -> NoOp
-       , onInput (\x -> SetQuery . p $ intercalate "+"
-           [ "post"
-           , "like"
-           , "\"%"
-           , (x!) :: String
-           , "%\""
-           , "limit"
-           , "14"
-           ]
-         )
+       , onInput (\x -> SetQuery . p $ fmap queryReplace
+            "post like \"% " ++ ((x!) :: String) ++ " %\" limit 14")
        , autofocus_ True
        , class_ "input"
        ] ++ [ disabled_ False | isJust searchResult ])
@@ -286,13 +275,19 @@ searchView model@Model {..} =
   , searchInput model
   , case searchResult of
     Nothing             -> if loader then loadDiv_ else emptyDiv
-    Just APIResult {..} -> div_ [] [ br_ [] [] , if not loader then th_ []
-        [text $ M.pack ("Search Results (" ++ show (round query_ms) ++ " ms)")] else emptyDiv
-      , if (null rows) then if loader then loadDiv_
-        else text $ M.pack "No results found."
-        else if loader then loadDiv_ else table_
+    Just APIResult {..} ->
+        div_ [] [ br_ [] [] , if not loader then th_ []
+        [text $ p ("Search Results (" ++ show (round query_ms) ++ " ms)")]
+        else emptyDiv
+      , if null rows then
+           if loader then loadDiv_
+           else text $ M.pack "No results found."
+        else if loader then
+           loadDiv_
+        else table_
         [class_ "table"]
-        [ thead_ [] [tr_ [] [td_ [] [i] | i <- ["Date", "Time", "User", "Post"] ] ]
+        [ thead_ [] [tr_ [] [td_ [] [i]
+                    | i <- ["Date", "Time", "User", "Post"]]]
         , tbody_ [] $ results_ rows
         ]
       ]
@@ -322,6 +317,10 @@ goto = ChangeURI . uriparser . parseRelativeReference
    uriparser (Just x) = x
    uriparser Nothing = error "404"
 
+queryReplace :: Char -> Char
+queryReplace ' ' = '+'
+queryReplace  c   = c
+
 queryLogDatabase :: M.MisoString -> IO APIResult
 queryLogDatabase q = do
   Just resp <- contents <$> xhrByteString req
@@ -333,18 +332,8 @@ queryLogDatabase q = do
   dataset = "irc-logs-b0881a8.json?sql="
   req     = Request
     { reqMethod          = GET
-    , reqURI             = M.pack $ baseUrl ++ dataset ++ intercalate
-      "+"
-      [ "select"
-      , "cast(rowid"
-      , "as"
-      , "text),"
-      , "*"
-      , "from"
-      , "db"
-      , "where"
-      , (q!)
-      ]
+    , reqURI             = M.pack $ baseUrl ++ dataset ++ fmap queryReplace
+      "select cast(rowid as text), * from db where " ++ (q!)
     , reqLogin           = Nothing
     , reqHeaders         = []
     , reqWithCredentials = False
