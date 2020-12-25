@@ -1,0 +1,1279 @@
+00:24:46 <ozone> earthy: whdn do you plan to actually publish the HC&A report? ;)
+00:24:55 <ozone> (i'm wondering how much time I have to document this library ...)
+01:11:15 <skew> bluejay: are you still about?
+01:18:36 <skew> hi JaffaCake 
+01:18:41 <JaffaCake> mornin'
+01:18:53 <skew> not hereabouts ;)
+01:19:10 <JaffaCake> ah well :)
+01:19:13 <skew> well, technically I suppose.
+01:19:57 <skew> what have you been working on lately?
+01:20:27 <JaffaCake> GHC's backend mostly, and the library infrastructure
+01:20:40 <skew> how is the library infrastructure coming along?
+01:20:48 <JaffaCake> indeedy
+01:21:03 <JaffaCake> very well, we're hoping to have a prototype soon
+01:21:10 <skew> judging from distutils it will be very useful
+01:21:18 <JaffaCake> and there is a document describing the design we're going to put up for comments
+01:22:52 <skew> I've been thinking about garbage collection between languages lately
+01:23:04 <JaffaCake> oh?
+01:23:14 <skew> cycles will be a pain to handle (as usual)
+01:23:39 <JaffaCake> yes, definitely
+01:26:53 <skew> I'm wondering if I could do it with support just from Haskell for getting the list of ForeignPtrs reachable from a given StableName, and the Python collectors support for letting you define the notion of reachability for an object
+01:28:13 <JaffaCake> So.... you want something of type StablePtr -> IO [ForeignPtr]?
+01:28:21 <skew> something like that
+01:28:28 <JaffaCake> sounds hard to implement
+01:28:32 <skew> it might be exposed as a C function instead
+01:29:27 <skew> well, I think that's the minimal information another garbage collector needs to correctly handle things passed in from Haskell
+01:29:28 <JaffaCake> you kind of want to do a GC with a single StablePtr as the root
+01:30:07 <JaffaCake> how about just a list of all the reachable ForeignPtrs?
+01:30:18 <skew> that doesn't deal with cycles
+01:30:23 <JaffaCake> I know :-P
+01:31:27 <skew> I've already got finalizers so StablePtrs are freed if the Python object wrapping them dies, and Python objects have their reference count decremented if the ForeignPtr to them dies
+01:31:42 <JaffaCake> right
+01:32:16 <JaffaCake> so to detect a cycle, you need to know references from StablePtrs to ForeignPtrs
+01:32:25 <skew> the semantics work out correctly if you make serveral stablePtrs to an object and independantly free them, right?
+01:32:33 <JaffaCake> yes
+01:32:42 <skew> I don't even know why I bother asking
+01:33:48 <skew> another alternative would be getting both languages running under a common GC, I suppose
+01:33:57 <JaffaCake> I have the feeling that the only way to GC cycles is to do simultaneous GC in both languages
+01:34:55 <skew> moreover, each garbage collector needs to at least be able to determine reachability among objects shared with the other language, in that language's heap
+01:35:39 <skew> Hacking Python and Haskell to use the same RTS isn't really feasible
+01:35:42 <bluejay> skew: yeah
+01:35:44 <earthy> the latter is necessary, the first is too strong a condition, if I think about it correctly.
+01:36:21 <skew> I don't think there is much point in collecting half a cycle.
+01:36:30 <skew> bluejay: how did the MonadST stuff work out?
+01:37:10 <earthy> skew: you'd have killed the cycleness of the cycle.
+01:37:24 <bluejay> It seems to be working. I'm using the class line "class Monad m => MonadST s m | m->s"
+01:37:29 <skew> earthy: Ah, yes. That's enough for reference counting in the other language
+01:37:38 <skew> earthy: I was thinking something like Haskell interfacing with C.
+01:37:43 * earthy nods
+01:37:59 <earthy> I've actually been thinking and reading up on the subject as a hobby
+01:38:05 <earthy> trying to implement Algol68. :)
+01:38:06 <JaffaCake> you can run the two collectors as co-routines, keep going until no more reachable objects can be found
+01:38:11 <skew> A common GC for everything might work as an OS service, though
+01:38:18 <bluejay> skew: I'm thinking of putting my definition in the MonadTrans page on the Wiki. Is that a good idea?
+01:38:23 <skew> bluejay: sure
+01:38:32 <earthy> jaffacake: actually, running the collectors *and* the main tasks as coroutines is possible
+01:38:41 <earthy> now, where's that reference
+01:39:20 <skew> JaffaCake: the interface would have to be a bit wierd, going through C
+01:39:22 <JaffaCake> earthy: in theory yes, in practice GHC's garbage collector isn't incremental
+01:39:27 <earthy> there we go. `On-the-fly garbage collection: an exercise in cooperation' by Dijkstra, Lamport, Martin, Scholten and Steffens
+01:39:52 <JaffaCake> ah yes, that sounds familiar
+01:40:20 <earthy> jaffacake: but it could be seen as a garbage producer from the vantage point of the other collector
+01:41:04 <JaffaCake> a garbage producer?
+01:41:05 <skew> earthy: that sort of assumes the collector can trace through the heap
+01:41:15 <earthy> skew: yes.
+01:41:19 <skew> through the other heap that is, which is begging the question
+01:41:43 <skew> which was how to organize this cooperative traversal
+01:41:46 <earthy> jaffacake: yes, it makes the heap dirty, in a sense, while it's working.
+01:41:47 <JaffaCake> skew: I don't think you need that
+01:42:27 <JaffaCake> each GC produces a list of live references in the other heap, and you keep running each GC in turn until no new live references can be found
+01:43:16 <skew> I see one of 1) each GC uses the other as a subroutine in reachability 2) you don't collect cycles
+01:43:19 <earthy> but that's what skew was asking for right? a way of getting a list of live references from the other heap?
+01:44:02 <JaffaCake> well yes, but it doesn't mean you have to know anything about the other heap's representation, or how to trace through it
+01:44:13 <earthy> true
+01:44:15 <skew> earthy: nah, that's already handled, by StablePtr and the like
+01:44:36 * earthy nods
+01:44:54 <skew> GC's that let you wrap up references for objects to pass out seem to gernally add that as a root, until the other side calls some free function you also export
+01:45:05 <JaffaCake> in the co-routine GC, a StablePtr wouldn't be considered automatically live
+01:45:17 <skew> JaffaCake: you mean co-routining for tracing?
+01:45:25 <JaffaCake> yes
+01:46:15 <skew> the idea is GC A marks, co-routining into B, then B runs co-routining into A, then both collect stuff that isn't marked
+01:46:33 <earthy> sounds about right
+01:46:37 <JaffaCake> yep
+01:47:00 <skew> that should work. Now we just need to get at least two languages to export that interface
+01:47:36 <JaffaCake> I can help you with GHC :)
+01:48:03 <skew> one problem is going to be expressing coroutines in a C-based FFI
+01:48:27 <earthy> skew: that problem is solved by the Python runtime already, isn't it?
+01:48:55 <skew> maybe
+01:49:10 <skew> I don't know how generators are implemented in the main interpreter
+01:49:27 <skew> I know somebody did go to the trouble of writing Stackless (with heap allocated stack frames)
+01:51:30 <earthy> well, generators are called from C using the iterator protocol...
+01:53:39 <skew> it's not really free coroutining, though
+01:53:49 <earthy> indeed
+01:54:10 <earthy> otoh, you could do free coroutining if that same protocol were exported from GHC's GC
+01:54:16 <earthy> or something much like it
+01:54:28 <earthy> `do until the next coroutine call needs to be made'
+01:54:43 <skew> that doesn't work if each GC will call the other whenever it hits a foriegn reference
+01:54:45 <earthy> and then thread the calls manually using a loop.
+01:55:05 <earthy> no, but it does if it yields when it hits a foreign ref
+01:55:10 <skew> Oh, returning a poitner to the next function to call would work
+02:05:27 <shapr> good morning #haskell!
+02:05:35 <skew> hi shapr
+02:05:38 <darius-> good morning
+02:05:54 <JaffaCake> hi shapr
+02:06:05 <darius-> re this discussion, you guys might look into what's been done in distributed GC
+02:06:28 * darius- is pretty ignorant about that, though
+02:08:19 * shapr reads the buffer
+02:09:33 <shapr> I've heard that distributed GC would let GHC use multiple CPUs at once.
+02:10:01 <JaffaCake> there is an implementation of GHC with distributed GC - it is called GPH
+02:10:27 <JaffaCake> been around for a long time, but not always up to date with the latest GHC developments
+02:12:47 <shapr> I should investigate that sometime.
+02:23:05 <shapr> looks like 4.06 is the GpH version
+02:23:35 <shapr> GdH has a 5.00 version
+02:23:45 <JaffaCake> I know they have later versions than that
+02:23:52 <JaffaCake> perhaps they aren't as stable, though
+02:24:48 * shapr looks more
+02:26:37 <shapr> oh, I have a fun GHC question, is there some way to limit GHCi to not doing anything unsafe so that I could plug it into lambdabot?
+02:27:39 <bluejay> What's the function called that will iterate backwards through a [a->a], calling the functions on the result so far? Kind of a simpler foldr
+02:28:17 <shapr> scanr? iterate?
+02:28:26 <skew> how about mconcat?
+02:28:42 <earthy> backwards. :)
+02:28:44 <skew> instance Monoid (a->a), with composition as the operation
+02:29:01 <skew> mconcat [f1,f2,f3] x = f1 (f2 (f3 x))
+02:29:04 <skew> is that what you want?
+02:29:14 <bluejay> yes, mconcat is it. :)
+02:29:16 <bluejay> thanks
+02:34:55 * earthy is slowly starting to become an `initiated reader'
+02:35:27 <earthy> man, the Haskell report is starting to seem positively informal
+02:35:40 <shapr> wow
+02:36:17 <bluejay> shapr: Prefix all commands with "let blah=", so that people can't execute anything in the IO monad?
+02:36:29 <shapr> oh, when's the due date for HC&AR submissions?
+02:36:34 <earthy> today.
+02:36:39 <shapr> oh!
+02:36:46 * shapr writes quickly
+02:36:47 <shrimpx> start writing
+02:36:49 <skew> bluejay: let blah = unsafePerformIO (deleteHardDrive)
+02:36:50 <shrimpx> :)
+02:37:16 <earthy> nah, you can't get money by deleting a drive's contents
+02:37:30 <skew> okay mailShaprsCreditCardNumberToMe
+02:37:32 <earthy> let blah = unsafePerformIO (installBotnet)
+02:38:22 <simon-> out of curiousity, are there any computer programming dictionaries available? I have learned a great deal of terminology since starting out with these functional languages as apparently, a great deal of theory lies behind them.
+02:38:26 <skew> you can control that by limiting the imported modules, though
+02:38:35 <earthy> simon-: foldoc
+02:38:45 <shapr> @foldoc redex
+02:38:47 <lambdabot> *** "redex" foldoc "The Free On-line Dictionary of Computing (27 SEP 03
+02:38:47 <lambdabot> "
+02:38:47 <lambdabot> redex
+02:38:47 <lambdabot>      
+02:38:48 <lambdabot>         Reducible Expression.  An expression matching the left hand
+02:38:50 <lambdabot>         side of a {reduction rule} or definition.
+02:38:53 <lambdabot>      
+02:38:54 <lambdabot>      
+02:39:03 <simon-> cool, thanks!
+02:39:12 <skew> earthy: I always thought the report was pretty readable
+02:39:15 <shapr> that should trim blank lines
+02:39:30 <shrimpx> and skip the foldoc header
+02:39:41 <shapr> yes
+02:40:00 <earthy> skew: it is, but it always seemed reasonably formal in spite of the readability
+02:40:19 <earthy> now that I'm getting into the Algol 68 report I see how informal the Haskell report really is ;)
+02:40:22 <skew> formal for non-math
+02:40:48 <shapr> silly question, you think @type is exploitable via TH?
+02:41:13 <skew> shapr: no more than a let binding would be
+02:44:49 <shapr> wagle: any word on the programatica cvs?
+02:44:51 <darius-> heh, the algol68 report rules
+02:46:19 <darius-> i couldn't make head or tail of it
+02:51:37 <shapr> SamB: I just haven't gotten around to linking to AvianWiki from the front page, it started out being a personal wiki, and I'm not sure if it's going public.
+02:55:25 <shapr> earthy: sent!
+02:56:42 <shapr> PreludeExts ended up being quite entertaining
+03:07:49 <shapr> skew: is the PHI repo url the same?
+03:08:35 <skew> shapr: possibly not?
+03:08:46 <skew> shapr: what URL do you have? I can just make that correct :)
+03:09:34 <skew> try this: http://page-208.caltech.edu/phi/
+03:10:21 <skew> I made directories for some forks when I was fighting the segfaults, adjusted the symlink, and forgot it when I moved everything back
+03:12:23 <skew> it should now be accessible and segfault-free
+03:13:36 <shapr> ok
+03:14:06 <skew> I'm wondering how to improve the procedure for making a module
+03:14:33 <earthy> that's up. ;)
+03:14:37 <skew> as it stands you need to write a tiny bit of C that calls hs_init, and then the real init function which can be written in Haskell
+03:15:02 <shapr> skew: I'm getting an error, is all of you _darcs readable?
+03:15:14 <shapr> can't read inventory
+03:16:20 <earthy>  damn, darcs is easy. :)
+03:16:37 * shapr agrees
+03:17:00 <shapr> vivÃ© le darcs!
+03:17:07 <skew> shapr: I'm pretty sure it is
+03:17:53 <skew> just a minute, I killed the x bit on all my directories trying to forcibly make sure everything was readable
+03:17:57 <skew> (looked like it already was)
+03:18:03 <skew> as in, was before you asked
+03:18:12 <shapr> so it is
+03:18:15 * shapr wonders
+03:18:43 <shapr> doh
+03:18:52 <shapr> trailing slash
+03:18:56 <earthy> *boom*
+03:19:14 <skew> there, I just ran chmod a+X
+03:19:45 <shapr> skew: it was darcs get with the trailing slash :-/
+03:19:54 <skew> ah, that will do it every time
+03:20:01 <shapr> without the slash it's fine
+03:36:37 <shapr> skew: HVal is MIA
+03:39:31 * shapr boings hoppily
+03:42:25 <skew> shapr: does it work?
+03:43:51 <shapr> nah, I can't find HVal
+03:44:23 <skew> odd.
+03:44:27 <shapr> how do I update the deps in the Makefile?
+03:44:31 <skew> I've got it, and darcs doesn't see any changes
+03:44:37 <shapr> hm
+03:44:54 <skew> ooh, maybe I need some darcs add?
+03:45:13 <skew> there, that should do it
+03:46:16 <shapr> yay
+03:46:37 <shapr> it's building
+03:47:33 <shapr> is forever not the same as fix / mfix ?
+03:47:42 <skew> nope
+03:47:49 <shapr> oh, ok
+03:48:00 <skew> forever = fix . (>>)
+03:48:18 <shapr> I still haven't gotten around to reading the fix paper
+03:48:29 <skew> no, it's not the value recursion stuff like mfix
+03:48:36 <shapr> ah
+03:48:38 <skew> it's just repeats an action over and over again
+03:50:14 <shapr> how come it segfaults after a bit?
+03:51:02 <shapr> is that the GC problem?
+03:51:14 <skew> shapr: there's another segfault?
+03:51:17 <skew> how?
+03:51:24 <skew> the main program?
+03:52:02 <shapr> yup
+03:52:10 <skew> hmm. I don't know
+03:52:13 <shapr> ./a.out operator add 1 2
+03:52:16 <skew> the module is perfectly happy...
+03:52:36 <skew> import hadd; while 1: hadd.add(1,1)
+03:53:17 <skew> well, except for the ^C handling, but that's a different issue
+03:55:06 <skew> something might be getting freed earlier
+03:55:30 <skew> reinstrumenting the decref wrapper, it dies shortly after the first GC finishes
+03:58:32 <skew> play with the module.
+03:58:44 <skew> I don't know what's wrong here
+03:58:49 <skew> possibly some of the string stuff
+05:15:06 * shapr switches back to XEmacs
+05:15:38 <shapr> Gnu Emacs is slower and less stable
+05:16:39 <shapr> I want HEmacs!
+05:18:28 <darius-> hemax... sounds like a brand name for artificial blood
+05:18:38 <shapr> hm!
+05:18:43 <darius-> unless it's a virility drug
+05:19:39 <shapr> HaEmaGloBin - Haskell Emacs Global Binge
+05:20:17 <ibid> HeMax - the real identity of He Man
+05:20:19 <bring> @eurohaskell
+05:20:19 <lambdabot> less talks, more code!
+05:20:19 <lambdabot> http://www.haskell.org/hawiki/EuroHaskell
+05:20:19 <lambdabot> EuroHaskell - Haskell Hackfest - June 10-12 - Gothenburg, Sweden
+05:20:27 <bring> just wanted to mention that
+05:20:31 <shapr> hej bring, how was .ru?
+05:20:36 <bring> I wasn't there
+05:20:39 <shapr> oh
+05:20:40 <bring> that was a cover story
+05:20:43 <bring> :)
+05:20:50 <shapr> wow, chalmers black ops
+05:21:27 <ibid> bring: and you let shapr to blow your cover story? :)
+05:22:02 <bring> :)
+05:22:12 <bring> controlled release
+05:22:27 <bring> that info is not interesting any more
+05:23:57 <bring> the chalmers IT department brought up a good point, you need a chalmers card to get access to the rooms we will be in at EuroHaskell
+05:24:01 <shapr> lemme guess, the Programming Illuminati at Chalmers sent you on a surgical hack into Sun Research?
+05:24:13 <bring> they're in Uppsala?
+05:24:24 <shapr> oh, how do we deal with that?
+05:24:36 <bring> knock on the door :)
+05:24:45 <bring> all chalmers people have card
+05:24:46 <bring> s
+05:25:02 <shapr> fair enough
+05:25:15 <shapr> that's how HIM worked at KTH
+05:25:21 <bring> viblo: do you need a card to get in the front door of the EDIT building on saturdays?
+05:25:39 <shapr> you called Karl Philip-Faxen if you were locked out
+05:25:47 <bring> huh?
+05:26:00 <shapr> HIM2003 was at KTH
+05:26:07 <bring> the crown prince fax machine?
+05:26:27 <shapr> er, I think that's his name
+05:26:46 <bring> oh
+05:26:52 <shapr> ah, faxén
+05:27:01 <bring> well, we can just give out our cell phone numbers
+05:27:12 <shapr> http://www.it.kth.se/~kff/
+05:27:14 <shapr> yes
+05:27:27 <bring> all non-chalmers people should have GSM cell phones, right?
+05:27:41 <shapr> I hope so
+05:27:56 <shapr> or at least able to stick to someone who does
+05:28:17 <bring> or just hack outside
+05:28:25 <shapr> oh, good idea!
+05:28:33 <bring> hope the weather stays like it is now
+05:28:36 <bring> or gets better
+05:28:40 <shapr> today is gorgeous out, I want to uni!
+05:30:21 <bring> hej, cool, today is No Pants Day
+05:30:29 <shapr> eh?
+05:31:04 <shapr> we could mention EuroHaskell on gnuheter
+05:31:11 <bring> http://www.nopantsday.com/
+05:31:42 <shapr> läser du gnuheter?
+05:32:07 <forester> gnuheter == mÃ¥nga idioter :)
+05:32:16 <shapr> really?
+05:32:22 <shapr> that's too bad
+05:33:13 <forester> I think the people in #haskell.se together with the multi group at chalmers is a good target group
+05:33:19 * forester is andersca right now
+05:33:34 <shapr> ok
+05:33:55 <shapr> plus we can expand next year :-)
+05:36:04 <shapr> can't GHC dump pure C for bootstrapping elsewhere nowadays?
+05:38:59 <earthy> errr. no.
+05:39:32 <earthy> as in, not really
+05:39:44 <shapr> something close?
+05:40:07 <earthy> depends on what you consider close :)
+05:40:15 <earthy> but you can build from .hc files
+05:40:32 <earthy> and you can generate a .hc tree with some work
+05:40:49 <shapr> how portable is that?
+05:40:50 <earthy> and building ghc from .hc files does not require a working ghc
+05:40:55 <shapr> aha
+05:41:19 <shapr> are hc trees available from haskell.org?
+05:41:21 <earthy> the .hc files are kinda bound to wordsize and stuff on the machine you want to build on
+05:41:36 <shapr> ok, arch and OS specific
+05:41:40 <earthy> not that I know of
+05:41:58 <earthy> well, somewhat arch specific, somewhat less OS specific
+05:42:02 <earthy> read the porting guide
+05:42:11 <shapr> even so, it would salve the major complaint I hear on #darcs, that it's hard to bootstrap everything
+05:42:22 <shapr> thanks for the pointers
+05:42:58 * shapr hyperacts
+06:15:22 <shapr> hi Maddas 
+06:18:44 <Maddas> Hey shapr 
+06:18:55 <shapr> what's up?
+06:19:01 <Maddas> Weekend :-)
+06:19:49 <Maddas> Everything's pretty normal otherwise. How about you?
+06:20:23 <shapr> trying to stay interested in work code long enough to reach the weekend
+06:20:36 <Maddas> Heh.
+06:21:21 <shapr> I'd rather be playing with a haddock plugin for lambdabot 
+06:22:00 <Maddas> Haddock?
+06:22:10 <bring> @dict haddock
+06:22:11 <lambdabot> Supported dictionary-lookup commands:
+06:22:11 <lambdabot>   @all-dicts @devils @easton @elements @foldoc @gazetteer @hitchcock @jargon
+06:22:11 <lambdabot> @lojban @prelude @vera @web1913 @wn @world02
+06:22:11 <lambdabot> Use "@dict-help [cmd...]" for more.
+06:22:20 <bring> bah
+06:22:28 <shapr> http://www.haskell.org/haddock/
+06:22:31 <Maddas> Cool, a dictionary. :)
+06:22:37 <Maddas> I see
+06:24:25 <shapr> since @type does hierarchical libs now, I figure a name index is the next step
+06:24:34 <shapr> and then a type index
+06:25:09 <Maddas> Sounds nice!
+06:25:16 <Maddas> Aiie, I'm very late, must run for the bus, bye :-)
+06:25:38 <shapr> cya
+06:28:59 <shapr> MakeMyDay: hello, how can I make you day?
+06:29:05 <MakeMyDay> I am trying to define the + function again. Can't I just write " +    ::  a->a->a " ?
+06:29:10 <MakeMyDay> :)
+06:29:25 <shapr> use (+)
+06:29:29 <MakeMyDay> ahh
+06:29:32 <MakeMyDay> thx
+06:30:48 <JaffaCake> the + function has already been defined for you, MakeMyDay :)
+06:31:15 <MakeMyDay> yeah but I am just redefining it for some weird data type..
+06:31:44 <JaffaCake> right, only joking ;)
+06:31:58 <MakeMyDay> :)
+06:45:21 * earthy hates getpwnam_r
+06:45:34 <earthy> and System/Posix/User.hc:785: too many arguments to function `getpwnam_r'
+06:46:38 <earthy> fokking Solaris unposixness.
+06:51:41 <MakeMyDay> hmpf.
+06:52:47 <MakeMyDay> Cons a as <+> Cons b bs       =  Cons (a + b) (as <+> bs)
+06:53:01 <MakeMyDay> I have to declare the type and stuff
+06:53:05 <MakeMyDay> I know which type it is.
+06:53:25 <shapr> huh?
+06:53:26 <MakeMyDay> But what do I write ? (+) :: blah -> blah -> blah ?
+06:53:39 <MakeMyDay> I mean , what is the name of the function
+06:53:58 <shapr> it's (+)
+06:54:21 <MakeMyDay> Then why do I get a Missing binding error?
+06:54:37 <shapr> can you paste your code on the paste page?
+06:54:48 <shapr> @wiki HaskellIrcPastePage
+06:54:49 <lambdabot> http://www.haskell.org/hawiki/HaskellIrcPastePage
+06:54:49 <MakeMyDay> yes
+06:56:44 <shapr> wiki spam sucks
+06:59:20 <MakeMyDay> I don't get the paste thing. I edit the page paste it , and something funky comes out...
+06:59:34 <shapr> huh?
+06:59:48 <shapr> oh
+07:00:13 <shapr> {{{#!syntax haskell\n$CODE\n}}}
+07:01:33 <MakeMyDay> ah yes ok 
+07:03:00 <MakeMyDay> it's there now
+07:03:27 <shapr> looks pretty now
+07:04:00 <MakeMyDay> should it be (<+>) maybe?
+07:05:20 <shapr> maybe so
+07:06:09 <MakeMyDay> yeah it works now. I think.
+07:42:32 <shapr> konichiwa tea-san
+07:43:17 <tea> konnichiwa =)
+07:44:08 <tea> I was just walking some channels I had interested
+07:44:28 <shapr> do you have questions about Haskell?
+07:45:44 <tea> no, It was not that. I did not use haskell in my life
+07:45:58 <tea> but interest to learn from now on, thx for asking it =)
+07:46:37 <shapr> ok, if you find questions, we are here
+07:46:42 <shapr> @learn
+07:46:42 <lambdabot> http://www.haskell.org/learning.html
+07:46:50 <shapr> that's a good place to start.
+07:47:29 <tea> thank you. I tried some online tutorials, already.
+07:49:49 <MakeMyDay> what does the <-> operator do?
+07:50:09 <shapr> I've never seen it, which module?
+07:50:36 <MakeMyDay> no module really , I must be missing something then
+07:51:21 <MakeMyDay> missing as in not understandin
+07:51:22 <MakeMyDay> g
+07:51:42 <MakeMyDay> ow wait. It's the <-> operator I defined before . duh!
+07:51:42 <shapr> where did you see it?
+07:51:46 <shapr> heh
+07:52:03 <MakeMyDay> I was just reading it as " double arrow" ..heh
+09:14:57 <JaffaCake> bye all, have a good weekend
+09:15:49 <Igloo> Bye, you too
+09:29:37 <ludde> jaffacake = simon marlow ?
+09:30:09 <Igloo> Yup
+09:30:14 <ludde> wow
+09:30:23 <Marvin--> what an ... interesting nick name :)
+09:30:31 <ludde> i didn't know famous people come here
+09:30:50 <Igloo> Hey, when Haskell B. Curry joins from beyond the grave, then I'll be impressed  :-)
+09:31:12 <Marvin--> heh
+09:31:27 <Marvin--> I liked Ian Murdock's recent mail to debian-devel
+09:31:35 <ludde> i have an array of numbers, is there an O(n) way to find the span of numbers that has the maximum sum?
+09:31:35 <Marvin--> "If I were dead, I'd be rolling over in my grave"
+09:31:40 <MakeMyDay> If I paste something on the paste page can someone take a look at it? Small thing , can't decribe it though
+09:32:15 <Igloo> It's a standard problem, but I can't remember the answer OTTOMH
+09:32:24 <Maddas> span of numbers?
+09:32:36 <ludde> range of numbers.. like from position x to position y
+09:32:36 <Igloo> Googling for maximum segment sum or something would probably find it
+09:32:47 <Maddas> Are there negative numbers or do you just mean a span with fixed size?
+09:33:59 <Igloo> Hmm, my intuition says you can just walk left to right, but I'm sure it's more complex than that
+09:34:40 <MakeMyDay> How can i check if the function argument equals a different function call , without actually calling the second fuction. I need something like comparing the strings..
+09:34:47 <ludde> Maddas: yes 
+09:34:53 <darius-> igloo - not much, if they're all nonnegative
+09:35:09 <darius-> it's in programming pearls
+09:35:24 <Igloo> The problem I'm talking about they aren't all non-negative
+09:35:35 <darius-> then no, it's not O(n) iirc
+09:36:30 <ludde> programming pearls?
+09:36:38 <darius-> book by jon bentley
+09:37:17 <Igloo> Hmm, that's going to annoy me, but I'm in the middle of something else now
+09:37:41 <ludde> found a solution in O(n) time
+09:38:25 <Igloo> Maybe the complexity I was remembering is just because we derived the program formally
+09:39:33 <darius-> oops, my memory must've been wrong about that restriction.
+09:40:08 <Igloo> The 2d case and beyond is not known to be better than exponential or something IIRC, though
+09:40:25 <darius-> yeah
+09:40:39 <darius-> higher-order anyway
+09:40:50 <Marvin--> are we talking about a fixed-size peep hole view of the array, or what?
+09:41:16 <darius-> no, any length
+09:41:23 <ludde> it was very simple heh
+09:41:26 <Igloo> The complication is negative numbers
+09:41:37 <ludde> max_ending_here = max(max_ending_here, a[i])
+09:41:45 <ludde> max_so_far = max(max_so_far, max_ending_here)
+09:41:46 <darius-> yeah, i was being stupid :)
+09:41:55 <ludde> then you get the max sum
+09:42:07 <ludde> and it can easily be modified to get the actual range
+09:42:29 <Igloo> e.g. for [5, -10, 2, 2, -1, 2, 2, -10, 5] you want to return (2, 6) (the MSS is 7)
+09:43:52 <ludde> actually i just need the actual max value
+09:52:35 <MakeMyDay> How can I check what the argument is , without executing the function , if the argument is a function ?
+09:52:49 <MakeMyDay> er let me try that again
+09:53:18 <MakeMyDay> let's say "summ s " is my function
+09:53:28 <MakeMyDay> if s is a funtion
+09:54:06 <MakeMyDay> how can I check if it is function x or function y without  actually running function x/y 
+09:54:30 <Igloo> You can't
+09:54:39 <Marvin--> MakeMyDay: you want to test - from "inside" of summ - which function it was called with?
+09:54:44 <maihem> Though my haskell knowledge is still limited, A data constructor is still technically a function, if you have a limited set of functions to match against, represent the functions with a data declaration
+09:55:10 <MakeMyDay> Marvin : Yes
+09:55:17 <maihem> a data declaration defines what is a valid argument
+09:55:18 <Marvin--> then I second Igloo, you can't
+09:55:19 <Igloo> You can pass a tuple of a tag and the function and look at the tag, though
+09:55:38 <Marvin--> a more interesting question is, why would you want to?
+09:56:01 <MakeMyDay> because I have a function that works with one type of function as an argument, but not with another.
+09:56:20 <Marvin--> what do you mean?
+09:56:43 <maihem> MakeMyDay: you mean type as in haskell type, or as in "sort of"?
+09:56:56 <MakeMyDay> Isort of
+09:57:25 <MakeMyDay> It is some sort of an exercise thingie it doesn't make much sense to me
+09:57:43 <MakeMyDay> see we have to "invert" a function
+09:57:57 <MakeMyDay> but what invert means , I have no idea
+09:58:46 <Marvin--> If you only want certain sorts of functions, I think it would make more sense to pass around *representations* of functions, rather than the functions them selves
+09:59:38 <shapr> I can freemount! w00!
+09:59:52 <MakeMyDay> hm
+09:59:53 <maihem> unless it is a mathematical excercise and he should use an algorithm to find which argument to the passed function gives the required result
+10:00:24 <Igloo> freemount?
+10:00:34 <maihem> ie invert :: (x -> y) -> y -> x
+10:00:45 <shapr> means I don't need a wall to get on my unicycle and go
+10:00:47 <maihem> using newton's method or something
+10:00:53 <shapr> I can just hop on and go
+10:01:00 <Marvin--> maihem: that's true
+10:01:14 * shapr bounces happily
+10:01:33 <shapr> I'm close to the infinte ride!
+10:01:58 <Igloo> Aha, cool
+10:02:32 <maihem> should probably be invert :: (x -> y) -> y -> [x] to be useful
+10:03:00 <shapr> freemounting is easier than I expected, but turning left is harder than I expected :-/
+10:03:24 <Marvin--> Oh no! shapr is close to the infinite ride! Soon we'll never see him again!
+10:03:46 <shapr> at least, you won't see me walking :-)
+10:04:53 <Igloo> He might go into an infinite loop
+10:05:41 <darius-> shapr - cool :)
+10:06:08 <maihem> how about invert :: (x -> (Terminator,a)) -> (x -> y) -> y -> a -- continuation passing style
+10:07:10 <maihem> hmm, no still got an infinite loop
+10:07:40 <Marvin--> shapr: who the heck made the silly tapestry on the EP web? :)
+10:08:09 <shapr> tapestry?
+10:08:09 <Marvin--> http://www.europython.org/conferences/epc2004/news/Tapestry/view
+10:08:31 <Marvin--> someone must've had too much time on their hand :)
+10:08:36 <shapr> oh, I don't know :-)
+10:08:37 <maihem> ah-ha! invert :: ([x] -> a) -> (x -> y) -> y -> a -- CPS, the first argument gets a list of each approximation and decides when to give up by returning a result of some sort
+10:08:59 <maihem> it is called for each possible root
+10:09:23 <shapr> oh, Jacob did this
+10:09:44 <shapr> from what bea says
+10:10:04 <Marvin--> THAT is the kind of things he does instead of replying to my mails? :P
+10:10:08 <Marvin--> sheesh
+10:10:26 <shapr> are you working at strakt in the summer
+10:10:28 <shapr> ?
+10:10:33 <Marvin--> that's what I want to know :P
+10:10:34 <shapr> are you coming to EP?
+10:10:39 <Marvin--> dunno
+10:10:45 <Marvin--> don't think so
+10:10:49 <shapr> ok
+10:10:52 <shapr> food, bbl
+10:13:55 * Marvin-- ponders when to present his project
+10:20:34 <maihem> Marvin--: now! Go Go Go!
+10:21:17 <Marvin--> heh
+13:18:33 * Philippa curses her local supermarket for having her favourite beer in
+13:19:00 <Philippa> evenin' all
+13:19:33 <Marvin--> that's a *bad* thing?
+13:37:11 <shapr> I'm in the mood to code
+13:38:27 <maihem> I'm in the mood to pig out
+13:38:40 <maihem> mMm, chocolate hob-nobs
+13:42:25 <Lunar^> shapr: Could this make a good soundtrack ?  ;)
+13:42:50 <shapr> I'm listening to Ministry - Psalm 69
+13:43:00 <shapr> that's a good coding soundtrack
+13:43:31 <shapr> salut Lunar^
+13:43:36 <ski> shapr :swedish hymn book ???
+13:43:40 <shapr> ca va?
+13:44:01 <Lunar^> shapr: 'In the mood for love' has a really good soundtrack
+13:44:15 <Lunar^> shapr: Yes. I need to take my plane tickets for Sweden
+13:44:25 <ski> shapr : sorry, i just guessed
+13:44:30 <ski> hi, btw
+13:45:21 <shapr> ski: nah, same group that did "twitch" "land of rape and honey" etc --> http://www.metalstorm.ee/bands/view_albums.php?band_id=ministry
+13:46:18 <shapr> excellent band
+13:46:44 <shapr> Lunar^: did ingeniweb pay for part/all of your sweden trip?
+13:46:45 <Philippa> marvin--: it is when you're trying not to drink and you're lucky enough that your favourite beer isn't commonly available
+13:47:12 <Marvin--> Philippa: oooh
+13:47:32 <Philippa> my intake's been kinda unhealthy recently, and I could do with losing some weight too
+13:47:42 <Philippa> but having bottled Abbot available is just unfair...
+13:48:01 <shapr> I bet I weigh more than you do :-P
+13:48:34 * shapr could do with some weight loss also
+13:48:39 <Lunar^> shapr: Unfortunely not
+13:48:49 <shapr> Marvin-- is not overweight though
+13:48:50 * Maddas too
+13:49:03 <Maddas> actually, I could just do with some exercise :)
+13:49:06 <Lunar^> shapr: But I need to talk more frankly to my boss
+13:49:10 <shapr> and neither is Lunar^ if the laptop pic is accurate
+13:49:39 * ski 's quite thin
+13:49:43 <Philippa> shapr: I was about 100 kilos last time I checked, prolly more atm
+13:49:48 <Lunar^> shapr: With the PowerPlone opening, I could make some advertisement
+13:49:51 <Marvin--> my what a fun topic to discuss  :P
+13:50:01 <shapr> Lunar^: yes!
+13:50:07 <Lunar^> shapr: I'm the really really thin type
+13:50:08 <Philippa> exercise is what I need too
+13:50:17 <Marvin--> who doesn't
+13:50:18 <shapr> Philippa: I'm also more than 100 kilos
+13:50:20 * simon- has a skipping rope with a counter on the right handle
+13:50:33 <Lunar^> shapr: By the way, you could ask if there are interested by a swedish translation
+13:50:41 <shapr> simon-: oh geeky exercise! nice!
+13:51:00 <shapr> Lunar^: for PowerPlone?
+13:51:03 <Lunar^> shapr: yes
+13:51:35 <maihem> otsuka: Does anybody know in which Sherlock Holmes book does he meets Moriarty?
+13:51:40 <shapr> Lunar^: hey, did you work on eifel @ qwiki.info ?
+13:51:40 <maihem> oops
+13:52:28 <Marvin--> maihem: ask google? :)
+13:53:02 <Lunar^> shapr: No unfortunately I'm spending all my time on PowerPlone, which is really annoying me now
+13:53:11 <Lunar^> shapr: But it's getting close to an end
+13:53:27 <shapr> anyway, I heard that ingeniweb did that eifel site, and that they chose Plone because of the EU project sites bea and I made :-)
+13:54:04 <shapr> now there are several more people talking to us about EU project websites
+13:54:05 <Lunar^> shapr: hehe good news :)
+13:54:29 <shapr> yes, seems this is getting more profitable
+13:54:39 <Lunar^> shapr: Eifel was the best last project btw. Took us not much time and they are all really happy
+13:54:42 <shapr> makes me wish I actually liked Plone/Zope
+13:55:27 <ski> so you don't ?
+13:55:45 <shapr> yah, first time I saw eifel I thought "multilang folders *without* i18nlayer branch! that could only be ingeniweb!"
+13:56:22 <shapr> I've switched to i18nfolder too
+13:57:01 <shapr> ski: it's way too tightly bound
+13:57:17 <ski> okidoki
+13:57:25 <shapr> everything is too hard to change
+13:58:04 <shapr> Lunar^: are there any pictures of you from the front?
+13:59:17 <shapr> Lunar^: so I can recognize you in Sweden :-)
+13:59:51 * ski still hasn't any selfpics on computer
+14:00:56 <shapr> I suddenly realize that EuroHaskell might require nametags with irc nick on top :-)
+14:00:57 <Lunar^> shapr: There's ParisCarnet picture... 2 secs
+14:04:10 <shapr> hm, I don't want a webcam... I want a codecam!
+14:04:32 <ski> so we can see what you hack on ?
+14:04:38 <shapr> right!
+14:04:58 * shapr thinks how to do this
+14:05:06 <shapr> aha!
+14:05:40 <Lunar^> shapr: http://obcd2service.free.fr/photos/MousseParisCarnet4/IMAGE0044.jpg on the right
+14:05:43 <shapr> the InForM Haskell has an XEmacs extent binding
+14:06:01 <Lunar^> shapr: screen -x could be used as a codecam
+14:06:01 <shapr> whoa, nifty hair
+14:06:17 <shapr> Lunar^: good point
+14:06:27 <ski> "Alert : shapr is not a registered protocol."
+14:06:40 <ski> :)
+14:06:46 <shapr> I was thinking of turning buffer changes into dynamic html
+14:06:59 * ski forgot to trim the url
+14:07:02 <shapr> and using M-x htmlize-buffer
+14:07:09 <shapr> ski: ha!
+14:07:26 <shapr> screen would be much simpler
+14:08:18 <shapr> Lunar^: you have a very intense look. that may be a biased opinion from my interaction with you here on #haskell
+14:10:55 <Lunar^> shapr: maybe :)
+14:11:00 <Lunar^> shapr: we'll see soon :)
+14:11:31 <shapr> yes!
+14:11:37 * Marvin-- watches the Sixth Sense
+14:11:57 <Riastradh> 'I see stupid people.  They're everywhere...and they don't even know that they're stupid!'
+14:15:27 <Marvin--> :)
+14:16:08 <Igloo> OK, I'm missing something obvious here. In 4.5.5 (http://www.haskell.org/onlinereport/decls.html) in the first motivation example isn't the binding unrestricted so rule 1 doesn't apply?
+14:21:23 <Igloo> (the monomorphism restriction)
+14:21:52 * Marvin-- runs away screaming
+14:21:56 <Igloo> :-)
+14:22:12 <Marvin--> you're talking about the genericLength example?
+14:22:16 <Igloo> Yup
+14:22:39 <Igloo> Doh, the conditions are an and, not an or
+14:22:45 <Igloo> See, told you it was obvious  :-)
+14:23:15 <Marvin--> I was wondering what the problem was :)
+14:32:10 <Lunar^> 'Haskell IRC channel [if you never want to find time to work again... ;-)]' lol
+14:32:46 * shapr grins
+14:33:57 <Lunar^> I'm waiting for sebc comments and I'm sending the report to earthy
+14:35:11 <Marvin--> oh shucks, I forgot to bug Koen about HC&AR
+14:36:51 <Lunar^> I've scheduled next hOp release for the 16th, wipe me if I don't do it
+14:37:04 <Lunar^> Marvin--: Who's Koen ?
+14:41:08 <Smerdyakov> Lunar^, what do you mean by "wipe me"?
+14:41:40 <shapr> probably "remind me"
+14:41:57 <shapr> je suppose
+14:42:01 <ski> "wipe me" as in "wipe out from the face of the earth" ?
+14:42:18 <Smerdyakov> I don't know, but it sounds obscene to an American. :P
+14:42:23 <Lunar^> I meant beat me
+14:42:25 <shapr> mais je ne comprends pas tout le Lunar^
+14:42:38 <Lunar^> whip maybe ?
+14:42:44 <Smerdyakov> Lunar^, that's it.
+14:42:44 <shapr> yes
+14:43:02 <ski> shapr : inte prata konstig-säj !
+14:43:07 <shapr> haha
+14:43:08 <Lunar^> shapr: "Curryspondence" is a nice name :)
+14:43:10 <Marvin--> Lunar^: Koen Claessen
+14:43:16 <shapr> Lunar^: thanks!
+14:43:26 <shapr> is the report up already?
+14:43:49 <ski> (one of my elder bro's said that in there childhood, when someone talked english, i think)
+14:43:50 <Marvin--> Lunar^: he and John Hughes wrote quickcheck for example
+14:44:16 <Lunar^> Marvin--: Is the one behing Lava also
+14:44:38 <Lunar^> shapr: I was watching earthy status page
+14:45:07 <shapr> I met some children while unicycling who kindly switched to english when they figured out my accent
+14:45:33 <shapr> I was impressed, I didn't start learning french till high school
+14:45:42 <shapr> Lunar^: where's that?
+14:45:48 <Marvin--> Lunar^: yes
+14:46:23 <Lunar^> shapr: http://www.haskell.org/communities/topics.html
+14:46:26 <ski> we start with english fairly early
+14:46:37 <shapr> lava does Xilinx  FPGAs right?
+14:47:10 <shapr> I want a copy of that, hardware hacking in haskell would rock
+14:47:41 <shapr> whoa, I have check marks
+14:47:53 <Lunar^> shapr: You passed :)
+14:48:18 <shapr> :)\
+14:48:27 <hashwolf> is there a type for positive integers in haskell?
+14:48:46 <ski> not in standard library, IIRC
+14:48:48 <Igloo> There are Wordn types
+14:49:15 <Igloo> Well, that's non-negative
+14:49:40 <skew> positive integers are pretty rare...
+14:49:50 <skew> well, working with the set of positive integers anyways
+14:49:56 <hashwolf> Igloo: (extra question) any idea what Wordn stands for?
+14:50:02 <shapr> mine are all pessimistic
+14:50:03 <hashwolf> just curious
+14:50:13 <skew> I may be a bit biased by all the set theory I've been learning lately
+14:50:35 <shapr> hey juhp, you're on the list for hircules
+14:50:46 <hashwolf> Igloo: 10x
+14:50:52 <skew> It now seems completely natural to count from zero, just like foldr suddenly seems far more natural than foldl after learning about catamorphisms
+14:51:05 <skew> Hey, I'm on the list.
+14:51:11 <skew> Ooh, better write up a something
+14:51:17 <Igloo> Word8 means 8 bit words, in the normal computery sense of the word "word"
+14:51:32 <Igloo> Just a block of bits
+14:51:41 <shapr> skew: right, get your check mark
+14:52:39 <shapr> Igloo: hey you don't have a check yet
+14:53:23 <shapr> HXml is Joe English, though I dunno what he's doing these days
+14:53:50 <Igloo> No, but I didn't ask to have a line either  :-)   I'm very unlikely to have a check mark before Wednesday
+14:56:25 <shapr> I bet Eden and spec_eval would get on well
+14:58:22 <tmoertel> has anybody looked at Vital?  it's /very/ cool
+14:58:41 <tmoertel> http://www.cs.kent.ac.uk/projects/vital/
+14:59:17 * tmoertel meant to post to #haskell not #haskelldb
+14:59:27 <shapr> hiya tmoertel, wassup?
+14:59:37 <tmoertel> not much... have you looked at Vital?
+15:00:03 <shapr> not recently
+15:00:23 * shapr looks
+15:00:33 <tmoertel> a new release came out today
+15:00:47 <shapr> does it still require java?
+15:00:51 <tmoertel> yes
+15:03:29 <forester> tmoertel: hey there
+15:03:34 <tmoertel> hi, forester 
+15:03:48 <forester> tmoertel: I have been looking for you awhile
+15:03:58 <forester> but you have been idle for a few days
+15:03:58 <tmoertel> sorry, i had connectivity troubles a while back
+15:04:04 <forester> ohh
+15:04:16 <shapr> stepcut: awake?
+15:04:29 <forester> tmoertel: I was trying to contact you while we were releasing haskelldb 0.8
+15:04:42 <tmoertel> let's move to #haskelldb
+15:04:43 <forester> about the rpm .spec file
+15:07:54 <stepcut> shapr: yep
+15:07:57 <stepcut> its 3pm ;)
+15:09:13 <shapr> forester was just asking me about sqlite...
+15:09:49 <shapr> oh, I wonder if haddock cvs has new goodies
+15:09:56 <shapr> stepcut: how's code?
+15:10:03 <forester> stepcut: shapr said you use sqlite?
+15:10:29 <shapr> didn't stepcut write the sqlite support for HaskellDB?
+15:10:35 <shapr> or am I confused?
+15:11:02 <stepcut> I wrote the sqlite bindings for haskelldb (it was only ~1hr of work)
+15:11:13 <forester> stepcut: :)
+15:11:16 <stepcut> but I don't use it
+15:11:30 <forester> stepcut: ok, thanx anyway
+15:12:12 <stepcut> i found out that sqlite is 'typeless' which means that you can not transparently switch between sqlite/mysql 
+15:12:33 <stepcut> but there IS an embeddable version of mysql
+15:13:33 <forester> stepcut: you can move from mysql to sqlite without problems
+15:13:49 <forester> and also from sqlite to mysql if you used types while creating the table
+15:14:10 <stepcut> forester: oh? I have not actually used it
+15:14:15 <forester> but not transparently in general, that's true
+15:14:18 <stepcut> :)
+15:14:41 <forester> stepcut: sqlite will preserve the types mentioned in the create table...
+15:14:51 <forester> but it wont be used internally
+15:15:07 <stepcut> yeah, I read that, but I didn't know what that actually meant in the context of haskelldb
+15:15:34 <forester> so im working on a patch to allow sqlite-types provided that one stated types explicit while creating the table
+15:16:18 <stepcut> cool
+15:20:15 <shapr> y0 earthy 
+15:23:15 <Lunar^> You can't move from MySQL to SQLite without some work
+15:23:50 <Lunar^> on your SQL queries... At least, most date functions need custom implementation on SQLite
+15:26:47 <shapr> y0 SamB, did you see my answer?
+15:27:15 <SamB> shapr: yeah
+15:27:25 <shapr> ok
+15:27:48 <shapr> you think I should?
+15:28:11 <SamB> I don't know, google already knows all about it
+15:30:34 * SamB wants an animated demonstration of the GHC runtime
+15:41:34 <monotonom> Does GHC use eval/apply or something like that as the basic computation model? If so you can almost do it yourself.
+15:43:41 <monotonom> GHC up to 5 used another computation model, and that one was described in detail in Simon Peyton-Jones's "implementation of functional languages" now free online.
+15:44:36 <SamB> monotonom: I want to see words!
+15:44:51 <SamB> machine words, with pretty colored boxes around them
+15:45:02 <SamB> and nice labels
+15:49:48 <monotonom> I take it you'd prefer A to B, where A = some box has 0x83928384 in one instance and 0x83928390 next, B = an arrow points to a node of a tree in one instance and to the node's parent next.
+15:50:58 <monotonom> My feeling is the latter makes more amusing animations, especially to kids.
+15:51:23 <monotonom> (Who wants to see a bunch of numbers changing?)
+15:51:27 <SamB> I definately want arrows
+15:52:14 <monotonom> Well then the Peyton-Jones book talks at the level of pointers and nodes, so I thought you would like it.
+15:52:29 <SamB> hmm.
+15:53:44 <monotonom> Of course, a book is hardly a live animation; but it tells you how to make an animation yourself.
+15:54:37 <monotonom> Give your friend an animation, and he is happy for a day.  Show him how to make more animations, and he is confused for a week. :)
+15:55:32 <SamB> hmm.
+15:56:29 <SamB> why would I want to be confused for a week?
+15:56:55 <monotonom> heheheh
+15:58:48 <monotonom> Not all people get confused.
+15:59:09 <SamB> oh, okay.
+16:46:39 <skew> while True: is much more common
+16:46:48 <skew> :(
+16:47:13 <ski> (sorry, more common than what ?)
+16:47:19 <skew> channel confusion
+16:47:42 <skew> somebody asking how to do an infinite loop in Python
+16:47:55 <skew> I suppose they wouldn't appreciate fix . (>>) $ <body>
+16:48:37 <ski> ;)
+16:48:48 * shapr grins
+16:49:11 <shapr> yah, while 1:
+17:12:14 <shrimpx> i keep wanting to type ':t filter' and such at the python shell
+17:17:54 <shapr> I keep trying to partially apply functions
+17:18:27 <ski> isn't that good ?
+17:18:48 <skew> it's only bad as far as producing working Python goes
+17:18:51 <shapr> the most painful parts to me are the pure side effects like [].sort() where I can't build a pipeline
+17:18:56 <shapr> right
+17:19:14 <skew> yeah, list.sort() and list.reverse() really suck
+17:19:15 <ski> ok
+17:19:47 <skew> they should be list.mutatingSortInPlace() and list.mutatingReverseInPlace()
+17:19:55 <shapr> yup
+17:20:19 <ski> like reverse! and such in scheme ?
+17:20:37 <skew> they already are, they should just free up the nice names for the nice versions
+17:21:06 <Riastradh> ski, REVERSE!, by most definitions, tends not to perform in-place reversal.
+17:21:12 <shapr> hm, I can't derive Show on a type line, right?
+17:21:17 <ski> oh
+17:21:31 <Riastradh> Instead, it returns a reversed list, and it is allowed to frob the cons cells of the input however it likes.
+17:21:42 <ski> ok
+17:21:55 <shapr> is there a way I can get a list of instances? or test for an instance?
+17:21:57 <Riastradh> > (define l (list 0 1 2)) 
+17:21:58 <Riastradh> ; no values returned
+17:21:58 <Riastradh> > (reverse! l)
+17:21:58 <Riastradh> '(2 1 0)
+17:21:58 <Riastradh> > l
+17:22:00 <Riastradh> '(0)
+17:22:01 <ski> but that allows in-place reversal
+17:22:10 <Riastradh> It _allows_ for it, but it usually isn't.
+17:22:14 <ski> ok, ty
+17:22:15 <skew> shapr: just try?
+17:22:22 <shapr> for example, how do I know if a Show instance for FiniteMap is in scope?
+17:22:30 <shapr> ok
+17:22:45 <skew> there are very few orphan instances in the libraries
+17:23:00 <ski> Riastradh : (hmm, what impl. was that ?)
+17:23:20 <Riastradh> Scheme48, but it's also the case in many others, and (most prominently) in the SRFI 1 reference implementation.
+17:23:39 <skew> ski: well, list.reverse() is like reverse! in that you lose the old structure
+17:23:46 <ski> shapr : in ghci ?
+17:23:50 <shapr> yes
+17:23:55 <skew> although you don't screw up old references as badly
+17:24:20 <shapr> doesn't seem to be a Show instance for FMs
+17:24:25 <skew> shapr: did you try out the new PHI stuff?
+17:24:28 <ski> shapr : ":i Show" in hugs gives a list of instances
+17:24:35 <shapr> oh
+17:24:42 <ski> shapr : but not in GHCi, appearently
+17:24:42 <Riastradh> skew, no, there's a huge difference.
+17:24:58 <Riastradh> Python's reverse() performs in-place reversal.
+17:25:09 <Riastradh> REVERSE! returns a reversed list, and the effect on the input list is undefined.
+17:25:17 <skew> Riastradh: I explained the similarlity I'm interested in
+17:25:24 <shapr> does give info about the class though, I didn't know that
+17:25:51 <Riastradh> skew, and REVERSE! might not even mutate anything; defining REVERSE! to be REVERSE is perfectly valid by SRFI 1.
+17:26:16 <shapr> oh, another pattern that irritates me is the test for existence, and then return
+17:26:37 <shapr> fromMaybe feels better
+17:26:40 <Riastradh> ...whereas with Python's reverse(), the sole purpose is to modify the input list.
+17:27:12 <shapr> if getattr(p,lang,None): pdict.update({lang:{lang:dictProjectLang(getattr(p,lang))}})
+17:27:38 <shapr> that feels like a waste, especially in python where I know the lookup is happening twice
+17:28:52 <shapr> is there a way around that in Python?
+17:29:16 <shapr> [dan]: you're shrinking!
+17:29:28 * [dan] laughs
+17:29:47 <shapr> hi [dan], new to haskell?
+17:29:47 <SamB> was that a flag toggle?
+17:30:22 <shapr> SamB: the python or the case change?
+17:30:31 <SamB> the case change
+17:30:54 <[dan]> shapr: correct, sitting down with the "A Gentle Intro to Haskell 98" document this afternoon, in fact
+17:31:01 <shapr> ah, nifty
+17:31:21 <shapr> if you find that to be a brickbat, you should check out YAHT next
+17:31:39 <[dan]> brickbat?
+17:31:42 <SamB> what is a brickbat
+17:31:45 <SamB> ?
+17:31:54 <[dan]> new one on me hehe
+17:31:56 <shapr> @all-dicts brickbat
+17:31:58 <lambdabot> *** "Brickbat" web1913 "Webster's Revised Unabridged Dictionary (1913)"
+17:31:58 <lambdabot> Brickbat \\Brick"bat`\\, n.
+17:31:58 <lambdabot>    A piece or fragment of a brick. See {Bat}, 4. --Bacon.
+17:31:59 <lambdabot> *** "brickbat" wn "WordNet (r) 2.0"
+17:32:01 <lambdabot> brickbat
+17:32:03 <lambdabot>      n 1: a fragment of brick used as a weapon
+17:32:05 <lambdabot>      2: blunt criticism
+17:32:41 <shapr> as in, ungentle
+17:32:49 * [dan] gets it now.
+17:33:26 <shapr> aka halfbrick, paving stone, etc
+17:33:38 <[dan]> It's not _quite_ a brickbat so far
+17:33:54 <shapr> I ran away crying
+17:33:58 <shapr> :-)
+17:34:07 <shapr> but some people love it
+17:35:20 <shapr> is there an easy cheesy way to effectively derive Show on a "type =" ?
+17:35:54 <[dan]> I'm working through the section on type classes right now, definitely starting to get dense. I'll have to print out YAHT and read that through as well, most likely
+17:35:55 <shapr> [dan]: learning for fun or school?
+17:36:14 <shapr> type classes are relatively sexy
+17:36:15 <[dan]> somewhere in the middle. I'm a mathematics undergraduate
+17:36:23 <shapr> oh, nifty
+17:36:37 <[dan]> so it's not for school, but it will be helpful for school
+17:36:48 <shapr> yah, I agree
+17:37:04 <shapr> Haskell appears to me to be a good way to investigate math
+17:37:59 <[dan]> It would be interesting to see a program not unlike matlab written in Haskell, imo
+17:40:12 <shapr> I haven't used matlab,maple,etc
+17:40:16 <skew> shapr: I'm off to dinner for a while, if you were thinking of getting back to me on PHI
+17:40:53 <shapr> skew: I've been distracted into a lambdabot plugin atm
+17:41:27 <[dan]> ah, mostly basic stuff, matrix algebra, plotting ODE solutions via homotopy, and such.
+17:41:44 <shapr> what's ODE?
+17:41:52 <[dan]> ordinary differential equations
+17:41:57 <shapr> oh, ok
+17:42:36 <SamB> hmm, I've been wishing for a nice clean way to do mathematical array stuff myself...
+17:43:20 <Riastradh> APL!
+17:43:26 * Riastradh ducks.
+17:43:49 <shapr> oy, it's nearing 3am
+17:48:00 <bring> shapr: you up too?
+17:48:58 <shapr> no, I'm sleeping ;-)
+17:49:24 <Riastradh> shapr, and you're buying me a plane ticket so I can go to EuroHaskell, of course, right?
+17:50:10 <shapr> sadly, I don't have the cash for that
+17:50:50 <Riastradh> Out of curiosity, do you have any idea how much a one-way such ticket would cost on such a short notice?
+17:51:13 <shapr> I don't have the cash to buy me or anyone else a ticket between the US and Europe
+17:53:09 <shapr> bring: coding?
+17:53:22 <bring> nope, just got home
+17:53:41 <bring> answered an email on the haskelldb list
+17:54:05 <bring> I ended up at a party thrown in Ikeas parking lot
+17:54:14 <bring> earlier tonight
+17:54:37 <shapr> gÃ¶teborg sounds much more exciting than boden
+17:54:40 <bring> 13 buses full of students from lund
+17:55:04 <shapr> wow
+17:55:05 <bring> every year, they go bus bus to göteborg, then ride tandem bikes back
+17:55:27 <shapr> that's shockingly bizzare
+17:55:30 <bring> they take turns, changing every 20 km or so
+17:55:49 <bring> they started at 21.00 from central göteborg today
+17:56:07 <bring> their first stop was in Ikea's parking lot
+17:56:12 <shapr> of course, I have my unicycle, so I'm being hypocritical
+17:56:29 <shapr> and they had beer on the tandems?
+17:56:37 <bring> on the buses
+17:56:40 <shapr> oh
+17:56:56 <shapr> sounds like fun
+17:57:00 <bring> we took our bikes and followed them out there
+17:57:11 <shapr> nifty :-)
+17:57:20 <bring> we beat them :)
+17:57:29 <shapr> ha!
+17:57:38 <bring> but they had been drinking since 9 this morning, so they're excused
+17:57:51 <bring> and we knew a shorter way
+17:58:21 <shapr> I can barely survive an hour of beers at a pub
+17:58:39 <bring> they had a DJ and everything with them
+17:58:51 <shapr> swedish students are scary
+17:58:55 <bring> so they set up at party outside Ikea for a couple of hours
+17:59:35 <bring> being a student in Lund seems really nice
+17:59:49 <shapr> gÃ¶teborg has more code
+17:59:56 <bring> better parties than in göteborg
+18:00:24 <bring> I blew a tire on the way back from Ikea
+18:00:31 <shapr> suck
+18:00:36 <bring> had to walk
+18:00:40 <shapr> do you have a spare?
+18:00:47 <shapr> guess not
+18:01:03 <shapr> oh! I can freemount now!
+18:01:04 <bring> then convince a bus driver to let me on the bus with the bike
+18:01:08 <bring> cool!
+18:01:31 <shapr> in seattle they had bike racks on all the buses
+18:01:38 * bring is just slightly drunk and rambling
+18:01:40 <shapr> I'm surprised they don't here
+18:01:47 <bring> yeah, they should
+18:01:52 <shapr> well, no one else is talking
+18:02:11 <bring> the göteborg public transit company is really infexible
+18:02:23 <bring> they don't even allow wheelchairs on the trams
+18:03:00 <shapr> that's ...
+18:03:10 <bring> http://www.vasttragik.se/ has more info
+18:03:15 <shapr> I can't think of any tactful words
+18:03:31 <bring> the company is called västtrafik
+18:04:09 <bring> this guy made the vasttragik site to let people know about it
+18:05:18 <bring> I think the stupidest thing about the whole story is that when the bought new trams with a lower floor, they started using wheelchairs as symbols for those new trams, but wheelchairs weren't allowed on them
+18:05:36 <shapr> oy
+18:06:39 <isomer> ?
+18:08:14 <shapr> hi anth
+18:08:21 <shapr> how's school?
+18:10:20 <shapr> well, they're dumping the international baccalaureate program here in Boden because none of the students take it
+18:12:23 <bring> IB rocks
+18:12:44 <bring> do they know why noone is taking it?
+18:12:57 <bring> is their IB program any good?
+18:13:05 <shapr> I dunno
+18:13:34 <shapr> bea's frisyr said it's much harder than anything else around here
+18:14:16 <bring> I have understood that the IB programs can be very different, and that especially the ones in smaller cities may have problems attracting good english-speaking teachers
+18:14:45 <bring> frisyr=hair cut, did you mean frisör=hair dresser?
+18:14:47 <bring> :)
+18:14:50 <shapr> er, yes
+18:15:06 <shapr> it's after 3am
+18:15:09 <bring> I did IB in göteborg
+18:15:11 <bring> oh
+18:15:13 <bring> yeah
+18:15:16 <bring> time for bed
+18:15:20 <shapr> right
+18:15:26 <shapr> g'nÃ¤tt
+18:23:09 <isomer> shapr: schooll.... man, it's work all the way. gotta refill the gas tank for a while :(
+18:47:29 <Fusk> @find godspeed
+18:47:29 <lambdabot> Sorry, I don't know the command "find", try "lambdabot: @listcommands"
+18:47:49 <ski> @seen godspeed
+18:47:49 <lambdabot> I haven't seen godspeed
+18:47:53 <Fusk> lambdabot: @listcommands
+18:47:53 <lambdabot> I react to the following commands: ["all-dicts","arr","define","definitions
+18:47:53 <lambdabot> ,"del-definition","det","devils","dict","dict-help","dummy","dump","dynamic
+18:47:53 <lambdabot> load","dynamic-reload","dynamic-unload","easton","echo","elements","eurohaskell
+18:47:53 <lambdabot> ,"eval","foldoc","fortune","gazetteer","get-definition","goodbye","hello
+18:47:53 <lambdabot> ,"hitchcock","jargon","join","karma","karma+","karma-","learn","leave",
+18:47:54 <lambdabot> listchans","listcommands","listmodules","lojban","moo","msg","musasabi"
+18:47:56 <lambdabot> "part","prelude","quit","reconnect","resume","seen","set-fuel","shapr",
+18:47:58 <lambdabot> state","topic-cons","topic-init","topic-snoc","topic-tail","topic-tell"
+18:48:00 <lambdabot> "type","vera","web1913","wiki","wn","world02","yow"]
+18:51:54 <simon-> lambdabot: yow
+18:51:55 <lambdabot> Sorry, I'm not a very smart bot yet, try "lambdabot: @listcommands"
+18:52:07 <simon-> cool though.
+18:52:18 <Fusk> what's the bot do?
+18:52:25 <ski> try @yow
+18:52:35 <Fusk> @yow
+18:52:36 <lambdabot> I brought my BOWLING BALL - and some DRUGS!!
+18:52:47 <Fusk> @yohah
+18:52:47 <lambdabot> Sorry, I don't know the command "yohah", try "lambdabot: @listcommands"
+18:52:54 <Fusk> hah
+18:54:42 <simon-> @yow
+18:54:42 <lambdabot> Awright, which one of you hid my PENIS ENVY?
+18:55:39 <Spark> cool, freud
+18:55:51 <ski> @arr
+18:55:52 <lambdabot> Yeh scurvy dog...
+18:55:55 <ski> @arr
+18:55:56 <lambdabot> Well me hearties, let's see what crawled out of the bung hole...
+18:56:00 <ski> @arr
+18:56:00 <lambdabot> Eat maggoty hardtack, ye unkempt, jenny frequentin', son of a gun.
+18:56:11 <Fusk> @yow
+18:56:12 <lambdabot> Is a tattoo real, like a curb or a battleship?
+18:56:12 <lambdabot>  Or are we suffering in Safeway?
+18:56:36 <ski> @moo
+18:56:37 <lambdabot>          (__)
+18:56:37 <lambdabot>          (oo)
+18:56:37 <lambdabot>    /------\\/
+18:56:37 <lambdabot>   / |    ||
+18:56:37 <lambdabot>  *  /\\---/\\
+18:56:37 <lambdabot>     ~~   ~~
+18:56:39 <lambdabot> ...."Have you mooed today?"...
+18:56:50 <ski> @hello
+18:56:50 <lambdabot> Hello world. 
+18:57:00 <ski> @goodbye
+18:57:00 <lambdabot> Hello world. 
+18:57:15 <Fusk> @fortune
+18:57:16 <lambdabot> <Deek> you GPL your homework? :)
+18:57:16 <lambdabot> <knghtbrd> yah  =D
+18:57:16 <lambdabot> <knghtbrd> Anyone is permitted to use or modify my homework, but if they
+18:57:16 <lambdabot>            distribute changes they must include the full machine-readable
+18:57:16 <lambdabot>            source code ;>
+18:57:48 <Fusk> YEAH! finally getting the Ravenous soundtrack
+18:58:35 <ski> lambdabot: i like that one :)
+18:58:35 <lambdabot> Sorry, I'm not a very smart bot yet, try "lambdabot: @listcommands"
+19:00:29 <Spark> @goodbye
+19:00:30 <lambdabot> Hello world. 
+19:01:10 <Cale> @yow
+19:01:11 <lambdabot> I HAVE to buy a new ``DODGE MISER'' and two dozen JORDACHE
+19:01:11 <lambdabot>  JEANS because my viewscreen is ``USER-FRIENDLY''!!
+19:02:11 <Spark> am cold
+19:02:12 <Fusk> lambdabot:@fortune
+19:02:14 <lambdabot> Thus spake the master programmer:
+19:02:14 <lambdabot> 	"A well-written program is its own heaven; a poorly-written program
+19:02:14 <lambdabot> is its own hell."
+19:02:14 <lambdabot> 		-- Geoffrey James, "The Tao of Programming"
+19:02:58 <Fusk> wow, this sort of thing makes me not want to program things
+19:03:19 <Fusk> i mean, its cool and all
+19:03:31 <ski> why not ?
+19:03:33 <Fusk> but..
+19:16:43 <simon-> thank you, we got it now.
+20:33:55 <SamB> hmm, the makefile for " Implementing functional languages: a tutorial" is interesting.
+21:19:57 <SamB> hmm, Simon Peyton Jones has an interesting habbit of spelling win32 paths with /s instead of \s ;-)
+21:24:27 <ski__> how could that be ?
+21:26:12 <SamB> well, who's to say it doesn't work? how many people even try it?
+21:27:19 <ski__> it works with cygwin, iirc
+21:28:32 <SamB> yeah, of course it works with cygwin!
+21:39:42 <ski__> hi Gahhh
+21:40:25 <Gahhh> hi
+21:40:39 <ski__> know any haskell ?
+21:40:45 <Etaoin> I do
+21:40:59 <ski__> Etaoin : i know that
+21:41:08 <Etaoin> ?
+21:41:11 <Gahhh> I've been learning
+21:41:16 <ski__> ok
+21:41:21 <Etaoin> I don't know how you'd know
+21:41:42 <Gahhh> did you have a question ?
+21:41:46 <ski__> Etaoin : i think you're a regular here, no ?
+21:42:21 <ski__> yes, it is : do you have any questions about haskell ?    ;)
+21:42:32 <Gahhh> heh
+21:42:39 <Gahhh> I've been doing ok
+21:42:42 <Etaoin> ski__: I stay in this channel, lurking mostly
+21:42:50 <Gahhh> right now I am getting more familiar with monads
+21:43:02 <Gahhh> reading this: http://www.engr.mun.ca/~theo/Misc/haskell_and_monads.htm
+21:43:09 <ski__> Etaoin : at least seen you talking before, i'm sure of.  well, nevermind
+21:43:30 <ski__> that's nice
+21:45:45 <ski__> doh!
+21:46:19 <ski__> *both* http://www.abercrombiegroup.co.uk/~noel/research/monads.html and http://www.nomaware.com/monads/html/index.html seem broken
+21:47:06 <Gahhh> well, I understood the part all the way down to the implementation of bind
+21:47:23 <ski__> ok
+21:47:29 <Gahhh> it took me over an hour tho lol
+21:51:01 <ski__> understood all of it ?
+21:51:32 <Gahhh> up to introduction of 'do'
+21:51:36 <ski__> ok
+21:52:22 <ski__> that is syntactic sugar for >>= and >> calls
+21:52:30 <Gahhh> yeah
+21:52:40 <Gahhh> some impressive trick, tho
+21:52:49 <ski__> yes
+22:06:06 <chappy> hi
+22:06:44 <chappy> is there a function in the prelude or other libraries that i can use to time how long the execution of a function takes?
+22:07:13 <chappy> anyone home?
+22:07:30 <ski__> hmm
+22:07:47 <chappy> hi
+22:08:08 <ski__> you could use some ghc function to get current time and so on, i guess
+22:08:22 <chappy> hmm..
+22:08:26 <chappy> i am using hugs
+22:08:35 <[dan]> well, there's the standard way... compile it and use the time command in unix to time overall program execution
+22:08:49 <chappy> ahhh
+22:08:53 <ski__> also, it's a bit hard to tell 'how long the execution of a function takes'
+22:09:08 <chappy> but the compiled function will run faster than the interpreted version
+22:09:12 <ski__> what do you consider belonging to the execution of the function
+22:09:17 <ski__> remember, haskell is lazy
+22:09:39 <[dan]> in an interpreter, especially with a language like haskell, it's very difficult to measure "execution time" per se
+22:09:43 <ski__> are you using hugs ?
+22:09:46 <chappy> yeah... i guess time of function would be from first invocation to end result returned
+22:10:01 <chappy> yeah should i switch to ghc
+22:10:01 <ski__> how much of end result computed ?
+22:11:26 <ski__> in hugs :
+22:11:30 <ski__> :s +s
+22:11:39 <ski__> Prints no. reductions/cells after eval
+22:11:50 <ski__> maybe that helps some ?
+22:12:26 <ski__> Prelude> :s +s
+22:12:26 <ski__> Prelude> length $ reverse [0..10000]
+22:12:26 <ski__> 10001
+22:12:26 <ski__> (270059 reductions, 380087 cells, 1 garbage collection)
+22:12:26 <ski__> Prelude>
+22:13:04 <chappy> let me see
+22:13:24 <ski__> try just ":s" to see a list of the settable options
+22:14:36 <chappy> ok
+22:18:10 <chappy> what exactly was 10001
+22:18:24 <chappy> what is some measurement?
+22:22:17 <chappy> ?
+22:23:44 <Gahhh> length of the list
+22:24:57 <Gahhh> the Time library contains some functions to compute duration
+22:25:17 <chappy> oh ok
+22:25:43 <Gahhh> I'm guessing that you'll have to do some imperative programming
+22:25:52 <chappy> grrr...
+22:25:53 <chappy> ok
+22:26:20 <SamB> if it is numbers, you can sum them
+22:27:12 <Gahhh> that might be a nifty utility function tho. Something like "stopWatch expression".
+22:27:25 <SamB> well, for such a simple example that would be silly, of course...
+22:50:09 <ski__> Gahhh : what would stopWatch do ?
+22:52:39 <Gahhh> take an expression, record the current time, evaluate the expression, compute the time difference, and return it
+22:53:42 <Gahhh> I suppose I need convince hugs that it really needs to evaluate the expression, tho
+23:09:54 <SamB> Gahhh: you actually have to make it do something with every little piece of the value...
+23:11:37 <Gahhh> I think I am wrong
+23:12:22 <ski__> some kind of deepSeq, if that's what you want ..
+23:15:42 <Gahhh> hmm, this compiles:
+23:15:49 <Gahhh> do
+23:15:56 <Gahhh>  ct1 <- getClockTime
+23:16:04 <Gahhh> tmp <- return( 1 + 2 )
+23:16:10 <Gahhh> ct2 <- getClockTime
+23:16:14 <Gahhh> putStr $ show (diffClockTimes ct1 ct2)
+23:17:12 <SamB> Gahhh: somehow I don't think that will do much.
+23:17:37 <SamB> maybe because 1 + 2 is such an easy expression ;-)
+23:17:42 <Gahhh> nah
+23:17:52 <Gahhh> I tried "reverse [1..100000]"
+23:17:57 <Gahhh> still no time difference
+23:18:34 <ski__> you have to force it *before* the second getClockTime
+23:18:48 <SamB> oh, and yeah. even such a simple expression as 1+2 would need forcing...
+23:18:55 <ski__> ct2 <- tmp `seq` getClockTime
+23:19:09 <ski__> also, you can write
+23:19:13 <ski__> let tmp = 1 + 2
+23:19:17 <ski__> instead of
+23:19:19 <ski__> tmp <- return( 1 + 2 )
+23:19:29 <ski__> (note : no 'in' after it)
+23:20:11 <ski__> also, note that seq only forces the top-level constructor of an expression
+23:20:41 <ski__> (in this case the whole list skeleton would prolly be constructed, though. i think)
+23:21:07 <ski__> (e.g. if you use "let tmp = reverse [1..100000]" instead)
+23:22:25 <Gahhh> hmm I couldnt get the let to work
+23:22:38 <ski__> do ct1 <- getClockTime
+23:22:43 <ski__>    let tmp = reverse [1..100000]
+23:22:46 <ski__>    ct2 <- getClockTime
+23:22:49 <ski__>    putStr $ show (diffClockTimes ct1 ct2)
+23:22:53 <ski__> like that
+23:22:59 <Gahhh> oh
+23:23:04 <ski__> same indentation
+23:23:09 <ski__> you can also have
+23:23:11 <ski__> do ...
+23:23:15 <ski__>    let a = ...
+23:23:21 <ski__>        f x = ...
+23:23:25 <ski__>    ...
+23:23:31 <Gahhh> it's complaning about last gen
+23:23:54 <ski__> you should not have a generator as last line
+23:24:03 <ski__> no '<-' should be in it
+23:24:12 <Gahhh> putStr is there
+23:24:40 <ski__> are you sure putStr is not indented more than the previous line ?
+23:24:58 <ski__> you can paste the code here, so we can look at it
+23:25:17 <Gahhh> ok, it was tabs vs spaces again
+23:25:20 <ski__> aha
+23:25:30 <SamB> use a decent editor?
+23:25:34 <Gahhh> emacs
+23:26:03 <SamB> hmm. emacs is misbehaving?
+23:26:10 <Gahhh> my tabs are set to 4 tho. I guess it's confusing the haskell-mode
+23:26:39 <SamB> oh, oh. yes. I didn't know emacs supported such evils.
+23:26:39 <Gahhh> heh
+23:26:43 <Gahhh> "ERROR - C stack overflow"
+23:26:45 <ski__> hugs prolly thinks tabs are 8 spaces
+23:27:14 <ski__> that looks bad
+23:27:17 <Gahhh> I'm running hugs from inside emacs, too
+23:27:24 <Gahhh> on windows XP
+23:27:25 <Gahhh> heh
+23:27:39 <ski__> what happens with a standalone hugs ?
+23:27:44 <Gahhh> well, stack overflow happens for reverse [1..100000]
+23:27:54 <Gahhh> for 10000, it works, but zero time diff
+23:28:41 <Gahhh> I am going to pass it to sort() as well
+23:28:54 <SamB> Gahhh: somehow I don't think windows XP is responsible for the particular evil you are encountering
+23:29:39 <Gahhh> course noe
+23:29:47 <Gahhh> btw, there is a CPUTime library
+23:29:51 <Gahhh> I should be using that actually
+23:30:08 <ski__> hmm, someone mentioned Time being broken earlier. perhaps thats hugs too, and not just ghc (or maybe only hugs ?)
+23:30:17 <ski__> ok
+23:30:18 <ski__> no
+23:30:20 <ski__> of course
+23:30:38 <ski__> s/reverse [1..100000000]/length (reverse [1..100000000])/
+23:30:41 <ski__> try that
+23:30:43 <ski__> hmm
+23:30:45 <ski__> mayybe
+23:30:54 <Gahhh> ok, nonzero result
+23:30:55 <andersca> ski__: up early?
+23:31:10 <ski__> hmm, still no useful result
+23:31:15 * ski__ tries ghci
+23:31:38 * ski__ slaps himself hard
+23:31:57 * ski__ forgot to include the "tmp `seq`" !
+23:32:14 <ski__> andersca : no, up late
+23:32:20 <andersca> oh, that's worse :)
+23:32:44 <ski__> hmm this looks better
+23:32:47 <ski__> ERROR - Garbage collection fails to reclaim sufficient space
+23:33:05 <ski__> with 10000 still ~0 time
+23:33:18 * ski__ really tries ghci
+23:33:32 <Gahhh> are you using getCPUTime ?
+23:33:41 <ski__> Gahhh : i hope *you* didn't forgot to add "tmp `seq`"
+23:33:45 <ski__> getClockTime
+23:33:49 <Gahhh> I didnt
+23:34:04 <Gahhh> I think CPUTime has more resolution
+23:34:16 <Gahhh> lol
+23:34:17 <Gahhh> not
+23:34:30 <ski__> that is maybe possible
+23:34:36 <Gahhh> it has 1e9 * 1e-12 seconds res , ergo, 1 ms
+23:34:51 <Gahhh> what a letdown
+23:35:11 <Gahhh> I need to compute something that takes longer than a millisec
+23:35:28 <ski__> no, ghci Time also gives nonsense
+23:35:37 * ski__ tries CPUTime
+23:35:44 <Gahhh> are you sure that seq will force that ?
+23:36:50 <ski__> Gahhh : btw,  print x = putStrLn (show x)
+23:37:40 <Gahhh> see these consecutive executions in hugs:
+23:37:53 <Gahhh> Util> crawl
+23:37:53 <Gahhh> 10014400000 1000000000
+23:37:53 <Gahhh> Util> crawl
+23:37:53 <Gahhh> 0 1000000000
+23:37:53 <Gahhh> Util> crawl
+23:37:54 <Gahhh> 0 1000000000
+23:37:56 <Gahhh> Util> crawl
+23:37:58 <Gahhh> 0 1000000000
+23:38:05 <Gahhh> second integer is res in picosecs
+23:38:13 <ski__> first is ?
+23:38:13 <Gahhh> first integer is diff
+23:38:20 <ski__> ok
+23:38:48 <ski__> i suppose it caches the value of crawl
+23:38:57 <ski__> Gahhh :  :t crawl  ?
+23:39:37 <Gahhh> crawl is the function that does the "do yadda"
+23:39:57 * ski__ 's examples shouldn't be affected by such. he typed the do-expressions *directly* into Hugs/GHCi
+23:40:09 <ski__> yah, but what's its type ?
+23:40:14 <ski__> IO ()  ?
+23:40:34 <ski__> or IO Int   or Int  ?
+23:40:41 <ski__> ask hugs/ghci
+23:40:47 <Gahhh> IO ()
+23:40:49 <ski__> ok
+23:40:57 <ski__> hmm
+23:41:26 <ski__> seems weird it caches that way
+23:41:27 <ski__> hmm
+23:41:43 <Gahhh> ok, I switched to using fibonacci
+23:41:48 <Gahhh> I am getting zero
+23:41:49 <ski__> how does the definition of crawl look like ?
+23:41:54 <Gahhh> for any fib n
+23:42:04 <Gahhh> it's the same one as yours
+23:42:14 * ski__ has an idea of why it caches it ..
+23:42:16 <Gahhh> crawl  = do ct1 <- getCPUTime
+23:42:17 <Gahhh>             let tmp = take 10000 fib
+23:42:17 <Gahhh>             ct2 <- tmp `seq` getCPUTime
+23:42:17 <Gahhh>             putStr ( show (ct2 -ct1) ++ " " ++ show(cpuTimePrecision) )
+23:42:23 <ski__> ok
+23:42:37 <ski__> what did the old 'let' line say ?
+23:42:51 <Gahhh> reverse [1..10000]
+23:42:56 <ski__> ok
+23:43:08 <ski__> i definitely understand why this new def. caches
+23:43:19 <ski__> namely because fib is a global
+23:43:24 <ski__> and thus persistant
+23:43:45 <Gahhh> yeah, I am going to pass ct1 as an arg to fib
+23:43:49 <ski__> even if you run crawl one time more, fib is already caches (10000 elements of it)
+23:44:23 <ski__> probably suffices to define fib local to crawl
+23:44:28 <Gahhh> how do I make an Int from an Integer ?
+23:44:45 <ski__> or let fib take () as an argument, and define the real fib local to that
+23:44:51 <ski__> fromIntegral
+23:45:22 <ski__> (or, make so the Integer is an Int from the beginning, if possible)
+23:45:46 <Gahhh> local fib changes nothing
+23:45:56 <ski__> hmm
+23:46:14 <ski__> prolly for the same reason the reverse [1..10000] above didn't
+23:46:16 <ski__> hmm
+23:46:28 <ski__> it optimises it out
+23:46:36 <ski__> s/out/back/
+23:46:37 <Gahhh> go hugs
+23:53:36 <ski__> Gahhh : maybe if you passed 0 to fib, and fib added its argument to all elements of the list .. ?
+23:53:37 <Gahhh> I dont see how "seq exprA exprB" forces exprA to be eval'd
+23:53:53 <ski__> it's in the semantics of seq
+23:54:05 <ski__> seq _|_ b = _|_
+23:54:11 <ski__> seq a b = b
+23:55:21 <Gahhh> can hugs guess that fib wont produce bottom and skip evaluation ?
+23:55:37 <ski__> hmm
+23:55:53 <ski__> don't think so, but not totally sure
+23:55:59 <ski__> anyone knows ?
+23:56:04 <ski__> hmm
+23:56:05 <ski__> well
+23:56:21 <ski__> also
+23:56:38 <ski__> use length $ take 10000 fib
+23:56:57 <ski__> otherwise you'll definitely not force more than the head structure of the list
+23:57:01 <ski__> try that
+23:57:18 <Gahhh> different number!
+23:57:23 <ski__> oh :)
+23:57:27 <ski__> how big ?
+23:57:39 <Gahhh> Util> crawl
+23:57:40 <Gahhh> 120172800000 1000000000
+23:57:40 <Gahhh> Util> crawl
+23:57:40 <Gahhh> 110158400000 1000000000
+23:57:40 <Gahhh> Util> crawl
+23:57:40 <Gahhh> 110158400000 1000000000
+23:57:42 <Gahhh> Util> crawl
+23:57:46 <Gahhh> 110158400000 1000000000
+23:57:48 <Gahhh> Util> crawl
+23:57:50 <Gahhh> 100144000000 1000000000
+23:57:52 <Gahhh> Util> crawl
+23:57:54 <Gahhh> 110158400000 1000000000
+23:57:56 <ski__> nice
+23:58:42 <ski__> did you add a parameter to fib (or make it local to a wrapper fib or to crawld) ?
+23:58:58 <Gahhh> global fib
+23:59:04 <ski__> ok
+23:59:18 <Gahhh> ERROR - Garbage collection fails to reclaim sufficient space
+23:59:20 <Gahhh> heh
+23:59:24 <Gahhh> thats with 100000
+23:59:24 <ski__> in hugs ?
+23:59:46 <ski__> were the above crawls in hugs or ghci ?
+23:59:50 <Gahhh> hugs
+23:59:52 <ski__> ok

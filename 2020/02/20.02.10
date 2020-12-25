@@ -1,0 +1,729 @@
+00:00:10 <jojojojojo> so the performance will already be worse than `decodeUtf8With`, and depending on how good the implementation of `pack` is, (pack . toString) may not be as bad as it seems
+00:05:09 <davean> alc: you did see https://hackage.haskell.org/package/text-1.2.4.0/docs/Data-Text-Encoding-Error.html#v:lenientDecode right?
+00:12:13 <newhoggy> d34df00d: The basic principle is to treat a `Word64` as a sequence of eight bytes and figure out how to process them all simultaneously.  For example if I wanted to count how many occurrences of `0x0a` in the `Word64` then I build a bitmask containing eight copies of `0x0a` then XOR with the data.  If any byte in the `Word64` was a `0x0a` then that byte would become zero.  Other bytes would be non-zero.
+00:14:19 <alc> davean: ok
+00:16:11 <alc> jojojojojo: davean, toText = decodeUtf8With lenientDecode
+00:26:04 <newhoggy> d34df00d: Then count how many bytes that are zero.  You can take the complement to change the problem to count how many bytes are `0xff`.  Use a combination of `.&.` and shifts to AND all the bits that belong to the same byte together so that the result bits are found in the mask `0x0101010101010101`.  AND with this mask to that only the result bits remain.  Then use the `popCount1` function to count how many bits 
+00:26:04 <newhoggy> there are.  This gives you how many newlines in your eight-byte sequence.
+01:00:04 <Axman6> no need for a popcount, if you only have bits set in the low bit of each byte, multiplying by word by 0x0101..01 will sum the number of 1's in the second highest byte (see my text-utf8 PR)
+01:11:45 <edwardk> Axman6: nice trick
+01:12:39 <edwardk> Axman6: now all you need is a top level index to let you skip through for rank/select and you should be able to quickly jump to the nth character or count characters up to a given position
+01:13:13 <alc`> how to match that one element in a list?
+01:13:28 <alc`> snd (x:[]) = x
+01:13:49 <alc`> snd (x:xs) = head xs
+01:13:55 <alc`> this won't work
+01:14:20 <alc`> get the second element from a list, if this list isn't empty
+01:18:06 <merijn> alc`: "snd (_:x:xs) = x"? :)
+01:18:33 <alc`> aha
+01:19:08 <merijn> alc`: You can nest pattern matches arbitrarily deep (so two : matches in one pattern in this case)
+01:19:33 <merijn> alc`: You can also do things like "Just x : xs" to match if the first value of [Maybe a] is a Just value
+01:23:02 <dminuoso> Why is groupWith in GHC.Exts and not Data.List?
+01:24:28 <edwardk> dminuoso: because it was added just to make the linq-backport-to-haskell syntax stuff work and was never proposed as any sort of official libraries process
+01:24:57 <edwardk> dminuoso: same with 'the'
+01:25:52 <edwardk> TransformListComp went into the compiler and was never seen again
+01:26:20 <MarcelineVQ> you will find groupWith and sortWith in Data.List.NonEmpty however
+01:27:07 <edwardk> yeah, i brought them into the nonempty module when it was in the semigroups lib, and when it was merged into base it was taken unmodified
+01:27:39 <phadej> sortWith / sortOn naming is a wart :/
+01:27:48 <dminuoso> edwardk: They don't use build internally though.
+01:27:57 <dminuoso> Do they fuse well?
+01:28:10 <edwardk> dminuoso: probably not
+01:28:34 <edwardk> the folks who wrote those aren't the folks (singular, i guess, dfeuer for all he does is just one person) who care about fusion
+01:29:18 <edwardk> and yeah groupWith sortWith are somewhat unfortunate
+01:32:52 <boxscape> if you're being hyper-aware of performance, does it make sense to use `case (# a, b #) of ...` instead of `case (a, b) of ...`?
+01:33:13 <merijn> boxscape: Yes, no, maybe?
+01:33:33 <boxscape> I suppose only benchmarking would let me truly know, eh
+01:33:56 <merijn> mmm
+01:34:25 <merijn> My option parser taking 100% CPU probably implies I fucked up... >.>
+01:35:46 * Arahael peers at merijn, sadly.
+01:36:05 <merijn> Looks like the Alternative isntance of Compose is messing with me
+01:36:05 <Athas> merijn: never happens with getopt!
+01:36:43 <merijn> Athas: To be fair this is more my own atrocious monadic validation fucking things up
+01:37:23 <merijn> Athas: My long term plan is to find a nice Selective formulation of what I want and contribute the necessary parts to optparse, but I don't have time for that right now, so ugly hacks it shall be
+01:41:38 <dminuoso> merijn: Sadly, we'd have to give up ApplicativeDo if we move to optparse-selective :(
+01:41:52 <dminuoso> Is SelectiveDo a possibility?
+01:42:11 <merijn> dminuoso: I rarely/never use ApplicativeDo for optparse
+01:42:18 <merijn> dminuoso: Also, why would you need to give it up?
+01:42:20 <dminuoso> merijn: It's wondeful in combination with RecordWildCards
+01:42:36 <merijn> dminuoso: Using selective doesn't preclude using Applicative
+01:42:47 <Taneb> dminuoso: I presume everything would still work if you didn't use the bits that needed Selective
+01:42:59 <dminuoso> Ohh, it's a superclass right
+01:43:12 <dminuoso> merijn: `do field1 <- ...; field2 <- ...; field3 <- ...; pure T{..}`
+01:43:36 <dminuoso> For larger applicative blocks its far less error prone than `<$> ... <*>`ing things.
+01:43:43 <merijn> dminuoso: All Applicative's are Selective by definition (with some limitations on their usefulness)
+01:43:50 <lembot> hello, I have a little question: Is it possible to add state to a Monad that I'm importing from another module (black box). I have tried to put it in a monad stack with no succes. In particular I want to add some state to the CoreM monad from the CoreMonad module. Is it possible?
+01:50:30 <merijn> lembot: I'm unsure what you mean by that
+01:50:52 <merijn> Athas: Yeah, seems like the Alternative instance of Compose is too blame (or my abuse of it, anyway)
+01:51:59 <dminuoso> lembot: `StateT YourState CoreM`
+01:56:03 <lembot> merijn: I want to have something like this: newtype MyMonad a = MM StateT MyState SomeMonad a, the thing is that SomeMonad is defined as newtype SomeMonad a = SM {runSM :: something}, but runSM is not exportedso I cant make some custom SomeMonadT to put in the stack. I'm I complicating everything?
+01:56:34 <dminuoso> lembot: Sure you can.
+01:56:55 <dminuoso> lembot: You do not need runSM to unpack it.
+01:57:20 <dminuoso> lembot: All you need is `newtype YourM a = YourM { runYourM :: StateT SourState CoreM a }`
+01:57:45 <dminuoso> You can then use GND to get all the instances you need like Functor, Applicative, Monad, MonadState
+01:58:09 <dminuoso> (Or you handwrite them, it makes no difference)
+01:58:35 <dminuoso> It's sort of the point of monad transformers, to be able to add effects to another monad without boilerplate.
+01:59:09 <lembot> dminuoso: Thanks, I think I haave tried that, but possibly made some mistake. I'll try and report back.
+02:00:56 <dminuoso> lembot: In fact, recall how you can do `StateT Int IO` *without* having some `runIO :: IO a -> ...` function? :)
+02:01:18 <dminuoso> IO is sealed as well.
+02:14:20 <syd> Can someone explain to me what CONSTANT_FOLDED means?
+02:14:25 <syd> https://github.com/ghc/ghc/blob/8dd9929ad29fd200405d068463af64dafff6b402/libraries/base/GHC/Natural.hs#L241-L244
+02:15:48 <dminuoso> syd: https://downloads.haskell.org/~ghc/latest/docs/html/libraries/integer-gmp-1.0.2.0/src/GHC-Integer-Type.html
+02:15:56 <merijn> syd: "constant folding" is a compiler optimisation that replaces computations on known constants with their result
+02:16:13 <merijn> syd: So if you write "1 + 3" constant folding would compile that as if you wrote 4
+02:16:28 <dminuoso> syd: It's just NOINLINE in disguise :)
+02:17:06 <dminuoso> syd: Presumably the CPP macro is just to communicate a particular usecase of NOINLINE
+02:17:41 <syd> aha
+02:17:45 <syd> that explains
+02:17:50 <syd> but it doesn't solve my problem, dammit ;P
+02:18:01 <syd> I'm getting a segfault in this function and I don't know why
+02:18:43 <dminuoso> syd: Can you try and isolate it into a minimal testcase?
+02:18:49 <syd> working on it
+02:20:23 <syd> currently I noticed that if I generate a certain newtype wrapper around natural, nothing goes wrong
+02:20:29 <syd> but when I generate that thing as part of a record
+02:20:32 <syd> then I get a segfault
+02:21:34 <MarcelineVQ> generate?
+02:22:20 <syd> as part of a property test for example
+02:22:29 <syd> it's really far down a rabit hole
+02:22:33 <syd> I'll write it up first
+02:26:02 <syd> I just really hope it's not a GHC bug that I'm triggering
+02:28:44 <merijn> I always feel proud when I find one of those :p
+02:31:19 <syd> Even weirder: when I build with nix, it doesn't segfault but it gives me an arithmatic underflow exception
+02:31:51 <merijn> syd: At compile time or runtime?
+02:31:56 <syd> at runtime
+02:32:00 <syd> well, at testing time
+02:35:09 <lembot> dminuoso: Thanks for the help and insights :). But I remebered why I didn't stick with this solution. My code broke, now just some og the code is executed. I put traces everywhere and discover that, for example certain match case A is executed, but the functions in it are not. Lazyness is probably playing with me.
+02:45:57 <syd> dminuoso & merijn: https://gist.github.com/NorfairKing/1ef3ece6c70b312dd4bf65d832b38363
+02:46:02 <syd> this is the current state of my investigation
+03:16:17 <syd> I tried to reproduce the problem minimally
+03:16:22 <syd> https://github.com/NorfairKing/natural-segfault-repro
+03:16:29 <syd> but the problem doesn't occur in a different repository.
+03:17:25 <syd> dminuoso
+03:17:27 <syd> dminuoso
+03:17:35 <syd> whoops, can't edit a message on IRC
+03:17:42 <syd> just wanted to ping you
+03:19:00 <dminuoso> syd: Which ghc version does it segfault with?
+03:19:24 <syd> it's with snapshot 14.7
+03:19:29 <syd> so ghc version 8.6.5
+03:19:47 <dminuoso> Let's see if I can reproduce it with 8.6.5 locally, withot stack
+03:20:17 <syd> I can't even reproduce it with stack in another directory
+03:20:44 <MarcelineVQ> does your ghc use gmp?
+03:20:46 <dminuoso> What do you mean by "in another directory" exactly?
+03:21:11 <syd> I tried making a minimal repro here: https://github.com/NorfairKing/natural-segfault-repro but that doesn't segfault
+03:21:20 <syd> while it does segfault with ghci in the smos repo
+03:23:01 <syd> it also doesn't segfault with ghci in the repro repository
+03:23:09 <syd> so it's not a ghci/ghc thing I think
+03:23:36 <syd> I already checked the dynamically linked versions of libgmp but they're identical when building with nix vs stack
+03:23:42 <syd> and the nix one doesn't segfault while the stack one does
+03:30:07 <syd> I also tried renaming the smos directory to see if that had anything to do with it, but thankfully it doesn't
+03:31:29 <syd> Upgrading to lts-14.25 solves the problem, but it's the same ghc version
+03:31:44 <dminuoso> Huh wow! `cabal v2-run --enable-optimization=2` has a stale cache and doesn't correctly recompile my project!
+03:32:02 <dminuoso> If I drop the --enable-optimization=2 it correctly runs the updated code, and if I add it back, it runs some old stale binary
+03:36:38 <__monty__> dminuoso: That sounds bad, did you notify cabal devs? (in #hackage for example)
+03:40:20 <dminuoso> __monty__: Ah, Ill try there then.
+03:47:48 <L29Ah> how do i ask ghci/rtl what the haskell threads are doing/waiting for?
+03:59:35 <merijn> L29Ah: Not sure if ghci can do that
+04:01:43 <L29Ah> okay, is there a better tool?
+04:01:55 <merijn> threadscope, maybe?
+04:31:47 <merijn> Someone should go and implement support for named parameters in persistent's raw queries... >.>
+04:35:49 <dminuoso> Or maybe you should stop complaining and use sqlite-simple.
+04:35:52 <dminuoso> :p
+04:36:14 <syd> merijn and dminuoso I found one of the problems: https://github.com/yesodweb/persistent/issues/1031
+04:36:15 <merijn> dminuoso: I will, if you migrate all my existing code
+04:37:09 <dminuoso> syd: I dont see how this would segfault anything.
+04:37:27 <syd> it's another issue, me neither :)
+04:37:57 <merijn> syd: Why do you even have values that big? >.>
+04:38:18 <syd> because I was using a Natural
+04:38:23 <syd> and the values were being generated by randomnes 
+04:38:33 <syd> if you don't have values that big, why even use natural
+04:39:11 <merijn> dminuoso: I'm already a top 10 persistent contributor at this point, so I don't wanna do all the work to add named queries >.>
+04:43:08 <newhoggy> Axman6: nice trick!
+04:43:43 <newhoggy> I new about sideways addition but reached for the easy option this time.  Haha
+04:44:19 <newhoggy> Would be nice is there was a way to select the best strategy for a given architecture automatically.
+04:58:53 * hackage laop 0.1.0.4 -   https://hackage.haskell.org/package/laop-0.1.0.4 (bolt12)
+05:04:18 <alc> https://paste.ubuntu.com/p/39JRc56cHX/
+05:04:32 <alc> I don't understand the error
+05:05:03 <alc> there's no Maybe Int
+05:05:37 <tabaqui1> % :t elemIndex
+05:05:37 <yahb> tabaqui1: Eq a => a -> [a] -> Maybe Int
+05:05:43 <tabaqui1> alc: here you are
+05:06:15 <alc> ok fk
+05:07:23 <alc> tabaqui1: !! :: [a] -> Int -> a, is there f :: [a] -> Int -> Maybe a?
+05:08:19 <boxscape> @hoogle [a] -> Int -> Maybe a
+05:08:21 <lambdabot> Safe atMay :: [a] -> Int -> Maybe a
+05:08:21 <lambdabot> Protolude atMay :: [a] -> Int -> Maybe a
+05:08:21 <lambdabot> Protolude.Safe atMay :: [a] -> Int -> Maybe a
+05:08:24 <boxscape> :t find
+05:08:25 <tabaqui1> alc: not in base, as I see
+05:08:26 <lambdabot> Foldable t => (a -> Bool) -> t a -> Maybe a
+05:08:46 <boxscape> (uh sorry find is not really related)
+05:08:54 <tabaqui1> alc: try to compose "uncons" with "drop"
+05:09:09 <tabaqui1> like "fmap fst . uncons . drop 2"
+05:09:15 <tabaqui1> % :t fmap fst . uncons . drop 2
+05:09:16 <yahb> tabaqui1: [b] -> Maybe b
+05:09:23 <sshine> 'atMay' sounds like pig latin
+05:09:40 <boxscape> we could just call it mat
+05:09:54 <alc> tabaqui1: https://hackage.haskell.org/package/containers-0.6.2.1/docs/Data-Map-Strict.html
+05:10:02 <alc> lookup :: Ord k => k -> Map k a -> Maybe a
+05:10:16 <alc> (!?) :: Ord k => Map k a -> k -> Maybe a 
+05:10:58 <alc> why Data.Map has that function, but not in Data.List
+05:11:13 <tabaqui1> if you can work with containers instead of List, probably you should do it
+05:11:22 <tabaqui1> Data.List sucks
+05:11:22 <boxscape> maybe it's to encourage people to use Data.List when they need random access data structures
+05:11:25 <boxscape> hm
+05:11:27 <tabaqui1> it is very primitive type
+05:11:30 <boxscape> Data.Map, not Data.List
+05:11:43 <alc> > [0..3] !! 9
+05:11:45 <lambdabot>  *Exception: Prelude.!!: index too large
+05:11:58 <tabaqui1> % let foo n = fmap fst . uncons . drop n
+05:11:58 <yahb> tabaqui1: 
+05:12:04 <boxscape> I don't think Data.List sucks, as long as you use it for the right purposes
+05:12:04 <tabaqui1> % foo 9 [0..3]
+05:12:04 <yahb> tabaqui1: Nothing
+05:12:07 <tabaqui1> % foo 2 [0..3]
+05:12:07 <yahb> tabaqui1: Just 2
+05:12:19 <boxscape> i.e. if you need a FIFO data structure, Data.List is perfectly fine
+05:12:40 <tabaqui1> boxscape: I agree with the first sentence but not with the second
+05:12:49 <alc> boxscape: if LIFO?
+05:12:51 <tabaqui1> I'm sure there is a better stack implementation
+05:13:45 <boxscape> hm I tried googling for haskell stack but I should have predicted that that doesn't work
+05:13:47 <Poscat[m]> you can use 2 lists to simulate a queue
+05:14:35 <tabaqui1> it is just a mathematical example
+05:14:49 <tabaqui1> lists have terrible performance
+05:15:23 <tabaqui1> it is okay to use them, if you can prove that you won't use indexes bigger than 20
+05:15:36 <tabaqui1> *indices
+05:16:47 <Poscat[m]> If your algorithm only pattern matches on head and tail o(1) then lists are quite fast
+05:17:28 <merijn> @quote Cale lists.are.
+05:17:28 <lambdabot> No quotes match. That's something I cannot allow to happen.
+05:17:30 <merijn> aww
+05:17:36 <merijn> @quote lists.are
+05:17:36 <lambdabot> byorgey says: if math, haskell :: [Knowledge], the problem with learn $ math ++ haskell (or vice-versa) is that both lists are infinite, so you'll never get to the second one.  Better to do something
+05:17:36 <lambdabot> like learn $ zip math haskell.
+05:17:45 <merijn> pfft, wrong one again
+05:18:18 <merijn> tabaqui1: The quote I was looking for is "Lists are just loops waiting to happen"
+05:18:55 <tabaqui1> merijn: huh, I don't get it :)
+05:19:20 <merijn> tabaqui1: (lazy) lists don't replace arrays/data structures, they replace control flow (loops)
+05:19:26 <davve> 27
+05:19:47 <tabaqui1> merijn: okay, then
+05:19:58 <tabaqui1> at least most of us uses lists in that way
+05:21:42 <mniip> the only difference between (\p -> x y) and (x, y) is the closure tag
+05:21:48 <mniip> the only difference between (\p -> p x y) and (x, y) is the closure tag
+05:21:55 <siers> if I have a state monad as a candy dispencing machine that evolves over a list of inputs passed to it, I should use foldM to feed it inputs?
+05:21:57 <boxscape> hm the stack in https://hackage.haskell.org/package/Stack-0.3.2 is basically just a newtype for List, except it keeps track of the length as well
+05:23:58 <tabaqui1> boxscape: and Data.Stack.ST.Stack is a STRef [a] too
+05:25:18 <tabaqui1> Data.Sequence.Seq seems better
+05:25:32 <boxscape> better for what?
+05:25:41 <tabaqui1> good question :)
+05:25:47 <tabaqui1> for performance, I would say
+05:25:56 <tabaqui1> and it is a deque btw
+05:26:40 <boxscape> but if all you need is the functions provided by Data.Stack, it seems unlikely that Data.Sequence would give you much of an improvement, seeing as they're all O(1) and don't have to deal with rebalancing or anything like that (not sure if Seq does in this context)
+05:26:45 <mniip> there's not a single size fits all data structure
+05:26:57 <mniip> neither in functional programming nor outside of it
+05:28:49 <boxscape> I wondered the other day whether it might be possible to make a library that heuristically chooses a good data structure based on what operations you use on it
+05:29:26 <boxscape> IIRC I started making a prototype and got lost somewhere in type-level programming hasochism...
+05:29:39 <berndl> boxscape: sounds like a good candidate for machine learning
+05:29:55 <boxscape> yeah it could work
+05:30:54 <rswarbrick> Hi there! Quickcheck question: I've got some mutually recursive datatypes and have defined Arbitrary instances for them. I then try to check some properties and the program hangs. No biggie: it just means that I messed up some resizing when recursing. Is there a nice way to "Ctrl-C the test" and see what monstrosity it was trying to generate? I came up with a horrible hack based on '+RTS xc', but it doesn't really f
+05:30:54 <rswarbrick> eel like I'm Doing It Right. Horrible hack in (self) answer here: https://stackoverflow.com/questions/58739571. Any better ideas?
+05:31:19 <phadej> looking at the aiming weapon at own foot (i.e. if you add a use of operation which would repick another data-structure, your performance profile might change drastically; I won't be keen in debugging "why this picks X and not Y" data-structure - sounds like debuggin optimization problems with Haskell nowadays already, yet a lot worse)
+05:31:39 <phadej> optimization problems like "this should optimize, why it doesn't"
+05:32:51 <boxscape> Yeah I don't disagree
+05:33:11 <mniip> this is not a bad idea if you can offload the bookkeeping overhead elsewhere though
+05:33:20 <berndl> phadej: that problem already exists in the RDBMS world.
+05:33:27 <mniip> for example in hardware you can just add more logic
+05:33:50 <mniip> and so memory access predictors get more and more advanced every year
+05:34:04 <mniip> as do branch predictors and what not
+05:34:19 <boxscape> memory access predictors decide what goes into cache?
+05:34:25 <phadej> berndl: don't DBA's are experienced in specifying schemas and writing queries so the engines perform optimally; this is IMHO backwards
+05:34:42 <phadej> you try to reverse the heuristics of the engine
+05:35:00 <phadej> if you know what you want, why can't you just tell?
+05:35:38 <mniip> boxscape, if you read from memory in a line the CPU will guess what you're doing and prefetch data before you ask for it
+05:35:44 <boxscape> ah, I see
+05:36:33 <mniip> it's not so much the cache rather the very latency-ey DIMM bus
+05:36:40 <boxscape> ok
+05:37:51 <phadej> for me the CPU tricks sound like that chip vendors try to patch for compilers producing unoptimal code / machine code not being able to express enough intentions
+05:38:06 <phadej> and it's less worse in GPUs
+05:38:12 <phadej> but I might be wrong here
+05:40:03 <dminuoso> mniip: Memory access predictors are exceedingly dumb actually.
+05:40:31 <mniip> phadej, ever heard of elbrus2k?
+05:42:56 <phadej> mniip: no, looks interesting based on quick googling
+05:43:12 <dminuoso> mniip: The current intel logic is that when the DCU requests a cache line for N and one for N+1, it will prefetch N+2.
+05:43:28 <mniip> phadej, unfortunately it's all proprietary but the idea is somewhat cool
+05:43:46 <dminuoso> So it's really simplistic. Not much thought went in there.
+06:21:56 <John_Ivan> hi > why is it that I need to declare "()" after the IO part in the following?
+06:21:59 <John_Ivan> runFunc :: String -> IO ()
+06:21:59 <John_Ivan> runFunc param = putStrLn param
+06:23:26 <merijn> John_Ivan: IO takes an argument type (the result of what it produces)
+06:23:55 <John_Ivan> ah. right. ofc. like syscall results.
+06:24:12 <merijn> John_Ivan: () (aka Unit) is "the least interesting type" "data () = ()", i.e. it has one constructor () and is, thus completely uninteresting
+06:25:00 <hc> the type of i.e. readLine sould be IO String, while putStrLn is IO (). Both perform an action; readLine returns a string while putSTrLn just writes something to the screen but returns nothing
+06:25:01 <merijn> John_Ivan: And what better to indicate that you don't care about the result of an IO action(i.e. you only care about its side effects) than to make it's result completely uninteresting
+06:27:48 <ski> John_Ivan : `()' in Haskell is a bit like `void' in C,C++,Java,C#. except you can actually spell out the (single) value of that type (also written `()')
+06:28:16 <John_Ivan> gotcha
+06:28:49 <ski> one could also compare it to `struct {}' in C (which, iirc, isn't actually allowed)
+06:29:18 <ski> it's like a record with no fields. in fact, it's a tuple with no components
+06:29:55 <ski> if `(x,y,z)' is a coordinate vector in three-dimensional space, then `()' is a coordinate vector in zero-dimensional space
+06:31:07 <John_Ivan> main = runFunc "hello" >> runFunc "hi" -- now this one makes me beg the question of, if "do" is the equivalent of ">>=", then how come doing: main = >>= runFunc "hello" >> runFunc "hi" -- is illegal?
+06:31:56 <merijn> John_Ivan: https://en.wikibooks.org/wiki/Haskell/do_notation
+06:32:10 <solonarv> "do" is not the equivalent of ">>=" in any useful sense
+06:32:45 <John_Ivan> thanks for the link
+06:32:47 <Taneb> John_Ivan: "do" is a keyword which introduces a block where "a <- x; y" is equivalent to "x >>= \a -> y"
+06:36:53 * hackage small-bytearray-builder 0.3.3.0 - Serialize to a small byte arrays  https://hackage.haskell.org/package/small-bytearray-builder-0.3.3.0 (andrewthad)
+06:37:53 * hackage bytesmith 0.3.5.0 - Nonresumable byte parser  https://hackage.haskell.org/package/bytesmith-0.3.5.0 (andrewthad)
+06:42:51 <idnar> if I do `data X where X :: forall a. C a => X` how do I get the `a` type variable in scope when I pattern match on X?
+06:43:24 <merijn> idnar: I'm not sure you even can?
+06:44:03 <solonarv> in theory this should work in a sufficiently bleeding-edge GHC: case myX of X @a -> ...
+06:44:16 <solonarv> but I don't know if such a GHC is even released yet
+06:44:31 <merijn> Also, TypeApplications is evil :p
+06:45:12 <idnar> solonarv: parse error on 8.6 :(
+06:45:37 <merijn> idnar: "sufficiently bleeding edge" presumably means >= 8.10
+06:46:04 <merijn> I's recommend reevaluating your life choices leading up to wanting this, though :p
+06:46:30 <solonarv> yeah, doesn't work in 8.8.2 either
+06:46:34 <solonarv> so not released indeed
+06:46:35 <boxscape> solonarv here is the merge request https://gitlab.haskell.org/ghc/ghc/merge_requests/2464
+06:46:49 <boxscape> not ready to merge yet afaict
+06:47:30 <idnar> my type is actually more like `forall a. C a => (Q a -> IO ()) -> X` if that seems more reasonable
+06:47:49 <solonarv> it does! that's a lot more reasonable
+06:48:00 <solonarv> because 'a' is actually mentioned in the constructor's type
+06:48:27 <merijn> Man...talk about skipping crucial info ;)
+06:48:30 <solonarv> with ScopedTypeVariables you can just write a type annotation in the pattern, like so:
+06:48:51 <solonarv> case myX of X (f :: Q a -> IO ()) -> ...
+06:48:59 <merijn> You could also use asTypeOf
+06:49:01 <solonarv> this causes 'a' to be bound by the pattern match
+06:49:01 <merijn> :t asTypeOf
+06:49:02 <lambdabot> a -> a -> a
+06:49:21 <merijn> Assuming Q is a Functor or something that lets you get to 'a'
+06:58:11 <idnar> solonarv: ugh, I have a non-injective type family in Q so I get "The type variables … are ambiguous"
+06:58:33 <merijn> Oh...Q is a type family?
+06:58:37 <merijn> You're hosed :)
+06:59:04 <boxscape> maybe it works if it happens to be a type family you can make injective? I'm not sure
+06:59:51 <idnar> well, it's a more complex type but yeah; it can't be injective
+06:59:53 * hackage lzlib 1.0.2.1 - lzlib bindings  https://hackage.haskell.org/package/lzlib-1.0.2.1 (vmchale)
+06:59:55 <yorick> anyone here a hackage trustee? would like to upload packages, but apparently not in the uploaders group
+07:00:06 <dminuoso> idnar: Use the proxy pattern?
+07:00:38 <dminuoso> idnar: That is, if you make it `forall a. C a => Proxy a -> (Q a -> IO ()) -> X` then all should be good
+07:00:50 <dminuoso> Then you can use scoped type variables with pattern type signatures
+07:01:01 <boxscape> probably lower-case proxy, right?
+07:01:19 <dminuoso> Well either, really.
+07:01:37 <merijn> I've decided to go back to my original recommendation of reevaluating life choices :p
+07:02:25 <merijn> Anyone have any idea how hopeless using GHC 8.10 is currently? (in terms of ecosystem support)
+07:02:35 <dminuoso> idnar: Alternatively you could use constraints with HasDict to hoist it back into existence probably
+07:03:33 <dminuoso> But that would at least require injectivity on Q
+07:04:08 <idnar> merijn: fwiw `a :: Symbol` so we are well past wise life choices ;)
+07:04:18 <dminuoso> idnar: Proxy pattern then.
+07:04:20 <yorick> merijn: well, my current life goal is upgrading from 8.4.4 to 8.4.5, but deadlocks are making life hard
+07:04:54 <yorick> 8.10 is a pipe dream from my POV
+07:04:56 <yorick> :D
+07:05:34 <merijn> yorick: I've been using 8.6.5 for a long time now. But 8.10 promises to fix Speedscope
+07:07:06 <idnar> dminuoso: I went wild replacing proxies with TypeApplications but yeah that makes sense
+07:08:08 <boxscape> I'm looking forward to https://github.com/int-index/ghc-proposals/blob/visible-forall/proposals/0000-visible-forall.rst
+07:11:24 * hackage nixfmt 0.4.0 - An opinionated formatter for Nix  https://hackage.haskell.org/package/nixfmt-0.4.0 (gromak)
+07:11:56 <merijn> hmm, can I just nuke the store to reset my disk usage? >.>
+07:12:18 <dminuoso> merijn: On nix?
+07:12:24 <merijn> dminuoso: No, cabal
+07:12:33 <dminuoso> The answer is the same.
+07:12:52 <merijn> dminuoso: I don't know what that answer is, though? :p
+07:13:01 <dminuoso> merijn: Why shouldn't you be able to?
+07:13:30 <solonarv> the answer is yes, but you will obviously end up re-building a bunch of things that you actually did need
+07:13:30 <merijn> dminuoso: I know you can nuke the store, but I don't know what path is the right one, just ~/.cabal/store ?
+07:13:36 <dminuoso> merijn: Yes
+07:13:46 <dminuoso> merijn: Well you do know, because you have asked about this not even 3 months ago
+07:13:48 <dminuoso> ;)
+07:14:24 <merijn> dminuoso: Optimistic of you to assume I'm coherent enough to recall :p
+07:14:37 <dminuoso> In that case, lets pretend you never asked.
+07:14:51 <dminuoso> Yes you can delete ~/.cabal/store just fine, you just need to rebuild things from scratch of course.
+07:15:14 <dminuoso> Supposedly it worked for that other guy a while ago just fine.
+07:15:23 <dminuoso> ;)
+07:15:41 <merijn> dminuoso: Frequent v2-updates to pick up new releases bloats your store :p
+07:16:23 <dminuoso> merijn: Just buy bigger storage.
+07:16:36 <dminuoso> It's the solution to most memory/storage related problems.
+07:16:51 <merijn> dminuoso: Not when it's my home dir on cluster machines
+07:17:07 <merijn> dminuoso: And moving the store to a scratch volume is a too much hassle
+07:17:13 <dminuoso> you'd think that a super computer would have near infinite amounts of storage.
+07:17:25 <merijn> dminuoso: Oh, I've got tons outside my home dir
+07:18:22 <merijn> dminuoso: The trade off is "is it more annoying to migrate the store or to recompile the world?" considering compilation isn't that bad, that's an easy answer :p
+07:21:12 <idnar> Could not deduce: a ~ ()
+07:21:31 <idnar> silly rabbit
+07:21:51 <dminuoso> idnar: It could be a skolem.
+07:22:37 <dminuoso> idnar: Consider: `id @x a = a`, it'd be invalid to constrain `x` to ()
+07:23:39 <dminuoso> It's one of those things I wish the type checker would communicate more clearly whether a type variable is a skolem type variable, or a metavariable.
+07:27:09 <idnar> dminuoso: oh oops, it turned out to be a completely different `a` to the one I thought!
+07:29:49 <idnar>     • Couldn't match type ‘b0’ with ‘()’
+07:29:49 <idnar>         ‘b0’ is untouchable
+07:30:21 <dminuoso> "untouchable" ?
+07:30:42 <dminuoso> What is an untouchable type variable? :o
+07:33:57 <alc`> how to check a list if contain a String start with "newNick" in a list [Just "newNick:abc", Just "a b c"]?
+07:34:06 <alc`> fmap fromJust and filter?
+07:34:53 <alc`> null . filter (isPrefixOf "newNick") . fmap fromJust $ alist?
+07:34:59 <boxscape> fromJust is probably a bad idea since it will crash if there is a Nothing in your list
+07:35:03 <solonarv> no, if you reaching for fromJust as your first resort you are probably doing something wrong
+07:35:18 <alc`> boxscape: I'd filter (/= Nothing) alist, first
+07:35:19 <ski> dminuoso : is it a new name for "skolem"/"rigid" ?
+07:35:26 <alc`> so it would not be a problem
+07:35:33 <merijn> alc`: Just use catMaybes then...
+07:35:36 <merijn> :t catMaybes
+07:35:38 <lambdabot> [Maybe a] -> [a]
+07:35:49 <idnar> I don't actually understand this error, never seen it before! (although I can guess how to fix it)
+07:36:06 <boxscape> alc` it's still a really good idea to avoid partial functions like fromJust when possible since you never know if you'll slightly change the code later without realizing it can now crash
+07:36:12 <ski> dminuoso : in OCaml, metavariables are displayed with a leading underscore, iirc
+07:36:25 <ski> i often used that, when explaining type inference, in here
+07:36:50 <alc`> @hoogle catMaybes
+07:36:50 <lambdabot> Data.Maybe catMaybes :: [Maybe a] -> [a]
+07:36:50 <lambdabot> System.Directory.Internal.Prelude catMaybes :: () => [Maybe a] -> [a]
+07:36:50 <lambdabot> Data.Conduit.List catMaybes :: Monad m => ConduitT (Maybe a) a m ()
+07:37:09 <dminuoso> ski: It seems not quite
+07:37:11 <lyxia> idnar: it's related to skolems. See SPJ explain it at 55:00 https://www.youtube.com/watch?v=x3evzO8O9e8?t=3255
+07:37:41 <alc`> > catMaybes []
+07:37:43 <lambdabot>  []
+07:37:58 <boxscape> > catMaybe [Just 4, Nothing, Just 67]
+07:38:00 <lambdabot>  error:
+07:38:00 <lambdabot>      • Variable not in scope: catMaybe :: [Maybe Integer] -> t
+07:38:00 <lambdabot>      • Perhaps you meant one of these:
+07:38:02 <boxscape> > catMaybes [Just 4, Nothing, Just 67]
+07:38:04 <lambdabot>  [4,67]
+07:38:20 <alc`> good
+07:39:43 <dminuoso> lyxia: Its a shame the recording ended abruptly there.
+07:39:59 <boxscape> :t any
+07:40:00 <lambdabot> Foldable t => (a -> Bool) -> t a -> Bool
+07:40:09 <boxscape> ^ alc` you can use this instead of null and filter
+07:40:51 <merijn> It seems to find a build plan with just "allow-newer: base, template-haskell", fingers crossed...
+07:41:54 <alc`> boxscape: ok
+07:50:16 <merijn> Is there an easy way to figure out which dependency is causing a specific package to be built?
+07:50:39 <idnar> https://pb.codehash.net/4237174ad5414c44845bf16d7b0205a6 I don't actually know where b0 is from
+07:56:01 <lortabac> merijn: if you are using stack you should be able to generate a dot file
+07:56:28 <merijn> lortabac: I don't, though ;)
+07:58:55 <int-e> idnar: These questions usually don't work out well without code.
+08:01:02 <phadej> merijn: cabal-plan tred
+08:01:17 <phadej> merijn: shows the graph intext
+08:02:49 <phadej> cabal-plan dot generates a dot file, if you want more graphical view
+08:03:31 <merijn> Naah, I just need to figure out what is introducing the breaking transitive dependency so I can try whether bumping my direct dependency fixes it
+08:07:22 <remexre> is there a good way to "lift" optics into a bicartesian category?
+08:09:29 <merijn> phadej: btw, relatedly. If I have two different project files is there an easy way to have a separate freeze file for each which cabal automatically picks up?
+08:25:39 <ski> lyxia,dminuoso,idnar : ah, i see. same kind of issue appears in lambdaProlog. you're not allowed to solve the goal `sigma X\ pi c\ X = c' by instantiating `X' (a logic variable ("metavariable")) to `c' (a skolem constant), since `c' would escape
+08:27:27 <ski> (aww, too bad the recording was cut off, shortly after that ..)
+08:43:43 <phadej> n
+08:43:51 <phadej> hmm, merijn is not here
+09:08:39 <hyperisco> Memoisation question… I have a graph of files dependencies, and I need to download each file and then read each file to determine the other dependencies
+09:09:27 <hyperisco> I am also trying to construct a data type which represents all the processed data from the files
+09:10:06 <hyperisco> Memoisation problem is that I have the file contents, say Text, and also a type to represent those contents, say A
+09:10:14 <hyperisco> But I can have Text at B, C, etc, too
+09:10:49 <hyperisco> I know of memoisation that works by inspecting the arguments but not by inspecting what the result should be
+09:12:29 <solonarv> hm, it's not quite clear to me why you'd need to memoize by result? surely the download address or whatever would work as a memoization key
+09:13:18 <ski> (some kind of hashing ?)
+09:13:57 <hyperisco> solonarv, but there are multiple results for a single URL
+09:14:08 <solonarv> I think I wrote something like this once (it was quite general actually), I've sort of scrapped/abandoned that codebase but I might end up resurrecting it at some point
+09:14:13 <Uniaika> 
+09:14:14 <solonarv> hyperisco: at this point I am confused
+09:14:19 <Uniaika> (woops)
+09:14:40 <hyperisco> maybe I just need a proxy in the argument position
+09:15:04 <solonarv> hopefully the mapping URL -> ByteString is constant over time?
+09:15:11 <solonarv> otherwise how could memoization possibly work
+09:15:31 <hyperisco> no it isn't constant
+09:15:41 <hyperisco> but also not what I am trying to memoise
+09:15:53 <solonarv> then what are you trying to memoise?
+09:16:02 <hyperisco> the processing of the downloaded files
+09:16:10 <hyperisco> I think I just need a proxy argument
+09:16:13 <solonarv> ah, I see
+09:16:34 <solonarv> maybe you could do something involving a CAS and a hash of the output
+09:17:00 <hyperisco> can we convert Haskell types to canonical strings?
+09:17:33 <Uniaika> hyperisco: deriving (ToJSON) :P
+09:17:46 <solonarv> do you mean a string representing the *type*, or the *value* of that type?
+09:17:48 <hyperisco> I mean the type, not values of
+09:17:52 <Uniaika> ah
+09:17:59 <solonarv> sure: show . typeOf
+09:18:01 <Uniaika> I guess the source code is a canonical string
+09:18:05 <Uniaika> oh, nice trick solonarv 
+09:18:12 <solonarv> (needs a Typeable constraint of course)
+09:18:22 <solonarv> but TypeRep has a Show instance
+09:18:42 <solonarv> % show (typeOf "hello")
+09:18:42 <yahb> solonarv: "[Char]"
+09:19:41 <Uniaika> (side question, is it proper to use yahb instead of lambdabot now?)
+09:21:49 <solonarv> I use yahb whenever I'm unsure lambdabot will work
+09:22:24 <solonarv> this involves scenarios like wanting a specific language extension, doing IO, doing unsafe things, or using fancy new language features
+09:23:08 <solonarv> although I just kind of default to yahb these days, since it is merely an IRC bot stapled to a jailed GHCi session
+09:24:09 <Uniaika> solonarv: yay for jails
+09:24:17 <Uniaika> thanks :)
+09:25:56 <geekosaur> there's the question of how much load it can handle, and of how stuff in /query interacts with use in channel(s)
+09:26:25 <solonarv> actually I can answer that last one: it's all one GHCi session
+09:26:30 <ski> > (show . typeOf) "hello"
+09:26:33 <lambdabot>  "[Char]"
+09:26:48 <solonarv> this is useful for when you need to fiddle with extensions, imports etc so you don't have to spam the main channel
+09:27:21 <geekosaur> aolonarv, yes, but that means more interactions than with lambdabot specifically because lb is more limited
+09:27:23 * hackage b9 0.5.69.0 - A tool and library for building virtual machine images.  https://hackage.haskell.org/package/b9-0.5.69.0 (SvenHeyll)
+09:28:37 <ski> lambdabot does imports
+09:29:28 <geekosaur> it does, and @let, but minor futzing uses let-in and leaves less to collide
+09:31:27 <geekosaur> whereas yahb encourages leaving more "trash" lying around to collide with other uses
+09:41:53 * hackage amqp-utils 0.4.3.0 - Generic Haskell AMQP tools  https://hackage.haskell.org/package/amqp-utils-0.4.3.0 (woffs)
+09:44:28 <djanatyn_> solonarv: does `show . typeOf` work with phantom types that are removed at compile-time? or newtypes that are optimized away at compile-time? i didn't realize that type of runtime type inspection was possible
+09:45:15 <djanatyn_> i may be misunderstanding phantom types and newtypes which is why i'm asking here!
+09:48:48 <solonarv> djanatyn_: that's why the Typeable constraint is needed
+09:49:13 <solonarv> Typeable basically means "please carry around enough RTTI to tell me what this type is"
+10:02:09 <yorick> > Perhaps you haven't installed the "dyn" libraries for package ‘integer-gmp-1.0.2.0’?
+10:02:11 <lambdabot>  <hint>:1:63: error: lexical error at character 'i'
+10:02:22 <yorick> how do I build ghc with the dyn libraries for that packge?
+10:09:50 <geekosaur> yorick, typically you install them instead of building yourself, unless you'd already built that ghc yourself
+10:16:26 <yorick> geekosaur: I guess I built the ghc myself, yeah
+10:21:53 * hackage bz2 1.0.0.2 - Bindings to libbz2  https://hackage.haskell.org/package/bz2-1.0.0.2 (vmchale)
+10:34:23 * hackage prettyprinter 1.6.1 - A modern, easy to use, well-documented, extensible pretty-printer.  https://hackage.haskell.org/package/prettyprinter-1.6.1 (sjakobi)
+10:35:36 <idnar> for_ @_ @_ @_ @()
+10:41:19 <dmwit> idnar: Huh. Now you've got me wondering what the type-level equivalent of the "use-a-record-for-named-arguments" trick looks like.
+10:41:48 <[exa]> idnar: now that's cyclic!
+10:43:18 <idnar> this solves my type error but leaves me dissatisfied
+10:43:44 <tabaqui1> % :i MaybeT
+10:43:44 <yahb> tabaqui1: ; <interactive>:1:1: error: Not in scope: `MaybeT'
+10:44:56 <tabaqui1> it's funny, that yahb knows ExceptT but not MaybeT
+10:45:12 <tabaqui1> and it imports ExceptT from transformers
+10:46:14 <mniip> the imports are kind of wack
+10:46:26 <solonarv> mniip: fix them! ;)
+10:46:41 <mniip> get me a better set of imports
+10:47:53 * hackage process 1.6.8.0 - Process libraries  https://hackage.haskell.org/package/process-1.6.8.0 (MichaelSnoyman)
+10:48:02 <idnar> oh type signature on the body is enough
+11:48:38 <idnar> dminuoso: yeah so I threw a Proxy# into the constructor and then a helper that is just `x = X proxy#` :)
+11:49:23 * hackage validity 0.9.0.3 - Validity typeclass  https://hackage.haskell.org/package/validity-0.9.0.3 (Norfair)
+11:50:23 * hackage genvalidity 0.10.0.0, validity-vector 0.2.0.3, validity-uuid 0.1.0.3, validity-unordered-containers 0.2.0.3, validity-time 0.2.0.3, validity-text 0.3.1.1, validity-scientific 0.2.0.3, validity-primitive 0.0.0.1, validity-path 0.4.0.1, validity-containers 0.5.0.1, validity-bytestring 0.4.1.1, validity-aeson 0.2.0.3 (Norfair)
+11:51:24 * hackage genvalidity-hspec-optics 0.1.1.2, genvalidity-hspec-hashable 0.2.0.5, genvalidity-hspec-cereal 0.2.0.4, genvalidity-hspec-binary 0.2.0.4, genvalidity-hspec-aeson 0.3.1.1, genvalidity-hspec 0.7.0.4, genvalidity-criterion 0.0.0.0, genvalidity-containers 0.8.0.2, genvalidity-bytestring 0.5.0.1 (Norfair)
+11:52:23 * hackage genvalidity-vector 0.3.0.1, genvalidity-uuid 0.1.0.3, genvalidity-unordered-containers 0.3.0.1, genvalidity-time 0.2.1.2, genvalidity-text 0.7.0.2, genvalidity-scientific 0.2.1.1, genvalidity-path 0.3.0.4, genvalidity-hspec-persistent 0.0.0.1 (Norfair)
+13:13:53 * hackage validity-time 0.3.0.0 - Validity instances for time  https://hackage.haskell.org/package/validity-time-0.3.0.0 (Norfair)
+13:14:53 * hackage genvalidity-time 0.3.0.0 - GenValidity support for time  https://hackage.haskell.org/package/genvalidity-time-0.3.0.0 (Norfair)
+13:14:55 * hackage propeller 0.1.0.0 - A Simple Propagator Library  https://hackage.haskell.org/package/propeller-0.1.0.0 (MichaelSzvetits)
+13:29:12 <hyperisco> Looking for something that fits  Monad m ⇒ f g → (∀ a. g a → m Unit) → m Unit  any hits?
+13:32:08 <hyperisco> Guess the only relevant feature is that it is a traverse over things Type → Type rather than Type
+13:36:58 <Cale> f :: (* -> *) -> * then?
+13:37:13 <Cale> (just sanity checking)
+13:37:59 <Cale> I can't think of anything of that form which is in common usage
+13:40:38 <hseg> Hi. Backpack is complaining a signature has been left unsatisfied. How do I trace which component required it?
+13:41:26 <hyperisco> Cale, yes that is the kind
+13:42:49 <hyperisco> Cale, basic idea being I can use the same data definition at  f Ref  and  f Identity
+13:43:41 <hyperisco> Cale, where  Ref  informs how to obtain a value. Then resolving the data is a (likely effectful) function  f Ref -> m (f Identity)
+13:44:10 <hyperisco> Cale, underlying being  ∀ a. Ref a -> m a
+13:45:21 <Cale> Monad m => f g -> (forall a. g a -> m (h a)) -> m (f h) ?
+13:45:40 <hyperisco> exactly what I jotted down, even alpha-equivalent :P
+13:45:52 <Cale> Uh, you had some Units in there
+13:45:53 * hackage membrain 0.0.0.1 - Type-safe memory units  https://hackage.haskell.org/package/membrain-0.0.0.1 (vrom911)
+13:46:01 <sdrodge> In an effort to learn more about C++ templates and some new C++20 features, I've been messing around trying to port some fundamental Haskell typeclasses to C++, starting with Functor. Would love some feedback https://godbolt.org/z/VM-cAW pedantry and nitpicking strongly encouraged.
+13:46:13 <hyperisco> didn't jot it here
+13:46:27 <Cale> ah :)
+13:47:26 <hyperisco> the sort of reference I am interested right now is a URL, but I also figured it might be a useful thought for incremental/adaptive computation
+13:48:20 <hyperisco> this is sort of that but over HTTP, heh
+13:49:23 <Cale> sdrodge: The last time I touched C++ was around 1999, but is it possible to define an fmap which fixes the choice of A? It would be good if parametricity could be ensured somehow.
+13:50:23 <Lears> hyperisco: https://hackage.haskell.org/package/parameterized-utils-2.0.1.0/docs/Data-Parameterized-TraversableF.html#v:traverseF
+13:50:57 <hyperisco> Lears, ah ha! thanks
+13:52:58 <sdrodge> Cale: There's an ergonomic issue, because afaik there's no way to cleanly express a function type that works for function pointers and function objects simultaneously.
+13:53:27 <solonarv> Cale: you, who contributed to Vessel, can't think of where that would be used? o_O
+13:53:55 <Cale> solonarv: I didn't say that
+13:54:16 <Cale> solonarv: I said I don't know of anything of that type in *common* usage
+13:55:47 <Cale> We do use a bunch of similarly-kinded stuff for abstracting over the case where you have a datastructure which is an empty template to be filled in (like a query), and a response, or aggregate of a bunch of responses
+13:55:49 <hseg> correct me if i'm wrong, but adding a signature to build-depends automatically makes the component indefinite on that signature, right?
+13:56:06 <solonarv> Cale: ah, I see
+13:56:14 <Cale> hseg: I know almost nothing about backpack, sorry
+13:56:28 <hseg> or do i need to add a signature stanza explicitly?
+13:56:32 <hseg> Cale:ok, thanks
+13:59:49 <hseg> backpack was complaining because of a typo in the module names
+13:59:58 * hseg *headdesk*
+14:01:59 <monochrom> :)
+14:03:05 <Ukari> I use stack, my package A has a specify version for Streamly in extra-deps of <A>stack.yaml, and there has another package B relys on package A. But when I stack build B, it tells me that "Module Streamly.Prelude does not export drain". Is it necessary to add the same specify version for Streamly in <B>stack.yaml?
+14:04:12 <hseg> error message could really stand to be more helpful here
+14:06:29 <Ukari> error message https://plaster.tymoon.eu/view/1670
+14:06:51 <hseg> what tools do you guys use to get approximate version bounds for .cabal?
+14:07:15 <glguy> hseg: cabal gen-bounds
+14:07:52 <hseg> how about multi-component packages?
+14:11:54 <hseg> ok, nm. if i ever get around to publishing, i'll start a build matrix
+14:12:30 <hseg> more important to me atm - have a module signature that i also want to export a binding
+14:13:04 <hseg> (a la how typeclasses permit having default definitions for members)
+14:13:25 <hseg> but since .hsig ~ .hs-boot, this is forbidden
+14:15:49 <hseg> ugh... i suppose i could hack around this with a cyclic dependency, but that looks ugly
+14:17:58 <hseg> or, could split the package into -sig and -sig-internal, with -sig-internal actually defining the signature and -sig defining the utils and incurring the -sig-internal dep
+14:24:57 <hseg> any way to get cabal to dump the dependency graph of my components?
+14:28:49 <hseg> nm
+14:44:54 * hackage dmc 1.2 - cmd for common cases  https://hackage.haskell.org/package/dmc-1.2 (procione)
+14:54:28 <sm> Ukari: angelize is not specifying correct bounds for its dependency on streamly. http://hackage.haskell.org/package/streamly-0.7.0/changelog suggests that drain was added only in the latest streamly 0.7.0
+14:54:58 <Ukari> sm: thank you
+14:55:03 <hseg> ... backpack has seriously painful error messages
+14:55:06 <sm> adding streamly-0.7.0 to extra-deps list in your stack.yaml might be a quick fix 
+14:55:53 <hseg> provenance is as clear as mud, adding a "fun" exercise to what is already an annoying hunt
+15:21:53 * hackage hedgehog-fakedata 0.0.1.0 - Use 'fakedata' with 'hedgehog'  https://hackage.haskell.org/package/hedgehog-fakedata-0.0.1.0 (parsonsmatt)
+15:39:58 <hseg> is there a more lightweight hammer than RebindableSyntax to get numeric literals to be rebindable?
+15:40:40 <jle`> you could probably hack a bad Num instane
+15:40:47 <jle`> or Fractional
+15:41:21 <hseg> yeah, but the point of my backpacking exercise is to make my code independent of the numeric hierarchy chosen
+15:41:43 <jle`> all RebindableSyntax does for numeric literals is change from Prelude.fromInteger to whatever fromInteger is in scope
+15:41:53 * hackage evdev 1.2.0.1 - Bindings to libevdev  https://hackage.haskell.org/package/evdev-1.2.0.1 (GeorgeThomas)
+15:41:57 <jle`> oh, do you want polymorphic literals still?
+15:42:10 <hseg> no, the interaction wrt literals is ok
+15:42:26 <hseg> but RS also makes eg if-then-else rebindable
+15:42:32 <hseg> which I don't want
+15:42:53 <jle`> yeah, i'm saying that RS doesn't do "that much", any more than you could do with just defining a dummy Num instance for your type
+15:42:58 <jle`> if you're talking about specific types
+15:43:16 <jle`> if you want different sorts of polymorphism then that's going to be a different story, yeah
+15:43:33 <hseg> yeah, no - want poly literals
+15:43:59 <hseg> literally have in my module signature class Ring r where { fromInteger :: Integer -> r }
+15:44:06 <hseg> (plus other stuff)
+15:44:17 <hseg> and want to write code polymorphic over Ring
+15:44:53 <hseg> ugh. if at least Prelude would export the default ifThenElse i'd be ok
+15:45:19 <hseg> welp. at least case statements are unaffected
+15:45:24 <hseg> so can convert to that
+15:47:35 <hseg> hrm. remind me why f x y = go x y where ... is more efficient than recursing on f?
+15:48:09 <maerwald> top-level recursive functions can't be inlined?
+15:48:25 <hseg> ah
+15:48:29 <[itchyjunk]> Hmm, i need a simple brute force type way of factoring a number :s
+15:48:57 <hseg> compute moduli wrt all primes <= sqrt?
+15:49:09 <hseg> s/primes/prime powers/
+15:49:28 <[itchyjunk]> N `mod` p where p prime?
+15:49:40 <[itchyjunk]> i guess i could google for a list of primes or somesuch
+15:49:55 <hseg> or you could implement the sieve of eratosthenes
+15:50:01 <[itchyjunk]> i was thinking more primitive way
+15:50:02 <Axman6> just make a lazy infinite list of primes
+15:50:05 <[itchyjunk]> :o that sounds fancy
+15:50:22 <hseg> Axman6: that has horrible asymptotics, if you mean what i think you are
+15:50:32 <[itchyjunk]> i was thinking take my N and a list [1..N] and do N `mod` element of that list
+15:50:39 <hseg> https://www.cs.hmc.edu/~oneill/papers/Sieve-JFP.pdf
+15:50:40 <Axman6> then repeatedly run quotRem on your number until the remainder isn't zero, then move on
+15:50:45 <[itchyjunk]> technically it would work right?
+15:50:51 <[itchyjunk]> its a relatively small number
+15:50:53 <Axman6> hseg: sure, but it's certainly a fun exercise :P
+15:51:01 <[itchyjunk]> here is the context if it matters https://imgur.com/a/ev3elGo
+15:51:04 <hseg> [itchyjunk]: ... is it a fixed number?
+15:51:07 <[itchyjunk]> yes
+15:51:16 <[itchyjunk]> the hint even tells me a factor is < 100
+15:51:58 <Axman6> then you don't evenm really need to explicitly use primes
+15:52:10 <[itchyjunk]> hmm so what i was saying would work?
+15:52:25 <[itchyjunk]> somme number in [1,100] time some other number = N
+15:52:48 <[itchyjunk]> so i could look a N `div` 1 .. 100 right?
+15:52:56 <[itchyjunk]> or am i not thinking this correctly?
+15:53:37 <Axman6> you probably want divMod (or usually quotRem since it's a bit faster)
+15:53:53 * hackage fuzzy-time 0.0.0.0 -   https://hackage.haskell.org/package/fuzzy-time-0.0.0.0 (Norfair)
+15:54:07 <[itchyjunk]> map (12191 `mod` ) [1..100] is returning a list
+15:54:20 <[itchyjunk]> one of the value is 0 but i dont know exactly which :D
+15:54:27 <hseg> if i'm not mistaken, you want thm2 of http://www.ams.org/notices/199902/boneh.pdf
+15:54:53 * hackage fuzzy-time-gen 0.0.0.0 -   https://hackage.haskell.org/package/fuzzy-time-gen-0.0.0.0 (Norfair)
+15:54:59 <ChaiTRex> [itchyjunk]: zip [1 ..]
+15:55:11 <[itchyjunk]> ChaiTRex, hmm?
+15:55:26 <[itchyjunk]> ah
+15:55:31 <ChaiTRex> [itchyjunk]: apply that to the result
+15:55:33 <[itchyjunk]> zip will some how create a tupel
+15:55:39 <[itchyjunk]> oh let me try
+15:55:44 <Axman6> @src zip
+15:55:44 <lambdabot> zip (a:as) (b:bs) = (a,b) : zip as bs
+15:55:44 <lambdabot> zip _      _      = []
+15:55:48 <Axman6> that's how
+15:58:28 <[itchyjunk]> https://imgur.com/a/zccMu1U
+15:58:34 <[itchyjunk]> ah there was no 0 to begin with
+15:58:39 <[itchyjunk]> my eyes deceived me
+16:00:02 <[itchyjunk]> oh ofcourse there is no 0
+16:00:10 <[itchyjunk]> why would some number times 0 = N ? ;s
+16:01:22 <[itchyjunk]> if the hint is correct, N `mod` some number between 1 and 100 = 0
+16:02:15 <[itchyjunk]> oh 73
+16:02:47 <[itchyjunk]> \o/
+16:04:18 <hseg> [itchyjunk]: you may also want to look at https://crypto.stackexchange.com/a/14713
+16:04:53 * hackage cursor-fuzzy-time 0.0.0.0 -   https://hackage.haskell.org/package/cursor-fuzzy-time-0.0.0.0 (Norfair)
+16:05:53 * hackage cursor-fuzzy-time-gen 0.0.0.0 -   https://hackage.haskell.org/package/cursor-fuzzy-time-gen-0.0.0.0 (Norfair)
+16:18:42 <ChaiTRex> [itchyjunk]: you can also apply filter (\ (r, i) -> i == 0)
+16:19:04 <[itchyjunk]> :O
+16:19:14 <ChaiTRex> [itchyjunk]: gives you all the elements where the second part of the tuple is zero
+16:19:43 <[itchyjunk]> I guess i'd have to start writing it in a file, i dont know where i would put that in ghci
+16:20:20 <[itchyjunk]>  zip (map (12191 `mod`) [1..100]) [1..] is what i was putting in ghci
+16:21:36 <ChaiTRex> [itchyjunk]: Try filter ((== 0) . snd) . zip [1 ..] . map (mod 12191) $ [1 .. 100]
+16:22:11 <ChaiTRex> [itchyjunk]: the $ surrounds both sides with parentheses, and on the left, . is function composition.
+16:22:29 <ChaiTRex> > filter ((== 0) . snd) . zip [1 ..] . map (mod 12191) $ [1 .. 100]    
+16:22:30 <lambdabot>  [(1,0),(73,0)]
+16:23:06 <[itchyjunk]> oh with filter? that explains the error
+16:23:31 <[itchyjunk]> what is snd?
+16:23:39 <ChaiTRex> [itchyjunk]: that does the map, then zips in the indexes, then finds where the second element is zero
+16:23:44 <ChaiTRex> @src snd
+16:23:44 <lambdabot> snd (_,y) = y
+16:23:52 <[itchyjunk]> hmm
+16:24:06 <ChaiTRex> [itchyjunk]: gives the second element of a pair. see also fst.
+16:24:15 <[itchyjunk]> ahh
+16:25:04 <ChaiTRex> [itchyjunk]: you can even speed it up by only checking 2 and the odds
+16:25:28 <ChaiTRex> > filter ((== 0) . snd) . zip [1 ..] . map (mod 12191) $ 2:[3, 5 .. 100]
+16:25:31 <lambdabot>  [(37,0)]
+16:25:48 <ChaiTRex> hmm, need to adjust
+16:26:17 <ChaiTRex> > filter ((== 0) . snd) . zip (2:[3, 5 .. 100]) . map (mod 12191) $ 2:[3, 5 .. 100]
+16:26:19 <lambdabot>  [(73,0)]
+16:26:27 <ChaiTRex> there
+16:56:34 <justsomeguy> Hmm... just noticed that things in the lambda calculus like 3S4 = (\sz.s(s(s(z))))S4 can be more easily written 3S4 = sz.s`s`sz S 4, where ` means the same as $ in haskell and spaces separate terms.
+16:57:21 <justsomeguy> Wish I'd thought of that an hour ago, before I did a bunch of reductions on LC stuff from wikipedia.
+16:59:28 <hseg> ... i think i'm misunderstanding how backpack wants my classes
+17:00:35 <hseg> basically want to say "module must export some C :: Constraint and functions f,g,... :: C => ..."
+17:05:24 * hackage regex-do 3.2.2 - PCRE wrapper  https://hackage.haskell.org/package/regex-do-3.2.2 (procione)
+17:34:44 <erisco> what are some ideas for garbage collection with memoisation?
+18:25:28 <koz_> :t foldr
+18:25:30 <lambdabot> Foldable t => (a -> b -> b) -> b -> t a -> b
+18:30:27 <MarcelineVQ> :t fold -- !
+18:30:30 <lambdabot> (Foldable t, Monoid m) => t m -> m
+18:36:06 <koz_> MarcelineVQ: I can never remember the type of the inner function.
+18:38:14 <MarcelineVQ> use this handy memnomic abbabbabababaaba, dabba da, ababa
+18:38:24 <koz_> MarcelineVQ: Wat.
+18:38:42 <MarcelineVQ> it works better with the band playing
+18:45:13 <albet70> I want to print all element one by one in a list, except sequenceA_, any other function?
+18:45:27 <koz_> :t foldM_
+18:45:28 <lambdabot> (Foldable t, Monad m) => (b -> a -> m b) -> b -> t a -> m ()
+18:45:49 <albet70> Map print [1,2,3]
+18:46:05 <koz_> :t traverse_
+18:46:06 <albet70> If this would work,
+18:46:06 <lambdabot> (Foldable t, Applicative f) => (a -> f b) -> t a -> f ()
+18:46:12 <albet70> That would be wonderful
+18:46:35 <koz_> > traverse_ print [1,2,3]
+18:46:37 <lambdabot>  <IO ()>
+18:47:19 <koz_> Huh, OK then.
+18:47:25 * koz_ hasn't tried making any bots to IO.
+18:53:23 * hackage lawz 0.1.1 - Common mathematical laws.  https://hackage.haskell.org/package/lawz-0.1.1 (cmk)
+20:00:43 <jle`> % traverse_ print [1,2,3]
+20:00:43 <yahb> jle`: 1; 2; 3
+20:01:38 <nshepperd> :t foldr (:) []
+20:01:40 <lambdabot> Foldable t => t a -> [a]
+20:03:33 <jle`> % foldM (const . print) () [1,2,3]
+20:03:34 <yahb> jle`: (); (); ()
+20:03:41 <jle`> welp
+20:06:57 <mrkgnao> is that a new bot
+20:07:09 <iqubic> No. It's a bot we've had for a while now.
+20:07:56 <jle`> % readFile "/dev/urandom"
+20:07:56 <yahb> jle`: "*** Exception: /dev/urandom: hGetContents: invalid argument (invalid byte sequence)
+20:09:12 <jle`> % withBinaryFile "/dev/urandom" ReadMode $ putStrLn <=< hGetLine
+20:09:12 <yahb> jle`: @  iißÃGQLO 0/½ükP H¥=æv -èc?ã\n£ÙülßNç¬;þ &ãföÏ¢püÔÌ*eixyÄo ÈéHÍÃ¯©Gþ`õk~/~ «¶w$`'1Ï .ã#léå+ÞAoA_£]Õw«±«â§òêÀÝ¯¼4Uc{|i² z ÑãÒ~ïTDM°.êÜ÷ç±jÄYe¤ªè6®ëÂã ÛN=;Ê6}+NµñngZãúàöRÝð}súèJLÒËal*Ó,-áè´Î«Xy¨~½Ò>ktìvD÷È&¦fþ
+20:11:02 <jle`> % withBinaryFile "/dev/urandom" ReadMode $ mapM_ (printf "%x02d") <=< hGetLine
+20:11:03 <yahb> jle`: d002d9402dc002d1602d3002d6b02dd202d5d02d9002d9702d6c02d8002d5002d2602dec02dfa02d6702ddb02d202d1e02d7302d8202dab02d1702d7d02d1002de202d4002d402dd702dba02d3a02d3b02db902d2a02dae02d3602dcf02dfd02d6602d9002d9b02d9502d4d02dc902dfb02d2502d1f02d3702d2a02d4502d8a02d6702d2902d1002d1b02d3102db002d5802d7d02d7102d5702da502d2e02d402dae02d8802d7302d3602dee02d4402d4b02d4c02d2602d9e02dfc02de702d7802d1502df302ddc0
+20:11:16 <jle`> hm, that might have been excessive in length, sorry
+20:11:37 * Axman6 resists doing this to /etc/shadow
+20:15:40 <nshepperd> % readFile "/etc/shadow"
+20:15:40 <yahb> nshepperd: *** Exception: /etc/shadow: openFile: does not exist (No such file or directory)
+20:15:44 <nshepperd> gasp
+20:39:32 <winny> % readFile "/proc/version"
+20:39:33 <yahb> winny: *** Exception: /proc/version: openFile: does not exist (No such file or directory)
+20:53:37 <toxicdesire> vmnvmnnmv
+20:59:19 <toxicdesire> helo heatsink
+22:04:23 * hackage mplayer-spot 0.1.0.0 - Save your spot when watching movies with @mplayer@.  https://hackage.haskell.org/package/mplayer-spot-0.1.0.0 (cdepillabout)
+22:09:53 <domenkozar[m]> is there a way to decide what conduit to run based on the awaited input?
+22:21:27 <jle`> domenkozar[m]: not sure what you mean exactly, but you can use monadic bind
+22:21:48 <jle`> do y <- await; case y of ... -> someConduit; .. -> someOtherConduit
+22:22:18 <jle`> depends on what you want really
+22:22:29 <domenkozar[m]> doesn't that consume the input?
+22:22:34 <jle`> it does
+22:22:37 <domenkozar[m]> seem like I need to use await/leftover
+22:22:47 <jle`> it depends on what you want to do :)
+22:22:49 <domenkozar[m]> and monadic bind
+22:23:08 <domenkozar[m]> I want to inspect input
+22:23:13 <domenkozar[m]> and decide which pipeline to run
+22:23:25 <domenkozar[m]> i.e. is there more than one item in the stream, run conduit X
+22:23:27 <domenkozar[m]> if not Y
+22:23:29 <Cale> You mean like lookahead?
+22:23:49 <domenkozar[m]> yes
+22:24:20 <jle`> you can also take two items and then feed it to the conduit you choose
+22:24:25 <jle`> 'prime' the conduit
+22:25:07 <jle`> (yieldMany [x] *> C.map id) .| theConduit
+22:25:56 <jle`> er, yield x *> C.map id
+22:26:07 <domenkozar[m]> the tricky bit is that you need to decide which pipeline to pick
+22:26:24 <jle`> yeah, i showed something similiar earlier
+22:26:50 <jle`> do y <- await; z <- await; case z of Nothing -> pipe1; Just z' -> pipe2
+22:27:39 <jle`> but probably the cleanest way wouild probably be with 'leftover' :)
+22:28:13 <domenkozar[m]> but wouldn't that eliminate the two inputs if you don't use leftover?
+22:28:19 <domenkozar[m]> pipe1 wouldn't see y nor z
+22:28:31 <domenkozar[m]> (same for pipe2)
+22:28:36 <jle`> yeah you'd do the (yield x *> C.map id) .| pipe1
+22:28:42 <jle`> that i said earlier
+22:28:51 <jle`> if you don't use leftover
+22:28:54 <domenkozar[m]> right!
+22:30:13 <domenkozar[m]> thanks jle` 
+22:30:22 <jle`> np :)
+22:30:35 <iqubic> I love weird conduit tricks.
+22:48:53 * hackage rio 0.1.14.0 - A standard library for Haskell  https://hackage.haskell.org/package/rio-0.1.14.0 (MichaelSnoyman)
+22:56:23 * hackage yesod-auth 1.6.9 - Authentication for Yesod.  https://hackage.haskell.org/package/yesod-auth-1.6.9 (MichaelSnoyman)
+23:37:53 * hackage util-primitive-control 0.1.1.0 - Utilities for stateful primitive types and types based on them  https://hackage.haskell.org/package/util-primitive-control-0.1.1.0 (MatthewFarkasDyck)

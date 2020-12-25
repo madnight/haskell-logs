@@ -1,0 +1,1897 @@
+00:00:16 <Cale> and so when we know which value of type MyRequest we have, we'll also know which FromJSON dictionary to use to deserialise the result of the API
+00:01:12 <dataN_> so is the type lambda something to do with the ' and V versions of Has?
+00:01:18 <Cale> yeah
+00:01:35 <Cale> If we had honest type level lambda, the primed version would be all we need
+00:01:57 <Cale> Has c k ~ Has' c k (\t -> t)
+00:02:35 <Cale> and HasV c k g ~ Has' c k (\v -> v g)
+00:03:28 <dataN_> would "let" be enough?
+00:04:17 <Cale> I don't know. TBH, I could do this with an explicit type family
+00:04:45 <dataN_> one for each kind?
+00:04:56 <Cale> one instance for each of these cases
+00:05:08 <Cale> and use a symbolic representation of the different functions we want to use
+00:05:21 <Cale> But... that's not really much better than the current solution, is it?
+00:05:30 <Cale> I guess it cuts down on the TH slightly
+00:06:19 <Cale> If I could just hand GHC a type level function and say "just apply this thing immediately and don't ask questions", I'd be fine :)
+00:07:27 <Cale> I was able to write Has/Has'/HasV in terms of a type level list of the indices, that part was okay.
+00:07:46 <Cale> But I couldn't unify their implementations
+00:08:08 <Cale> and the type of argDict wasn't improved
+00:09:17 <Cale> Or ConstraintsFor/etc.
+00:10:12 <Cale> data VSum (k :: ((* -> *) -> *) -> *) (g :: * -> *) = forall v. k v :~> v g
+00:10:21 <Cale> instance (ForallF ToJSON k, HasV ToJSON k g) => ToJSON (VSum k g) where
+00:10:21 <Cale>   toJSON ((k :: k v) :~> (v :: v g)) =
+00:10:21 <Cale>     toJSON ( whichever @ToJSON @k @v (toJSON k)
+00:10:21 <Cale>            , hasV @ToJSON @g k (toJSON v))
+00:10:34 <Cale> an example :)
+00:11:34 <Cale> I've discovered this is one thing I really like TypeApplication for
+00:12:00 <Cale> I mostly hate that extension, because it's overzealous and applies to things which weren't defined with an explicit forall.
+00:12:16 <dataN_> UnProxy (forall (a :: forall p. p Int). a) :: *
+00:12:21 <Cale> But for stuff like this, it's way nicer than the alternative
+00:13:36 <dataN_> type family UnProxy (x :: p (a :: k)) :: k where UnProxy (x :: p a) = a
+00:14:17 <dataN_> why is * /~ Int ?
+00:14:49 <Cale> Because for example, Int :: *, but not the other way around
+00:15:18 <Cale> newtype FakeDSum f g = FakeDSum { unFakeDSum :: DSum f g }
+00:15:32 <dataN_> no that was an argument to :k
+00:15:36 <Cale> instance (GEq f, Has' Eq f g) => Eq (FakeDSum f g) where
+00:15:37 <Cale>   FakeDSum ((k :: k a) :=> v) == FakeDSum (k' :=> v') = case geq k k' of
+00:15:37 <Cale>     Nothing -> False
+00:15:37 <Cale>     Just Refl -> has' @Eq @g k (v == v')
+00:15:55 <Cale> I also plan to get rid of EqTag/OrdTag/ShowTag/etc. with this
+00:16:21 <Cale> ^^ in basically exactly that way... I just haven't yet gone through the upstreaming shenanigans required to make that happen
+00:20:24 <dataN_> so how can the type stored in the proxy be recovered to allow it to be returned by the type synonym that uses a constraint?
+00:22:51 <Cale> type family UnProxy a where UnProxy (p a) = a
+00:22:51 <Cale> ?
+00:23:20 <Cale> Is that what you're looking for?
+00:30:13 <dataN_> type A = UnProxy (forall p q a x. (q a) => p '[x])
+00:30:40 <dataN_> Illegal polymorphic type: forall (p :: [GHC.Types.Any] -> *) (q :: GHC.Types.Any  -> Constraint) (a :: GHC.Types.Any) (x :: GHC.Types.Any).  q a =>   p '[x]
+00:40:40 <maerwald> cabal.project files don't allow comments it seems
+00:42:00 <dataN_> :kind! '[Int]
+00:43:24 <Ariakenom> % :kind! '[Int]
+00:43:25 <yahb> Ariakenom: '[Int] :: [*]; = '[Int]
+00:44:59 <Ariakenom> dataN_: yahb is a ghci prompt that listens to "% COMMAND"
+00:45:56 <dataN_> % type family UnProxy a where UnProxy (p a) = a
+00:45:56 <yahb> dataN_: 
+00:46:07 <dataN_> % type A = UnProxy (Proxy '[Int])
+00:46:07 <yahb> dataN_: 
+00:46:24 <dataN_> % :kind! A
+00:46:24 <yahb> dataN_: A :: k; = A
+00:46:31 <dataN_> % type B = (Show Int => UnProxy (Proxy '[Int]))
+00:46:32 <yahb> dataN_: 
+00:46:38 <dataN_> % :kind! B
+00:46:39 <yahb> dataN_: B :: *; = Show Int => UnProxy (Proxy '[Int])
+00:48:26 <dataN_> % type C = UnProxy (Show Int => (Proxy '[Int]))
+00:48:26 <yahb> dataN_: ; <interactive>:19:1: error:; * Illegal qualified type: Show Int => Proxy '[Int]; GHC doesn't yet support impredicative polymorphism; * In the type synonym declaration for `C'
+00:57:02 <dataN_> that was an attempt to solve;
+00:57:11 <dataN_> % type D = Show Int => '[Int]
+00:57:11 <yahb> dataN_: ; <interactive>:20:22: error:; * Expected a type, but '[Int] has kind `[*]'; * In the type `Show Int => '[Int]'; In the type declaration for `D'
+00:58:08 <dataN_> % type E = () => '[Int]
+00:58:08 <yahb> dataN_: 
+00:59:33 <dataN_> % type F = UnProxy (() => Proxy '[Int])
+00:59:33 <yahb> dataN_: 
+01:01:40 <dataN_> it seems to want a type (*) rather than an arbitrary kind as the return type of a type synonym using a constraint. but casting it to Proxy '[Int] which has kind * as required, results in this error whn trying to UnProxy it
+01:02:12 <dataN_> how is this Impredictive Polymorphism? 
+01:18:32 --- mode: glguy set +v panther99
+01:31:54 <Ariakenom> Is a "sum record" a thing anywhere? 
+01:32:01 <Ariakenom> as in sum type
+01:35:03 <Ferdirand> native type products are anonymous, and record notation lets you name the members
+01:35:23 <Ferdirand> but native sums are already named by constructors, though you can use Either if you need an anonymous type sum, i guess
+01:35:31 <merijn> Ariakenom: As in having multiple different record constructors?
+01:36:13 <merijn> Ariakenom: Sadly, not really. I already suggested having record syntax without generating accessor functions (avoiding the whole partial thing) would be nice for a usecase like that
+01:41:11 <Ariakenom> I meant as a row typed record
+01:41:37 <merijn> Ariakenom: Is that a thing *anywhere*? Yes. In Haskell, sadly not
+01:42:00 <Ariakenom> cool! where?
+01:42:03 <merijn> Ur/Web has row-typed records and I think one of the fancy "haskell-inspired compiles to JS web languages" does
+01:42:36 <merijn> Ariakenom: If you like "super interesting but, eh, not particularly newbie-friendly"-languages, Ur/Web is nice
+01:46:02 --- mode: glguy set +v haskeller
+01:46:23 <bbear> https://aphyr.com/posts/342-typing-the-technical-interview <- opinions ?
+01:46:49 <merijn> bbear: Utterly hilarious :)
+01:47:23 <bbear> Quote: « “The ‘class’ keyword defines a function signature,” you remind Criss, who seems to have forgotten something. » 
+01:47:56 <bbear> ^ This is obviously overstretched, I mean, there's absolutely nothing that should be taken seriously in this post ? (I think I know the answer)
+01:49:24 <merijn> bbear: Oh, the post is very serious. It's just...using a rather different perspective than you normally would :)
+01:50:24 <bbear> Well I mean doesn't the author use self derision because he is overloading the type system for actual computations ?
+01:50:25 <merijn> bbear: It's abusing the fact that the type-checking and typeclass unification algorithm is, if you squint, a very rudimentary PROLOG implementation
+01:50:58 <merijn> bbear: So, obviously he's not actually programming Haskell, but in fact abusing GHC's typechecker as an improvised PROLOG to program in.
+01:51:23 <bbear> merijn: do you know prolog ? Is it interesting to learn ?
+01:51:53 <bbear> merijn: ok that's reassuring
+01:52:15 <bbear> but still there is people doing that in the real w
+01:52:17 <bbear> orld ?
+01:52:52 <merijn> I did prolog at some point in university and I honestly don't remember enough to say I "know prolog". Is it interesting? Sure. Prolog is about as different from "normal" languages like C/Java/C#/python as Haskell is
+01:53:20 <maerwald> Prolog is hard to remember
+01:53:30 <maerwald> everything is cool, but nothing feels intuitive :D
+01:53:45 <merijn> bbear: No one *sane* is doing that for anything other than kicks :p In fact, if you read through the other 2 articles (linked from the top) where he has fake interview processes that should be very clear
+01:56:27 <merijn> bbear: i.e. the "hexing the technical interview" has him implementing an efficient algorithm for detecting a cycle in a list in Clojure by writing a program that directly produces a compiled class file to disk, then loads that to run the algorithm :)
+01:58:27 <bbear> merijn: yeah « hexing the technical interview » was disgusting 
+01:58:31 <bbear> I read it this morning.
+01:58:37 <merijn> bbear: See also the concept of "ha ha only serious" :)
+01:59:37 <merijn> bbear: i.e. things that are simultaneously jokes but also serious. Is it an insane joke? Yes. Is it also something that actually works and does the explanation make sense (if you squint a little)? Also yes.
+02:00:44 <bbear>  merijn: must agree that the level of skill implied is impressive
+02:00:46 <Ariakenom> merijn: but those are row typed products rather than sums, right?
+02:01:18 <Ariakenom> I hope you don't mind my conversation tempo being glacial
+02:04:51 <tdammers> feels a bit like using jslinux in order to run C programs in the browser
+02:21:27 <merijn> WTB an effective method of debugging "thread blocked indefinitely in an MVar operation" >.>
+02:27:57 <Taneb> What's about in the world for IDE-type tooling for Haskell?
+02:28:12 <dstolfa> Taneb: vim or emacs for the most part IME
+02:28:58 <Taneb> dstolfa: that's what I've been using for the best 7 years or so
+02:29:13 <dstolfa> Taneb: unfortunately not much changed, i looked a month ago or so
+02:29:58 <cocreature> ghcid isn’t exactly new anymore but newer than 7 years iirc :)
+02:30:29 <cocreature> haskell-ide-engine is probably the most recent development but last I tried to use that (which was a few months ago) I couldn’t get it to work for me in a useful way
+02:31:24 <merijn> DanielG said he's finally got time to make ghc-mod new-build compatible yesterday, so there's that!
+02:31:34 <maerwald> Taneb: hie is the only thing that works ish, if you get it to work. But it can still blow up memory and be slow and unresponsive. codex/hasktags is your best option, unless you have small projects only
+02:32:16 <maerwald> intero just blows up your memory always, because it pre-load all type info for your entire project, no matter how many modules you have
+02:32:17 <maerwald> boom
+02:33:19 <fendor> haskell-ide-engine works ok for me, it just dies sometimes, then you have to reload it again.
+02:33:29 <maerwald> it's hard to debug
+02:33:53 <maerwald> and not all clients support showing type of expressions
+02:33:56 <maerwald> only identifiers
+02:34:49 <jle`> merijn: i've seen a cute trick
+02:34:57 <merijn> jle`: hmm?
+02:35:06 <Taneb> maerwald: I haven't heard of codex previously
+02:35:15 <jle`> you can wrap your reading-writing operations with traces for when they fail
+02:35:25 <jle`> unless that's not your problem
+02:35:43 <maerwald> Taneb: it consumes zero memory and works instantly ;) except it isn't always correct, because it's... well... just code tags
+02:35:52 <merijn> jle`: That assumes the reads and writes are inside the package I have that's crashing and not indirectly from a library
+02:36:08 <jle`> ah, indeed
+02:37:02 --- mode: glguy set +v Viwor
+02:37:14 <Viwor> Taneb: There are some good packages for vscode
+02:37:34 <maerwald> yes, hie works best in vscode afaik
+02:37:58 <Viwor> I use simple ghc, its really nice
+02:41:31 <merijn> Ugh...this feels like the hackiest thing ever...CPP including module export lists...
+02:42:29 <cocreature> merijn: do you really modify your export list that often that it makes sense to remove the boilerplate of updating it in multiple places?
+02:42:46 <merijn> cocreature: It's not about updating, it's about forgetting to update
+02:43:15 <merijn> cocreature: I don't like relying on "don't forget to do something"
+02:43:20 <cocreature> I still feel like you are trying to solve a problem that isn’t that big of a problem in practise
+02:44:24 <merijn> cocreature: I don't like either option >.>
+02:44:55 <merijn> cocreature: Either I copy 22 lines of exports into 6 modules and manually keep them up to date, or I CPP include them
+02:45:57 <Ariakenom> isn't there some reexport thing you can do?
+02:46:06 <merijn> Well, I guess there's two more options: Just stick with the randomized documentation order generated by Haddock, or fix Haddock re-exports
+02:46:19 <merijn> Ariakenom: The problem is that Haddock generates the docs for re-exported modules in *random* order
+02:46:25 <merijn> Ariakenom: Which isn't very user friendly
+02:46:32 <Ariakenom> ah I see
+02:46:40 <cocreature> merijn: sure neither is pretty. my point is that manually keeping them up2date might not be that big of a deal in practise so your objections to that option are mostly based on wanting to avoid all boilerplate in principle and not based on the actual problems this will cause
+02:47:38 <merijn> cocreature: THey're not based on wanting to avoid boilerplate, they're based on not wanting to introduce chance of human error where it's unnecessary
+02:47:59 <cocreature> well that’s the point of avoiding boilerplate, no?
+02:48:36 <merijn> Alternatively, if anyone is bored and unable to think of "what to program", do I have the issue for you! ;)
+02:57:10 <tsaka__> say you have 2 functions and want to test their equality over a tractable domain. How do you set up the test as to short-circuit if it fails?
+02:57:51 <tsaka__> as an example, say you want to assert that f(x) is equal to g(x) over the range [0..10].
+02:58:31 <tsaka__> You don't want to first calculate f(x) for the range, then do it for g(x), then compare the results as you'll end up doing unnessecary work if the fail at "2"
+02:58:43 <tsaka__> if they're unequal at "2" rather
+02:59:20 --- mode: glguy set +v AS1234
+03:00:02 <AS1234> does foldr traverse the entire list for each iteration on the list?
+03:00:22 <bbear> tsaka__: it's easy in haskell to do that isn't it ?
+03:02:28 <Ferdirand> > all [True,False,undefined]
+03:02:30 <lambdabot>  error:
+03:02:31 <lambdabot>      • Couldn't match expected type ‘a -> Bool’
+03:02:31 <lambdabot>                    with actual type ‘[Bool]’
+03:02:34 <Ferdirand> ah oops
+03:02:39 <Ferdirand> > and [True,False,undefined]
+03:02:41 <lambdabot>  False
+03:03:46 <bbear> > let {g = (\x -> x); h=(\x -> x)} in length (takeWhile (\x -> g(x) == h(x)) [1..10]) == 10
+03:03:48 <lambdabot>  True
+03:04:15 <bbear> > let {g = (\x -> x); h=(\x -> if x/=10 then x else x+1)} in length (takeWhile (\x -> g(x) == h(x)) [1..10]) == 10
+03:04:18 <lambdabot>  False
+03:04:57 <Ferdirand> > all (\x -> 1/x < 0) [1,2,0,3]
+03:04:59 <lambdabot>  False
+03:05:11 <tsaka__> any way to do it while getting the info of which input failed
+03:05:26 <bbear> tsaka__: are you using a test framework ?
+03:05:37 <tsaka__> no, not currently
+03:05:44 <bbear> it could be of use to you
+03:06:03 <bbear> output is usually very  informative and there's good tools out there that could help you 
+03:06:14 <bbear> see hspec module
+03:06:21 <tsaka__> yes, but there's a 1000 options with outdated docs and its a hassle to set up 
+03:06:24 <bbear> I just wrote some tests with it yesterday and it's not bad
+03:07:01 <bbear> https://github.com/elijahbal/99-questions <- check that, test/ folder
+03:07:21 <bbear> it was surprisingly easy if you pack your project with stack
+03:07:30 <bbear> It took me the whole afternoon, but that's worth it IMHO
+03:07:43 <bbear> Once you did it it's very repeatable
+03:08:36 <bbear> and the output of `stack test` is nice to have
+03:08:45 <cocreature> tsaka__: find (\x -> f x /= f y) [0..10]
+03:10:07 <tsaka__> @bbear did you have to specify both the cabal file and package.yaml manually, or just 1 of them?
+03:10:08 <lambdabot> Unknown command, try @list
+03:11:01 <bbear> tsaka__: one of them is enough
+03:11:19 <bbear> I started with the cabal file but it actually is generated automatically with the package.yaml content
+03:11:35 <bbear> so it's rather DRY I'd say and package.yaml is pretty readable and easy to write.
+03:11:50 <tsaka__> which of them are you supposed to modify?
+03:11:56 <bbear> package.yaml
+03:12:04 <bbear> you don't have to write anything in the cabal file
+03:12:32 <cocreature> either modify the package.yaml file and generate the cabal file from that or edit the cabal file and delete the package.yaml file
+03:12:52 <bbear> yes, I suggest you to go with the first option
+03:13:24 <bbear> I mean, stack emits a warning if you manually edit the cabal file so I suppose the way to go is to go full stack
+03:14:07 <cocreature> bbear: it emits a warning if you edit a cabal file _and_ a package.yaml file exists
+03:14:11 <bbear> Just got an idea of full stack Haskell webFramework with JS transpilation using GHCJS
+03:14:16 <bbear> cocreature: yes. My Bad.
+03:14:19 <cocreature> deleting the package.yaml file is totally fine
+03:15:15 <bbear> well I think going for the more modern tooling is a good idea but feel free to use cabal if you want to.
+03:15:30 <bbear> didn't want to start this discussion again.
+03:16:19 <bbear> :(
+03:16:32 <bbear> i'm not happy to disturb the peace of this channel 
+03:16:38 <bbear> see you later
+03:17:04 <cocreature> bbear: I’m not trying to discourage anyone from using hpack but it’s pretty much just a slightly different syntax for the same thing so I’m not sure it can be called “more modern”
+03:17:29 <maerwald> yes!
+03:17:50 <maerwald> less tools, less generated files :)
+03:18:53 <Taneb> It'd be neat if Data.List.NonEmpty had some pattern synonyms like "pattern Unit x <- x :| []" and "pattern Cons x (x2 :| xs) <- x :| (x2:xs)" (I don't actually know the pattern synonym syntax)
+03:19:08 <Taneb> Because then you could recurse uniformly on them
+03:19:12 <Taneb> In a neater way
+03:20:27 <maerwald> I find it puzzling that people rather create more tools than trying to fix the existing ones... but that's opensource for you
+03:20:38 <maerwald> the user picks up the pieces :P
+03:21:01 <maerwald> (and then builds another tool to unify them)
+03:21:14 --- mode: glguy set +v Viwor_
+03:21:15 <chpatrick> maerwald: I think the cabal people don't want yaml
+03:21:21 <Viwor_> https://xkcd.com/927/
+03:21:29 <Viwor_> relevant xkcd
+03:21:38 <maerwald> yes, let's split the ecosystem in half over config file format :P
+03:22:23 <chpatrick> well I think the best thing you can do is to make something like hpack and if everyone starts using it then it's a big sign that it's worth merging
+03:23:24 <maerwald> merge?
+03:23:35 <bbear> maerwald: I don't want to sound like a troll but stack is going to gobble the ecosystem I think. I foresee that newcomers will be more enticed to use the new tooling than directly cabal. In the end it's not much of a split than a positive evolution.
+03:23:42 <maerwald> it's just generating a .cabal file, it has no API in its own
+03:23:58 <maerwald> I can't even think of why or how you would merge it
+03:24:34 <chpatrick> maerwald: I mean if 99% of people start using hpack then maybe the cabal maintainers will think hmm maybe we should support yaml :P
+03:24:38 <chpatrick> I don't use it personally btw
+03:25:09 <maerwald> bbear: I have no data to back this up, but ime... since stack, people are less eager to test and maintain their packages against the latest libraries... which, imo, is not a good thing. I've observed the same thing in the rust ecosystem, which basically also pins everything
+03:25:15 <maerwald> but that's a more fundamental discussion
+03:27:07 <bbear> maerwald: mmh I think build issues are critical in that ecosystem. Anything that could make things « just work » is in my opinion a good direction. Anything that remove a bit of the hassle associated with a build system is a good thing.
+03:27:25 <bbear> Look at go, java for similar problems.
+03:27:39 <maerwald> building is not about convenience, but correctness
+03:27:49 <maerwald> I've worked in the go ecosystem ;)
+03:27:51 <bbear> maerwald: I agree that a good CI process should try to build against different versions of the same library.
+03:28:09 <maerwald> and they are basically right now realizing that correctness is more important than convenience and rewriting half of the tools
+03:54:21 <merijn> Ironically, the "fail" package is failing to build >.>
+03:58:04 <cocreature> merijn: let me guess, you have enable-documentation set to True?
+03:58:32 <merijn> cocreature: Well yes, because as we talked about before the weekend, else I don't get documentation with new-haddock and re-exports >.>
+03:58:43 <merijn> I know it's failing with generating docs, I just dunno why
+03:58:50 <cocreature> merijn: because there are no modules
+03:58:54 <cocreature> afaik it’s fixed in HEAD
+03:58:58 <merijn> >.>
+03:59:22 <cocreature> (there are no modules in certain configurations, ofc it doesn’t always contain no modules)
+03:59:34 <merijn> cocreature: Do you happen to know how I can toggle documentation to false for just one package in cabal.project?
+04:00:27 <merijn> whoo
+04:00:38 <merijn> "package fail\n documentation: False" seems to do the trick
+04:06:31 <tsaka__> Is this a sensible way of finding the cumulative length of a list of lists?
+04:06:38 <tsaka__> fst $ foldr (\li (lengths, acc) -> let l = length li + acc in (l : lengths, l)) ([], 0) xxs
+04:07:19 <tsaka__> such that the first entry is the length of the first list; the second entry is the length of the first list + length of second list; and so on
+04:07:47 <bbear> tsaka__: why don't you use fold ?
+04:07:53 <chpatrick> tsaka: scanl (+) . map sum
+04:07:53 <merijn> tsaka__: For something like summing lenghts you probably want to use strict foldl (unless You really want it to work on infinite lists)
+04:08:00 <bbear> >:t scanl
+04:08:07 <chpatrick> scanl1 sorry
+04:08:13 <bbear> :t scanl1
+04:08:15 <lambdabot> (a -> a -> a) -> [a] -> [a]
+04:08:19 <cocreature> > let f xs = tail (scanl' (+) 0 (map length xs)) in f [[1,2,3],[2,3]]
+04:08:21 <lambdabot>  [3,5]
+04:08:26 <cocreature> how about that?
+04:08:47 <bbear> :t sum.(map length)
+04:08:48 <lambdabot> Foldable t => [t a] -> Int
+04:09:05 <bbear> why don't you go simple ?
+04:09:09 <bbear> ha yes sum is partial
+04:09:23 <cocreature> bbear: that doesn’t actually solve the problem?
+04:09:27 <cocreature> also sum is not partial
+04:09:35 <chpatrick> scanl1 (+) . map length
+04:09:52 <cocreature> meh, there’s no scanl1'
+04:10:07 <bbear> is there a good hashmap implementation in Haskell, with O(1) access time ?
+04:10:31 <chpatrick> bbear: Data.HashMap is O(1) in the long run I believe
+04:11:00 <merijn> There's no O(1) hashmap in any language
+04:11:28 <merijn> Unless you use some perfect hashing
+04:11:48 <merijn> bbear: What are you doing/trying to do?
+04:12:20 <merijn> Map is good enough for most things, if that doesn't work there's IntMap which is even faster, once that doesn't work is when you have to start thinking
+04:13:13 <bbear> merijn: just wanted to know if a practical implementation of Hash Map was in the prelude.
+04:13:27 <merijn> bbear: Prelude doesn't have a map type at all
+04:14:06 <merijn> Does anyone know if criterion has a way to export it's fancy JS plots as SVG/jpg/png/etc.
+04:14:53 <cocreature> bbear: if you’re looking for the O(1) expected access time that other languages give you the hashtables package provides mutable hashtables of that form
+04:15:08 <bbear> cocreature: that's what I was looking for
+04:15:23 <cocreature> but ime it isn’t optimized particularly well and most of the time it doesn’t beat containers or unordered-containers by any significant margin
+04:15:41 <cocreature> I have a wip package that beats hashtables in terms of performance but that’s not on hackage yet
+04:16:00 <bbear> cocreature: are mutable data structure easy to use in haskell ?
+04:16:38 <merijn> bbear: Yes, once you get over the initial hurdle of understanding Haskell's approach to purity
+04:16:59 <hpc> in a lot of ways they're easier
+04:17:23 <cocreature> they’re not hard to use but they force you into ST/IO which can be annoying at times
+04:17:34 <hpc> because when you're in a scenario where you truly need mutation and it's not just a matter of convenience, haskell's usually got better options than other languages
+04:17:46 <hpc> like for sharing state between threads
+04:18:54 <merijn> Or does everyone just screenshot the criterion webpage they opened? >.>
+04:19:34 <hpc> merijn: svg is fancy enough, you can probably just put the webpage in an <svg> tag :P
+04:20:07 <merijn> hpc: But then I need to manually figure out which parts of the file I can throwaway and which parts to keep
+04:20:22 <merijn> And it seems like an obvious usecase I was hoping someone else had sorted it out for me >.>
+04:31:51 <kuribas> is eta a viable way to use haskell in a jvm production environment?
+04:38:05 <merijn> hpc: and tbh, staking a screenshot of my browser sounds easier and more robust than that >.>
+04:38:38 <hpc> yeah
+04:38:53 <hpc> i just felt like being cheeky and it was too perfect of a chance ;)
+04:39:11 <liste> kuribas: they claim "yes" https://eta-lang.org/docs/faq#is-eta-ready-to-use
+04:39:45 <kuribas> liste: eta may be my chance to introduce haskell on my workplace :)
+04:39:46 <liste> idk whether I'd believe them though
+04:39:52 <kuribas> liste: so I hope it's true
+04:40:31 <kuribas> sadly no ghc > 8.0
+04:41:54 <liste> >=
+04:42:00 <liste> or rather ≥
+04:42:39 <kuribas> yeah
+04:42:49 <cocreature> they do backport some features
+04:43:03 <cocreature> so it’s somewhat of a mix of different releases
+04:43:04 <kuribas> I'd like to have typeApplications and overloaded labels
+04:43:11 <hpc> liste: or maybe even ≮
+04:43:35 <bbear> is unicode well handled in Haskell ?
+04:44:00 <tdammers> bbear: fairly well, yes
+04:44:23 <kuribas> bbear: strings are unicode by default
+04:44:24 <bbear> can you type unicode string literals
+04:44:35 <hpc> it's possible to mess up, but without understanding the difference between unicode and encodings you can still stumble into success quite easily
+04:45:02 <tdammers> source code can (and should, IMO) be utf-8, and string literals can contain non-ascii code points
+04:45:24 <bbear> tdammers: like in Python.
+04:45:32 <bbear> was wondering how go works in this fashion.
+04:45:42 <bbear> It seems unicode variable names are well supported.
+04:45:44 <tdammers> kind of, but safer due to types
+04:45:47 --- mode: glguy set +v la5tl19ht
+04:45:50 <ab9rf> does ghc even have an option for source to be encoded other than in UTF-8?
+04:46:07 <hpc> ab9rf: i hear it also supports ascii :D
+04:46:16 <ab9rf> hpc: heh
+04:46:21 <tdammers> ab9rf: I'm not sure, frankly I've never had a need for anything else, but I'd expect it to at least support ASCII
+04:46:36 <ab9rf> considering that ASCII is a strict subset of UTF-8, that isn't terribly challenging
+04:46:41 <tdammers> exactly
+04:47:14 <tdammers> although technically, 8-bit encoded ASCII should be handled differently when invalid input is received
+04:47:53 <hpc> tdammers: just let it be undefined behavior :P
+04:48:10 <tdammers> hpc: but then we'll be just like C! D:
+04:50:18 <hpc> i doubt i can find it again, but i saw an example in C of UB where a function got called without the program ever even having "foo()" for /any/ identifier
+04:50:49 <hpc> they defined a function, did some freaky null pointer arithmetic, and the optimizer decided that after all that UB the only defined option was to call the other function that was defined in the file
+05:04:37 <mnoonan> hpc: https://gcc.godbolt.org/#%7B%22version%22%3A3%2C%22filterAsm%22%3A%7B%22labels%22%3Atrue%2C%22directives%22%3Atrue%2C%22commentOnly%22%3Atrue%7D%2C%22compilers%22%3A%5B%7B%22sourcez%22%3A%22MQSwdgxgNgrgJgUwAQB4IGcAucogEYB8AUEZgJ4AOCiAZkuJkgBQBUAYjJJiAPZgCUTfgG4SWAIbcISDl15gkAER6iiEqfTCMAogCdx6BAEEoUIUgDeRJEl0JMMXQvRksCALZMARLvdIAtLp0APReIkQAviQAbjwgcEgAcgjRCLoAwuKm1OZWNspIALxIegbGpsI2kSQMSO7i4LnWtvaOCspCohFAA%3D%3D%22%2C%22compi
+05:04:37 <mnoonan> ler%22%3A%22%2Fopt%2Fclang%2Bllvm-3.4.1-x86_64-unknown-ubuntu12.04%2Fbin%2Fclang%2B%2B%22%2C%22options%22%3A%22-Os%20-std%3Dc%2B%2B11%20-Wall%22%7D%5D%7D
+05:04:48 <mnoonan> argh, sorry, didn't realize it was that long :)  hang on..
+05:05:04 <hpc> i can unmunge it, it didn't get truncated
+05:05:48 <hpc> that looks close to what i read
+05:08:28 <merijn> rats...
+05:09:21 <merijn> I can't have tests depending on a package that in turns depends on the original package >.>
+05:09:51 <hpc> heh, yep
+05:10:00 <merijn> bummer
+05:10:14 <hpc> you'd have to make a foo-tests package that's above both of them
+05:10:19 <cocreature> merijn: hm, does that fail even now that we have per-component builds?
+05:10:27 <cocreature> I thought that should break the cycle
+05:10:35 <merijn> cocreature: Empirical testing says: Yes
+05:10:40 <merijn> hpc: I already have a tests package
+05:10:53 <merijn> hpc: Which has testing logic shared across 3 packages
+05:11:35 <merijn> hpc: The problem is that now I realised life would be much easier if I could access some of the types in the core package. But adding a -types package just to define 2 ADTs seems...wasteful
+05:11:37 <tsaka__> Im struggling with understanding imports. Ive got:
+05:11:38 <tsaka__> import qualified Data.Array.Accelerate as A; import Data.Array.Accelerate (Z)
+05:11:42 <tsaka__> but get:
+05:11:43 <tsaka__> Data constructor not in scope: Z. Perhaps you meant ‘A.Z’ 
+05:11:53 <tsaka__> Although this approach works for functions other than Z from the same lib.
+05:12:05 <Athas> tsaka__: import Data.Array.Accelerate (Z(..)), I think.
+05:12:07 <merijn> tsaka__: That only imports the Z type constructor, not any of it's value constructors
+05:12:12 <cocreature> tsaka__: if you want to import a data constructor you need to use Type(Constructor) or Type(..) to import all constructors of Type
+05:12:14 <hpc> tsaka__: you've imported the type Z, not the data constructor Z
+05:12:40 <merijn> hpc: So now I sadly end up having to duplicate stuff across each individual package after all >.>
+05:12:53 <hpc> hmm, is it majestic stereo even with 4 people?
+05:12:55 <tsaka__> great thanks
+05:13:11 <Athas> tsaka__: what are you using Accelerate for?
+05:13:32 <merijn> Athas: Quick, get your salesman outfit!
+05:13:47 <tsaka__> Athas: I'm porting my masters thesis project on reinforcement learning from python to haskell
+05:13:48 <Athas> Well, I'm just curious!  Parallel functional programming is a seriously esoteric art.
+05:14:28 <cocreature> “95% of users who liked accelerate also liked futhark”
+05:14:35 <tsaka__> it's used for a mobile caller environment simulator and for a linear neural network (which is a fancy word for matrix mult ..)
+05:16:27 <merijn> "Hi! It looks like you're trying to do functional GPU programming. Would you like to: [ ] Try Futhark instead? [ ] Give up and be miserable?"
+05:17:42 <merijn> If anyone has a brilliant idea on solving my circular dependency that does not involve "waste even more of Hackage's name space by making a 5 line package", lemme know for when I get back from the fysiotherapist :p
+05:17:46 <delYsid> Hmm, how do I tell haddock to generate terse instance lists?
+05:19:03 <cocreature> merijn: hm, I’m still confused about this. I even recall nix having to hack around this because while this kind of cycle is supported by cabal it doesn’t work with the standard approach nix takes
+05:19:37 <merijn> cocreature: Oh!
+05:19:42 <cocreature> I guess I’m getting old and my brain starts making things up but I really would have hoped that I’ll have to wait a bit longer for that to happen :)
+05:19:42 <merijn> cocreature: It looks more complicated
+05:20:09 <merijn> cocreature: Looks like there might be a conflict between unix and time and the test package depends on unix
+05:20:23 --- mode: ChanServ set +o Sigyn
+05:20:27 <merijn> cocreature: So one the dependencies are circular it tries to solve the conflict between time and unix and gets stuck
+05:21:30 <merijn> hmm, not quite, apparently
+05:22:10 <cocreature> time and unix might be special since their shipped with ghc
+05:23:14 <merijn> I get 200 lines of "trying: " and then it gives up
+05:23:58 <merijn> But not obvious what's causing the conflict
+05:24:27 <Taneb> Is something specifying a restrictive upper bound on time or unix
+05:24:33 <Taneb> (or lower bound)
+05:24:46 <Taneb> That's causing it to try to install a different version to what you have?
+05:42:13 <bwe> Spock framework: `do get "/page/1" $ do` -- how can I access the `1` ?
+05:44:01 <tdammers> bwe: you can't. If you want to capture arbitrary path components do something like `get "/page/:number" $ do { number <- param "number"; ... }
+05:44:12 <liste> bwe: get ("page" <//> var) $ \index -> do
+05:45:14 <tdammers> or, pathologically: get "/page/1" $ do { let number = 1; ... }
+05:45:23 <tdammers> but that's almost certainly not what you want ;)
+05:45:32 <liste> bwe: https://www.spock.li/tutorials/rest-api#getting-a-specific-person
+05:51:48 <bwe> tdammers, liste: thanks for your valuable input. I'll try that.
+05:52:41 <liste> does tdammers' solution work also in Spock, or only in scotty?
+05:53:30 * tdammers thought spock was built on top of scotty
+06:06:23 <liste> tdammers: no, it's just inspired by scotty
+06:11:05 <bwe> tdammers: Now I have https://bpaste.net/show/a599ccaf0e0a. Which returns a 404 if I open "/bla/10". I expected a page served with the number 10 printed.
+06:25:24 --- mode: glguy set +v lando_
+06:26:57 <bwe> liste: The tutorial confuses me: what about the variable `var` (btw. is this called a variable in Haskell?)?
+06:27:03 <bwe> https://bpaste.net/show/f3c4918a7a38
+06:27:29 <liste> bwe: "var" is a value, it's a placeholder that indicates the place where the parameter is in
+06:28:00 <greymalkin> I'm getting a type issue on hp2any-core-0.11.2 with GHC 802
+06:28:21 <greymalkin> Is hp2any still used, or is there a better tool for profiling output?
+06:28:24 <bwe> liste: var is without quotation marks. Is that correct?
+06:28:34 <liste> bwe: so if you want /page/1, do ("page" <//> var), if you want /page/1/2, do ("page" <//> var <//> var)
+06:28:36 <liste> bwe: yes
+06:30:15 <bwe> liste: this fails with this exception: https://bpaste.net/show/b6e937b808c9
+06:31:34 <liste> bwe: you need to annotate "number"
+06:31:39 <liste> \(number :: Integer) ->
+06:31:42 <liste> for instance
+06:31:57 <liste> bwe: and remove the number <- param' number
+06:33:35 <bwe> https://bpaste.net/show/4af4622a7b35       Type signatures are only allowed in patterns with ScopedTypeVariables
+06:33:43 <bwe> should I enable that?
+06:35:14 <bwe> Okay. It works. liste: How does that relate to `var`? Before it raised an exception but no longer?
+06:35:18 <opqdonut> it's a harmless extension
+06:35:34 <opqdonut> I mean ScopedTypeVariables is
+06:35:59 <liste> bwe: `var' is polymorphic, so the type of "number" couldn't be inferred
+06:37:20 <bwe> liste: I ask since `var` does not carry any value in it. What does it do?
+06:37:46 <liste> bwe: it's a placeholder for path parameters
+06:38:54 <liste> it marks a hole where the value will be
+06:39:38 <liste> similar technique is used in the `formatting' package https://hackage.haskell.org/package/formatting-6.3.6/docs/src/Formatting.Examples.html#hello
+06:41:42 <cocreature> greymalkin: I suppose GHC’s standard heap profiling options are insufficient for you?
+06:41:49 <lingeeal> hi, how is the syntax/semantics in the where part are called? Is it destructuring? https://pastebin.com/qRq9T1ed
+06:42:08 <liste> lingeeal: pattern matching
+06:42:35 <liste> oh wait
+06:43:00 <liste> yes, it's pattern matching, redefining the (,) operator
+06:43:30 <dmwit> He's not redefining (,).
+06:43:32 <cocreature> liste: huh? it’s definitely not redefining (,)
+06:44:41 <dmwit> That said, ```(x, _) = a `divMod` 100``` is weird. Write ```x = a `div` 100``` instead. =P
+06:44:56 <lingeeal> but in pattern matching it's like this: if this pattern matches, then it is equal to.. Here it is the other way around, it's like destructuring in js or clojure
+06:45:03 <dmwit> And similarly ```resp = x `mod` 10``` for the other one.
+06:46:02 <dmwit> lingeeal: With `case e of p -> e'`, you match the value computed by `e` against pattern `p`, resulting in `e'` as your answer.
+06:46:05 <lingeeal> dmwit: this is an exercise in haskell book, asking to use divMod :)
+06:46:21 <dmwit> lingeeal: With `e' where p = e`, you match the value computed by `e` against pattern `p`, resulting in `e'` as your answer.
+06:46:34 <liste> dmwit: oh yeah, I got confused with how "+" works
+06:46:54 <liste> I mean "+" vs ","
+06:47:05 <Ariakenom> liste: the difference is constructor vs variable
+06:47:27 <bwe> liste: How can I see when a name is a hole?
+06:47:28 <dmwit> lingeeal: You see the similarities between the two that motivate giving them the same name? =)
+06:47:29 <liste> Ariakenom: yes
+06:47:36 <liste> Ariakenom: thanks :=)
+06:47:42 <liste> I forgot , is a constructor
+06:47:55 <dmwit> lingeeal: (There *are* differences, of course. But there's also a lot of similarity.)
+06:48:51 <BL[m]> Hi. Is there a way to bind through two monads in one line in do-notation? I have many functions of type `IO (Either SomeErr SomeRes)` and can't find a convenient way to operate on them in libraries.
+06:48:51 <BL[m]> I think I can define new type, which will encapsulate `IO (Either e _)`, but most likely, I'm doing something wrong, since this should be a common case.
+06:49:04 <lyxia> BL[m]: use monad transformers
+06:49:10 <dmwit> BL[m]: Use ExceptT SomeErr IO SomeRes instead.
+06:49:23 <liste> bwe: when it's named `var'. it's a value defined in the Scotty package
+06:49:42 <lingeeal> ok, so my link example piece of syntax, "normal" function param pattern match, and the case syntax should all be called pattern match, right? 
+06:49:43 <lingeeal> :)
+06:49:59 <BL[m]> but that would allow me to only `lift` a IO function, no?
+06:50:02 <dmwit> lingeeal: right
+06:50:06 <dmwit> BL[m]: no
+06:50:09 <lingeeal> ok dmwit, thanks
+06:50:14 <dmwit> :t ExceptT
+06:50:15 <lambdabot> m (Either e a) -> ExceptT e m a
+06:50:36 <dmwit> In particular, `ExceptT :: IO (Either SomeErr SomeRes) -> ExceptT SomeErr IO SomeRes`.
+06:51:13 --- mode: glguy set +v zhas
+06:51:38 <BL[m]> yeah, I understand what it does, just thought that its monad instance works only on one level, equivalevent to Except in this case
+06:51:44 <dmwit> Anyway whatever you've written of type `IO (Either SomeErr SomeRes)` can probably be rewritten in quite a natural way to be an `ExceptT` in the first place without needing this constructor.
+06:52:35 <BL[m]> ok, i'll dig a little bit more, thanks
+06:52:40 <dmwit> BL[m]: You might like the discussion at https://stackoverflow.com/q/33005903/791604
+06:53:04 <maerwald> What's wrong with IO (Either ...)? why would you need monad transformers?
+06:53:35 <zhas> How do you parse a comma separated list of values with megaparsec?
+06:53:39 <dmwit> maerwald: Getting proper short-circuiting behavior out of sequenced actions is a pain, and leads to deeply-nested indentation due to repeated pattern matching on the Eithers.
+06:54:14 <dmwit> zhas: sepBy, I guess
+06:54:18 <bwe> liste: Ah ;).
+06:54:28 <maerwald> dmwit: you just throw an exception?
+06:54:35 <maerwald> there is your short-circuit
+06:54:49 <dmwit> maerwald: Presumably if you are trying to have a result of type `IO (Either ...)` it is because you want to avoid exceptions.
+06:54:51 <zhas> dmwit: Thanks, what if you want to trim whitespace around the values but a value may consists of whitespace
+06:55:01 <maerwald> dmwit: uh, not sure that's really the case, but anyway
+06:55:10 <zhas> as in "key1, key 2   ,key 3, 
+06:55:11 <dmwit> zhas: Write a parser for values that trims whitespace around the values.
+06:55:14 <BL[m]> dmwit: I'm just confused a little bit that most of the time I want something like `fmap (mapLeft show) . try . openFile` and thought that `liftIO` simply `return`s what it gets from action
+06:55:40 <maerwald> I would rather use IO (Either a b) for the primary expected failure, not random things that can happen in between
+06:55:56 <dmwit> BL[m]: Certainly `liftIO` is not always the correct way to lift something into an ExceptT.
+06:56:13 <maerwald> and all my file handling code does fine without transformers
+06:56:19 <dmwit> maerwald: Whatever you're using them for, if you want to combine them, you are left with pattern matching and nested indentation.
+06:56:48 <maerwald> dmwit: there are common functions on monads :P
+06:57:05 <dmwit> Yes. For example, (>>=) on ExceptT SomeErr IO is one such common function.
+06:57:16 <maerwald> >>= works on IO and Either too
+06:57:36 <dmwit> Yes. But if you want it to short-circuit, you must match on the Either you get from the (>>=).
+06:58:40 <dmwit> I don't really understand why you're playing dumb here. Do you honestly believe ExceptT SomeErr IO has no place in Haskell code?
+06:58:46 <maerwald> you can use fmap on the Either inside
+06:59:02 <maerwald> no, I see it often
+06:59:05 <maerwald> but it's overused
+06:59:11 <zhas> I don't know how you avoid deep nesting maerwald
+06:59:14 <dmwit> Yes, but if you want to do further IO (Either ...) actions, then once you've fmapped the Either, you need to have some equivalent of "join" for ExceptT SomeErr IO.
+06:59:48 <dmwit> Or else you end up with IO (Either SomeErr (IO (Either SomeErr SomeRes))), which is presumably not what you want.
+07:00:19 <maerwald> probably depends how you write IO code and how you use exceptions
+07:01:08 <zhas> What is the point that is being discussed?
+07:01:21 <zhas> Seems like you don't like ExceptT  ... why?
+07:02:11 <maerwald> old discussion, I don't like transformers in general and avoid them, which is very easy when you are already in IO
+07:02:29 <maerwald> just didn't find the use case clear enough to recommend it
+07:02:57 <zhas> Fair enough
+07:03:16 <zhas> Programmers are far too dogmatic if you don't like it you are entitled not to use it :)
+07:03:29 <dmwit> What I like about ExceptT MyErrType is that it explicitly lists the kinds of problems that the user should try to handle. IO exceptions are implicit, and one must simply *know* at the top-level what things could go wrong that should (or should not!) be handled.
+07:03:36 <zhas> Personally I like them
+07:04:11 <dmwit> This is not always appropriate, of course -- sometimes implicit is what you want. But it is definitely appropriate sometimes.
+07:04:31 <zhas> It is nice to look at the type signature and see a monad stack - its clear
+07:04:57 <zhas> Unless you wrap it in a newtype :(
+07:05:04 <zhas> and call it App
+07:05:10 <zhas> I don't understand why people do that
+07:06:57 <maerwald> dmwit: well, when I see 'foo :: IO something' I often think of "systems programming" code, as in: something that is *inherently* IO, not "oh, I need some IO too". And using ExcepT and friends in low-level code doesn't really make much sense. You want exceptions (uncatched ones even, yes). Otherwise I'm wondering why the guy didn't just use mtl and MonadIO/MonadError
+07:06:59 <siwica> Is it considered good practice to always use functions with lesser constraints? i.e. sequenceA instead of sequence even if the thing in the traversable has a monad instance anyway?
+07:07:59 <zhas> What would be the point in constraining yourself?
+07:08:23 <Ariakenom> for the reader to know things the code can't do
+07:08:33 <siwica> Hm, making it obvious to the reader that only "applicative functionality" is needed here
+07:09:00 <zhas> Maybe I misunderstood the question
+07:09:30 <zhas> How do you trim whitespace around a token using Megaparsec?
+07:09:33 <maerwald> Just use the constraint that describe your intentions best. Refactoring can always be done later
+07:09:44 <maerwald> don't pre-optimize
+07:09:45 <dmwit> maerwald: ...but the point here is the answer to "why the guy didn't just use mtl" was "guy was ignorant of mtl"...!
+07:09:52 <maerwald> dmwit: oh
+07:11:15 <lyxia> zhas: the usual approach is to wrap all your token parsers so they consume all whitespace after them
+07:11:17 <dmwit> siwica: "Most general possible" is sensible. So is "so monomorphic that the reader knows exactly which Monad". In between is weird.
+07:11:41 <Ariakenom> siwica: Just curious, does traverse fit into what your writing instead?
+07:11:55 <siwica> dmwit: ok!
+07:12:33 <siwica> Ariakenom: Hm, didn't know about traverse
+07:13:06 <Ariakenom> traverse f = sequence . fmap f
+07:13:14 <Ariakenom> % :t traverse
+07:13:14 <yahb> Ariakenom: (Traversable t, Applicative f) => (a -> f b) -> t a -> f (t b)
+07:13:31 <kurvaanyadintel> % map (+1) [1..3]
+07:13:31 <yahb> kurvaanyadintel: [2,3,4]
+07:13:40 <siwica> sequenceA . fmap f
+07:13:45 <siwica> right?
+07:13:54 <Ariakenom> % :t sequence
+07:13:55 <yahb> Ariakenom: (Traversable t, Monad m) => t (m a) -> m (t a)
+07:13:58 <Ariakenom> yup
+07:14:43 <siwica> Yeah, I guess that could also be used. sequenceA seems better though
+07:15:40 <Ariakenom> sure. I'll note down the data point.
+07:20:19 <mniip> in his free theorems paper wadler refers to reynolds abstraction theorem - where can I read about that?
+07:20:38 <mniip> the citation wadler gives is for proceedings of some conference on information processing which is nowhere to be found
+07:21:24 <shapr> mniip: https://en.wikipedia.org/wiki/Parametricity#History ?
+07:21:49 <mniip> oh wow
+07:22:10 <mniip> google scholar didn't find that
+07:26:10 <lingeeal> a -> b in type terms is the same as (->) a b, from where it is easy to see that -> is a type constructor, like Either a b for example. But in value terms to construct a lambda we also use ->. It is a different thing, right?
+07:27:01 <merijn> lingeeal: Yes
+07:27:39 <merijn> lingeeal: In fact, the -> in lambda's isn't even an operator, since it's a syntax error without \
+07:29:25 <infinisil> I think that's why Idris uses => in lambdas, because it's not the same as -> in types
+07:29:38 <lingeeal> thank you
+07:29:38 <kosmikus> the -> also occurs as part of case syntax, but again, it's not an operator, and not the same as (->) for types
+07:29:47 <infinisil> Idris also uses => in case statements for the same reason
+07:30:36 <kosmikus> Idris still uses => for class/interface constraints though, right? which is still a "conflict" ...
+07:31:06 <dstolfa> notation is hard
+07:31:26 <kosmikus> of course. I'm not complaining.
+07:31:31 <unclechu> hey guys, i have generated haddock documentation for my own data-type with two constructors, one of constuctors has record-fields but in docs this record-fields are disappeared.
+07:31:31 <unclechu> the data-type looks like this: `data Foo = Foo Int Int | Bar { foo :: Int, bar :: Int }` and in produced documentation it looks like `Foo Int Int` and `Bar Int Int`
+07:31:50 <mniip> lingeeal, in some type theory stuff you might actually see the (lambda x. e) being highlighted as analogous to constructors in other algebraic types
+07:31:51 <unclechu> why it happens and could i fix it?
+07:32:39 <mniip> just as  inl :: A -> A + B  is coproduct introduction,  lambda x. e  is abstraction introduction
+07:33:02 <dstolfa> mniip: i actually quite like the . notation
+07:33:23 <mniip> it's okay but I am soooo used to the haskell spelling
+07:36:01 <kurvaanyadintel> % error
+07:36:01 <yahb> kurvaanyadintel: ; <interactive>:26:1: error:; * No instance for (Show ([Char] -> a0)) arising from a use of `print'; (maybe you haven't applied a function to enough arguments?); * In a stmt of an interactive GHCi command: print it
+07:39:04 <lyxia> unclechu: maybe you aren't exporting foo and bar?
+07:39:22 <infinisil> kosmikus: I think the idea is "use -> only for function types, everything else (less common things) use =>"
+07:40:46 <unclechu> lyxia (IRC) i'm certainly doing it, by defining `Foo (..)` in explicit module export
+07:41:10 <unclechu> i also tried to add record-fields for first constructor too but it didn't change anything
+07:42:37 <lyxia> unclechu: can you show the code
+07:43:13 <unclechu> lyxia (IRC) interesting, I just removed explicit export declaration, like to export everything and now it's fixed.
+07:43:40 <lyxia> how odd
+07:43:52 <unclechu> it seems this issue is related https://stackoverflow.com/questions/46357747/haddock-data-record-fields-names-not-being-generated
+07:44:04 <unclechu> i'm using that extension too
+07:44:14 <droplet> :t \f -> fmap f . sequenceA
+07:44:16 <lambdabot> (Applicative f, Traversable t) => (t a -> b) -> t (f a) -> f b
+07:44:30 <droplet> is there a cleaner way of writing that? it looks really similar to traverse
+07:44:50 <unclechu> maybe it is fixed in later version of haddock (currently i'm using 2.17.3)
+07:47:13 <lyxia> unclechu: indeed on 2.20 I can see the record fields when DuplicateRecordFields is on and I'm explicitly exporting Foo(..)
+07:51:59 <merijn> cocreature: Turns out that is *not* supposed to work
+07:54:00 <nano-> Trying to use microlens and getting stuck on accessing the number 42 in {"foo": 42} via obj ^. key "foo" . _Integer, and that key can't work because Integer is not a monoid. I understand that it's not, but I can't figure out how to use microlens to get the number.
+07:54:59 <cocreature> merijn: hm, why not?
+07:55:05 <merijn> nano-: Ghetto solution, get a "Sum Integer" :p
+07:55:20 <cocreature> nano-: what do you want to happen if the key is not present?
+07:55:25 <merijn> cocreature: Because circular dependencies aren't supported as components don't get completely independent solvers
+07:55:25 <zhas> What have I done wrong with this CSV parser? It doesn't match anything https://pastebin.com/LMxERJaY
+07:56:15 <chpatrick> nano-: try ^? or ^?!
+07:56:22 <merijn> zhas: "lookahead (char ',')" should always file at the start of a line, no?
+07:56:26 <cocreature> nano-: the Monoid error usually means that you are trying to use view/^. on something that is not a Lens but a Traversal i.e. it can target 0 or also more than one element
+07:56:38 <zhas> merijn: what do you mean file?
+07:56:38 <cocreature> in that case ^. will combine those values using the Monoid instance
+07:56:57 <merijn> zhas: Generally CSV files don't start with commas?
+07:56:58 <cocreature> merijn: ah makes sense I guess
+07:57:11 <cocreature> apparently they are not as independent as I thought
+07:57:25 <zhas> True but even if that was the functionality that worked I would be happy 
+07:57:57 <merijn> cocreature: hvr's solution (well, the simplest of them) is to just move my test-suites from the main package to the test package and have that depend on the main package
+07:58:05 <nano-> cocreature: I'm fine with an exception. There's no recovery if it fails. 
+07:58:22 <zhas> Ideally I want it to parse key1,  key 2  ,key 3 ,    into the following :   ["key1, "key 2", "key 3"]
+07:58:27 <ab9rf> but but but you must always attempt to recover from exceptions
+07:58:27 <merijn> zhas: So what happens?
+07:58:31 <ab9rf> FAILURE IS NOT AN OPTION!
+07:58:36 <cocreature> nano-: if you want to get back a Maybe use ^?, if you just want to crash use ^?!
+07:58:37 * ab9rf runs
+07:58:52 <greymalkin> Is hp2any still used (I'm getting an error trying to compile hp2any-core)? Is there a better tool for reading the output of profiling?
+07:58:59 <nano-> zhas: Yes, but if parts of the json structure is broken, the whole result is invalid.
+07:59:02 <nano-> cocreature: check, thanks.
+07:59:19 <zhas> Lets say I give it the following then it wont finish parsing  -  ,key1,  key 2  ,key 3 ,
+08:00:11 <merijn> zhas: You haven't pasted your example input/error/output anywhere
+08:00:32 <maerwald> ab9rf: why :)
+08:00:33 <zhas> It wont give output or error just fails to terminate parsing
+08:01:05 <maerwald> not every program is a web app that must not crash
+08:01:56 <ab9rf> maerwald: i'm just parroting all the idiotic noise i hear on Da Blogs
+08:02:06 <ab9rf> maerwald: also, why do web apps not have to crash? 
+08:02:57 <maerwald> ab9rf: well, I meant rather "platform"
+08:02:58 <zhas> ab9rf: because your devops guy hasnt built in fault tolerance
+08:03:08 <ab9rf> maerwald: the things that must not crash aren't web apps, they're elevator controllers and spaceship attitude management systems and proton beam managers
+08:03:12 <nano-> "Rule of Repair: When you must fail, fail noisily and as soon as possible.
+08:03:13 <maerwald> let's calculate how much money goes down the sinkhole if google is down for 5 seconds
+08:03:30 <ab9rf> and really a lot of those can actually crash as long as they have crash modalities that are "safe"
+08:03:47 <maerwald> sure, it's more complicated than exceptions lol
+08:04:02 <maerwald> first you are oversimplifying, now you are overcomplicating ;)
+08:04:06 <ab9rf> i'm perhaps a bit sensitive to this because my son just came out of surgery
+08:05:26 <mniip> was it a proton spaceship elevator surgery
+08:06:08 <maerwald> yes, a crash should be safe (lol, dat pun)
+08:06:46 <maerwald> which isn't that hard in haskell, we have no memory corruption, right?
+08:07:00 <Ariakenom> where there's a will
+08:07:01 <mniip> yeah x86 is totally not full of holes
+08:07:08 <maerwald> exactly
+08:07:14 <mniip> and neither are any of the OSes we normally use
+08:07:34 <maerwald> linux is perfectly safe, especially since Linus says every now and then how much he cares about security
+08:07:42 <maerwald> as in: not.
+08:08:16 <maerwald> but he is smart, since he knows what actual security would mean for his kernel, lol
+08:09:24 <mniip> I just thought about the matter for about 15 seconds and came to the conclusion that this is where the ubiquity of x86 actually backfires
+08:09:41 <megaTherion> maerwald: I always enjoy Linus 'f*ck you' outbursts :|
+08:09:52 <mniip> to ensure "safe" "crashes" you need a non-von-neumann hierarchy. You need to segregate RAM from ROM
+08:10:05 <mniip> possibly have NX RAM
+08:10:08 <maerwald> megaTherion: did you see his latest reflection on community issues?
+08:10:14 <megaTherion> no luckily not :D
+08:10:18 <maerwald> you should
+08:10:22 <maerwald> it's WTF!
+08:10:29 <mniip> maerwald, truly his reflection
+08:10:35 <megaTherion> he really has a serious attitude problem
+08:10:43 <maerwald> megaTherion: no no
+08:10:47 <maerwald> this will blow your mind
+08:11:03 <mniip> maerwald, link to thread?
+08:11:27 <yushyin> https://lore.kernel.org/lkml/CA+55aFy+Hv9O5citAawS+mVZO+ywCKd9NQ2wxUmGsz9ZJzqgJQ@mail.gmail.com/T/#u
+08:11:35 <maerwald> yep
+08:13:24 <maerwald> I think it finally happened... someone hacked his laptop
+08:14:29 <ventonegro> Even if he was hacked he would go to therapy just not to admit that :)
+08:14:34 <maerwald> haha
+08:15:23 <maerwald> I don't even think it's especially him. It's probably more the sudden fame, like Justin Biber. Not many people can deal with it
+08:17:05 <megaTherion> maerwald: quite a long tale
+08:17:50 <delYsid> Is there a editor mode for viewing haskell docs/sources?  I am not really happy with browsing module docs on the web, looking for something a little more integrated?
+08:19:49 <maerwald> delYsid: codex/hasktags work with library sources, so I just jump to the implementation...
+08:20:05 <maerwald> and stop caring about editor integrations
+08:20:30 <maerwald> but since it's tags, the first found tag might not always be accurate
+08:21:57 <delYsid> hmm, didn't know about hasktags, maybe that works for me.
+08:22:24 <delYsid> I am a little spoiled by having done a lot of elisp in the past.  The doc / jump to definition integration of that being excellent.
+08:23:01 <delYsid> And I sort of miss the swiftness of looking up things.
+08:24:20 * BL[m] sent a long message:  < https://matrix.org/_matrix/media/v1/download/matrix.org/eJAbCiJtMnyXFoAvFEhqHTen >
+08:24:35 <maerwald> you should use codex
+08:24:40 <maerwald> because it works for dependencies
+08:26:56 <delYsid> bah, codex doesnt build from stackage.
+08:27:15 <unclechu> lyxia (IRC) i temporarly fixed the issue by adding this pragma {-# OPTIONS_HADDOCK ignore-exports #-}
+08:27:36 <maerwald> delYsid: use cabal
+08:27:45 <delYsid> no luck either
+08:27:49 <maerwald> how so
+08:28:20 <maerwald> did you clone the repo?
+08:28:32 <maerwald> you install it from within
+08:28:40 <delYsid> no, tried from index
+08:28:58 <cocreature> there hasn’t been a release in a while so the repo is probably a better choice
+08:28:58 <maerwald> clone the repo and run stack install
+08:30:15 <delYsid> doing that now, seems to work.
+08:30:22 <delYsid> dependency hell everywhere I look.
+08:30:34 <maerwald> no, it's just that stackage only has outdated versions
+08:30:47 <maerwald> don't blame the library maintainer for that 
+08:30:54 <delYsid> I find upper-bounds a real nuisance.  They end up breaking builds for no reason very often.
+08:31:03 <shapr> o hi delYsid ! you coming to ICFP / StrangeLoop / PWLConf ?
+08:31:10 <maerwald> delYsid: I've been saying that for years, but no one agrees ;)
+08:31:28 <delYsid> shapr: no way :-)
+08:31:32 <shapr> aw man
+08:31:39 <tdammers> lack of upper bounds may also break builds
+08:31:44 <delYsid> maerwald: I am surprised, it is so damn obvious.
+08:31:46 <tdammers> you can't win
+08:31:47 <maerwald> tdammers: then people fix it ;)
+08:31:52 <merijn> delYsid: Upper bounds break *now*
+08:31:55 <maerwald> that's what rolling is with automatic reverse dependency testing
+08:31:59 <maerwald> solves since 15 years
+08:32:07 <merijn> delYsid: No upper bounds breaks *somewhere in the future and will remain broken forever*
+08:32:11 <maerwald> and people still think it's a problem
+08:32:13 <delYsid> tdammers: may, but in reality, the upper-bound breaks by default, while none just breaks *sometimew*
+08:32:38 <merijn> delYsid: PVP semantic bounds should fix that in the future
+08:32:51 <mniip> player vs player semantic bounds?
+08:33:02 <maerwald> delYsid: the truth is, this is mainly a *workflow* issue, not a tool issue... distro maintainers know that. And when you try to fix it with tools instead.. you end up with something like stack
+08:33:04 <tdammers> merijn: PVP is conservative, you can get false negatives
+08:33:11 <merijn> delYsid: Basically, that will give the ability to distinguish between "upper bound that's known broken" and "upper bound that's known not broken"
+08:33:39 <merijn> tdammers: The reason it gets solved is not the PVP per se, but the ability to distinguish between "definitely won't work with newer" and "not sure if works with newer"
+08:33:58 <merijn> tdammers: Because then you can make --allow-newer only try relaxing the latter
+08:34:02 <maerwald> merijn: yes, in distros there is only "definitely won't work with newer"
+08:34:13 <maerwald> when there are upper bounds they always mean that
+08:34:15 <delYsid> maerwald: I have to admit, I love stack.  I would probably have given up on haskell if I continued with just cabal.  It was just too frustrating.
+08:34:39 <maerwald> delYsid: releases make sense, but stack as a tool... don't get me started
+08:35:18 <delYsid> maerwald: well, I am a newbie, but still, so far, it has only served me well.
+08:36:00 <maerwald> if you just want to fire up something, maybe, I still find cabal easier, because I understand how it works
+08:36:04 <delYsid> It felt like a piece of freedom when I finally was disconnected from my system ghc.
+08:36:27 <maerwald> figuring out what stack actually does can be confusing... if you, for some reason, have to know what it does
+08:36:47 <delYsid> maerwald: Thats probably the thing, I cant claim to really understand neither of them.  SO I might as well go with stack and stop hating things.
+08:36:47 <maerwald> oh, these days you can just download GHC and install it in any prefix
+08:36:59 <maerwald> not much point in stack managing ghc, actually
+08:37:19 <tdammers> merijn: yes, of course... but that's not a complete solution, just a much less bad one
+08:37:25 <dmwit> That's been true for a pretty long time. As long as I've been doing Haskell, at least.
+08:37:34 <delYsid> maerwald: I prefer not having to do that manually.
+08:37:39 <dmwit> (The "stick GHC in any prefix" thing.)
+08:38:17 <maerwald> dmwit: which is why I don't understand why stack thinks it has to handle ghc installations, but yeah. One tool for everything ;)
+08:38:27 <delYsid> changing resolver major number and seeing if my project still builds with newer ghc is just so easy.
+08:38:32 <yushyin> I think it is convenient to let tooling handle multiple versions of ghc
+08:38:48 <yushyin> (if it works)
+08:39:21 <maerwald> downloading semi-random binaries from the internet that I compile my project with :> no one is paranoid? But yeah, you can just tell it to use system-ghc
+08:39:22 <merijn> yushyin: All the Haskell tooling already knows how to handle multiple GHC versions
+08:39:40 <merijn> yushyin: If you change which GHC version is first in your path it Just Works (TM)
+08:39:42 <delYsid> I was pretty pissed when stable debian stack stopped working with newer lts versions, but alas, I am running the ~/.local/bin version now.
+08:40:10 <yushyin> merijn: I do not want to do that by hand
+08:40:12 <merijn> yushyin: GHC's package database is per-version, so GHC versions never interfere with eachother (well, assuming you don't have multiple different installs of the same GHC version)
+08:40:15 <dmwit> You don't even need to change which GHC is first in your path.
+08:40:16 --- mode: glguy set +v adius
+08:40:29 <merijn> yushyin: You can explicitly pass a ghc as argument to cabal to
+08:40:43 <merijn> yushyin: With new-build you can even store the config of which one to use
+08:40:46 <dmwit> Just `-w ghc-8.2.2` or whatever.
+08:41:21 <yushyin> I want buildtoolXY build toolX with ghc-whatever (and download all that mess if necessary)
+08:41:45 <maerwald> "download all that mess" reminds me of npm, gems and...
+08:41:55 <yushyin> it does yes
+08:41:59 <maerwald> security vulnerabilities included
+08:42:14 <maerwald> also because nothing is rolling anymore and you have hugely outdated deps
+08:42:15 <yushyin> but haskell packaging is a mess ...
+08:42:25 <maerwald> it's a workflow issue, not a tooling issue 
+08:42:40 <maerwald> but as long as people don't get that, we will keep adding tooling
+08:42:41 <merijn> yushyin: How so? Have you tried using literally any other language? C, C++, Python, Ruby, etc. all give me 10 times more issues
+08:43:08 <merijn> For funsies, try installing Python and some dependencies without root
+08:43:26 <yushyin> merijn: certainly I do not say that I think other languages do better
+08:43:46 <tdammers> and python even has the unfair advantage of not having much in terms of compile-time code dependencies
+08:43:48 <maerwald> C at least has stable APIs :)
+08:43:54 <yushyin> maerwald: yes :D
+08:44:11 <maerwald> if you have ever used internals of Cabal (the library) you know...
+08:44:39 <maerwald> your code will become an ifdef hell :D
+08:44:56 <maerwald> which is already the case for ghc-mod and friends
+08:45:30 <maerwald> and this is also not a tooling issue... it's workflow again
+08:46:00 <tdammers> you could also say it's a resource problem, and a compiler design problem
+08:46:36 <maerwald> not that much, it's primarily a workflow problem... and that is tied to communication capacity/efficiency
+08:46:38 <yushyin> I often need older versions of ghc depending on the libraries I use and I really really do not want to hassle with all this. It’s a real pita sometimes. I’m not very fond of stack per se but I like how it handles multiple GHCs
+08:47:07 <maerwald> and if there is a platform that can support the required form of communication
+08:47:27 <maerwald> but really, all this has been solved by distribution already
+08:47:34 <hexagoxel> i see a workflow issue too.. these upper bound/system ghc/tooling discussions always seem to start at 0, use personal experience as arguments, include bold claims, and rarely contain anything constructive or convincing.
+08:47:45 <merijn> yushyin: If writing "-w ghc-x.y" is too much work you could just switch to new-build, write it once in cabal.project and then it "Just Works"
+08:47:48 <tdammers> GHC not having a nice stable API for things like IDE integration very much is a matter of not realizing we would need this early enough, and not having enough manpower to do it now
+08:47:48 <maerwald> look at big distros and their workflow, their policies, their release handling, ...
+08:48:01 <maerwald> it's more sophisticated than people might think
+08:48:19 <merijn> maerwald: The distribution solution is "throw hundreds of man hours at the problem"
+08:48:21 <yushyin> merijn: does it download and install per project ghc?
+08:48:23 <merijn> Which GHC doesn't have
+08:48:28 <hexagoxel> if your goal is to improve the haskell ecosystem, please reconsider the "make relatively shallow arguments on irc" workflow :p
+08:48:29 <maerwald> merijn: nah, not necessary
+08:48:34 <maerwald> and it's not about GHC
+08:48:36 <merijn> yushyin: No, you'd still have to manually install the GHC versions
+08:48:50 <delYsid> maerwald: wow, that codex tip was really nice, thanks a lot!
+08:48:54 <merijn> hexagoxel: But yelling online is easy :(
+08:49:06 <yushyin> merijn: at least stack does this for me
+08:49:34 <maerwald> hexagoxel: you mean I've never descrbied how hackage could be an actual rolling release ecosystem with two release channels, automatic reverse dependency testing before publish, etc etc?
+08:49:37 <maerwald> I've done that ;)
+08:49:39 <maerwald> multiple times
+08:49:55 <hexagoxel> merijn: and pretending to be more clever by criticising that is even easier!
+08:50:08 <maerwald> and distributions already do that
+08:50:15 <maerwald> since decades
+08:50:26 <maerwald> people over-estimate the work that is needed
+08:52:08 <maerwald> stackage is basically fixing the problem after the fact, it could be done before, in addition to releases. But that requires 1. people rethinking their workflow and how they break or not break API, 2. rethinking about version bounds and 3. platform adjustments on hackage
+08:52:37 <tdammers> stackage isn't really fixing the problem
+08:53:14 <tdammers> stackage implements Plan B: give up on automatic on-the-fly dependency resolution, and instead publish pre-vetted sets of fixed versions
+08:53:24 <maerwald> it's just a release
+08:53:40 <maerwald> which is sensible, but not in its own
+08:53:52 <tdammers> it makes sense for some workflows
+08:54:04 <maerwald> for the ecosystem, it has negative effects even
+08:54:27 <cocreature> dunno, people seem to have gotten a lot quicker and updating bounds since we have stackage
+08:54:39 <maerwald> a healthy ecosystem is rolling and releases are just optional
+08:55:25 <JoseZap> one great thing about stackage is that there is commitment to maintaining and you get notifications when your package does not build anymore when the ecosystem changes
+08:55:27 <hexagoxel> maerwald: do you have a concise write-up that you could link to?
+08:56:10 <maerwald> hexagoxel: no, I've not put that much work into it, since I don't see any interest in such an approach
+08:57:00 <maerwald> and it would require quite some work to make this an "implementable" proposal
+08:57:17 <maerwald> primarily it would target hackage as a platform
+08:57:44 <maerwald> and change how every single developer publishes packages and uses it, so... err
+08:59:43 <hexagoxel> i understand. it is a lot of work and a risky thing, having to avoid the cabal-stack divide.
+09:00:07 <maerwald> I can't even imagine the amount of bikeshedding it would cause 
+09:01:15 <maerwald> also, my distro dev years are over and I'm happy not being exposed to that amount of bikeshedding and politics anymore, lol
+09:04:19 <nshepperd1> I think 90% of the upper bounds problem would be solved if anybody uploading to hackage could press a button and start a buildbot which would automatically update upper bounds as long as the tests pass
+09:06:24 <mniip> nshepperd1, tests though
+09:06:27 <hexagoxel> that would still somewhat presume that there was a notion of "weak" versus "strong" upper bounds. i would not want the buildbot to overwrite my strong upper bound, just because my tests don't catch some critical interaction with something else.
+09:06:59 <cocreature> nshepperd1: hm, I feel like more problems come from new versions being released after the fact and people just not realizing that than people putting too strict upper bounds on their packages when they initially release them
+09:08:22 <maerwald> Well, the first thing is... PVP has a negative effect on the ecosystem, because no people can break API... and they WILL. In contrary, Go had very "bad" tooling, which lead to people lose their sleep over breaking API. They would go out of their way to not break any API. Which is still a very nice property of the ecosystem.
+09:08:26 <nshepperd1> cocreature: that's i mean. The buildbot would test it against the new versions
+09:09:20 <nshepperd1> hexagoxel: not known to work, and known not to work, yes
+09:10:51 <maerwald> it might be a side-effect of refactoring being easy in haskell... people just refactor their API all the time, because it is fun
+09:11:01 <maerwald> but they shouldn't :P
+09:12:01 <maerwald> if nothing forces you to avoid this, why would you
+09:12:46 <nshepperd1> Nah, refactoring is good
+09:13:00 <maerwald> of public API? no. Internal API? yeah
+09:13:29 <maerwald> linux is a good example for that
+09:13:59 <nshepperd1> (also, easy to detect with a buildbot - it'll fail to compile)
+09:14:06 <maerwald> will it?
+09:14:22 <maerwald> someone may change the behavior of a function, make a new major release and write a warning in his documentation :)
+09:14:37 <maerwald> I think that even happened in directory and friends, no?
+09:14:46 <maerwald> yes, pretty sure
+09:14:51 <maerwald> look at the "since xxx" notes
+09:15:09 <nshepperd1> Well yes, but it's very rare for refactoring to not change any types
+09:15:18 <maerwald> in C, no one would ever ever do that
+09:15:40 <nshepperd1> Normally one defines a new function and removes the old one
+09:15:53 <maerwald> after a deprecation phase please :)
+09:15:59 <maerwald> of 1-2 years
+09:18:25 * hc did a minor version freebsd update the other day... then after reboot, the kernel crashed, because the virtualbox 3rd party kernel module wasn't compatible with the APIs anymore
+09:19:36 <maerwald> well, better switch to linux
+09:19:37 <maerwald> :P
+09:19:56 <hc> that's what all my friends keep telling me, but: zfs for a nas simply rocks
+09:19:57 <maerwald> only nvidia is broken here, haha
+09:20:07 <hc> well, if you use nixos, no problem there =)
+09:20:09 <maerwald> zfs support on linux is pretty good these days, I know a dev
+09:20:19 <megaTherion> maerwald: not really *that* good :|
+09:20:28 <maerwald> even Linus wouldn't mind having it in the kernel, it's only licensing issues
+09:20:40 <megaTherion> sadly yes
+09:20:44 <hc> Didn't linus step back from development today? =)
+09:20:53 <maerwald> hc: we already posted that one here haha
+09:21:05 <megaTherion> I hope he steps back from the media
+09:21:11 <megaTherion> development he can do all the day, I dont care ^^
+09:21:17 <megaTherion> but let other ppl speak
+09:21:20 <hc> Yeah, less side effects that way ; - )
+09:21:31 <maerwald> megaTherion: greg-kh is surprisingly good at speaking and talk imo
+09:21:51 <maerwald> he should have been that person in the first place
+09:22:30 <isd> Hey all, I seem to be running afoul of https://github.com/haskell/cabal/issues/944 with the bytestring-builder package. Elsewhere I've found references to people working around this by just not building the docs, but I can't figure out how to actually do that. Any pointers?
+09:22:58 <maerwald> yes, someone had that earlier, you can skip doc generation for single packages
+09:23:50 <isd> Yeah, I figured, but I'm having trouble pinning down how I make that happen.
+09:27:08 <maerwald> package xy\n documentation: False
+09:30:40 <isd> Thanks, that seems to have done the trick.
+09:40:05 --- mode: glguy set +v haskell69
+09:40:12 <haskell69> hello?
+09:41:01 <lyxia> hello
+09:59:27 <ab9rf> olleh
+10:00:19 <cppxor2arr> kt
+10:00:50 <EvanR> > (reverse . reverse . reverse) "hello"
+10:00:52 <lambdabot>  "olleh"
+10:01:22 <cppxor2arr> > iterate reverse "hello"
+10:01:24 <lambdabot>  ["hello","olleh","hello","olleh","hello","olleh","hello","olleh","hello","ol...
+10:01:29 <ab9rf> hehe
+10:01:55 <maerwald> > (reverse (reverse (reverse "hello")))
+10:01:58 <lambdabot>  "olleh"
+10:01:59 <maerwald> for the lispers
+10:02:05 <cppxor2arr> ugh
+10:02:19 <ab9rf> snert
+10:02:50 <mniip> is there a profunctor combinator type thingy that goes /\p f g a b. p (f a) (g b)
+10:03:39 <mniip> oh I guess not
+10:03:55 <mniip> cause one'd need to lift return/extract
+10:04:01 <mniip> that's power of Arrows not Profunctor
+10:05:16 <EvanR> > concat (iterate reverse "hello")
+10:05:18 <lambdabot>  "helloollehhelloollehhelloollehhelloollehhelloollehhelloollehhelloollehhello...
+10:05:34 <EvanR> look a palidrome
+10:06:18 <cppxor2arr> but you cant say it's a palindrome
+10:06:34 <cppxor2arr> since the reverse of an infinite list is undefined
+10:06:36 <cppxor2arr> right?
+10:07:11 <maerwald> not-yet defined...
+10:08:11 <dminuoso> 19:05      cppxor2arr | but you cant say it's a palindrome
+10:08:24 <mniip> cppxor2arr, it's neither a palindrome nor a non-palindrome
+10:08:28 <dminuoso> cppxor2arr: As long as you dont say "it's *not* a palindrome" thats fine
+10:08:32 <cppxor2arr> :o
+10:08:45 <cppxor2arr> ok i just say it's undefined?
+10:08:50 <dminuoso> No, not undefined.
+10:09:06 <ab9rf> the concept of palindromicity does not apply to infinite sequences
+10:09:18 <cppxor2arr> ok ok
+10:09:36 <ab9rf> you cannot reverse a sequence that has no last element
+10:09:53 --- mode: glguy set +v Iolo
+10:10:00 <dminuoso> My passphrase is the last 7 digits of Pi.
+10:10:01 <mniip> does that mean you cannot reverse []?
+10:10:06 <dminuoso> Oh shoot, I wrote that - didn't I?
+10:10:18 <ab9rf> mniip: fair point
+10:10:37 <ab9rf> mniip: vacuity ruins so many wonderful theorems
+10:10:53 <ab9rf> mniip: is [] a palindrome?
+10:10:58 <mniip> sure
+10:11:03 <mniip> an isogram too
+10:11:11 <ab9rf> i would tend to agree as well
+10:11:12 <dminuoso> ab9rf: It would be more interesting if the concept of palindromicity works on empty lists at all.
+10:11:13 <ab9rf> but some might not
+10:11:17 <dminuoso> Which I guess depends on definition.
+10:11:32 <mniip> in what world is [] not a palindrome
+10:11:32 <cppxor2arr> what is the formal definition? are there multiple?
+10:11:45 <ab9rf> dminuoso: it's possible tha tit is both a palindrome and not a palindrome, depending on how you define palindromes and non-palindromes
+10:12:36 <ab9rf> the usual definition is "a sequence that is the same read forward or backwards", which rasonably formalizes to a sequence that is equivalent to its own reverse
+10:12:43 <ab9rf> by that definition, [] is clearly a palindrome
+10:12:51 <AWizzArd> What is the main motivation behind injective type families? Is it mostly about improving inference? Or is mostly about correctness (i.e. rejecting more programs)?
+10:12:54 <ricky_clarkson> tit is definitely a palindrome, but also likely a typo.
+10:13:11 <ab9rf> ricky_clarkson: my fingers are prone to salacious typos
+10:13:15 <ricky_clarkson> ;)
+10:13:37 <ab9rf> back when i used to program in BASIC, "LUST" was a very common typo
+10:14:33 <ricky_clarkson> I had a Spectrum 48K, I needed one key, L, to type LIST.
+10:15:30 <mniip> ab9rf, the smallest set P such that epsilon in P, sigma subset P, forall c in sigma, w in P, cwc in P
+10:15:54 <mniip> one of those commas is an implication
+10:16:07 <cppxor2arr> ab9rf: your vocabulary is too much for me
+10:16:10 <mniip> (should've used a fat comma!)
+10:16:26 <ab9rf> AWizzArd: i'm not clear on what the motivation behind injective type families is either
+10:17:19 <ab9rf> cppxor2arr: but i haven't used boustrophedonic even once!
+10:17:32 * cppxor2arr goes to DDG again
+10:19:17 <cppxor2arr> err *duck*
+10:20:23 <AWizzArd> ab9rf: I see that because of the constraint the compiler would know some types by knowing others. So maybe this can help reducing type declarations overall in our software.
+10:21:11 <AWizzArd> ab9rf: but I also see it as a way to communicate with GHC and explain what I believe. And when I suddenly step outside of what I declared earlier I am giving GHC now a way to understand that my constraint is in conflict with what I just tried.
+10:21:39 <AWizzArd> ab9rf: So I imagine that this will reject more programs and thus help me. I could either remove the injectivity declaration or correct my thinking after I made a mistake.
+10:29:12 <ab9rf> i think it's about giving the compiler to do type inference in a situation where it should be able to
+11:51:12 <dyl> So I think I follow singletons now, well enough anyhow. 
+11:51:18 <dyl> What is the current roadmap for obsoleting them?
+11:51:38 <dyl> That is, which approach is GHC taking moving forward? The wiki pages aren’t always up to date.
+11:52:15 <dyl> AWizzArd: there are cases that can’t be nicely expressed without them.
+11:52:35 <MarcelineVQ> https://ghc.haskell.org/trac/ghc/wiki/DependentHaskell
+11:52:48 <dyl> You’ll get errors like “couldn’t unify a0 and a1” when you would assume they should obviously both be a
+11:53:10 <MarcelineVQ> by the wiki pages do you mean this page?
+11:53:24 <dyl> Yes
+11:54:03 <dyl> For some general type family F, F a = t0 and F a = t1 does not imply t0 = t1.
+11:54:09 <dyl> You need objectivity of F for that.
+11:54:13 <dyl> injectivity*
+11:55:46 <dyl> Also replace = above with ~ in all usages 
+11:56:55 <dyl> As an example take: type family F a where { F Bool = Int; f Int = Bool; f a = a }
+11:57:19 <dyl> If we have F a ~ Bool for some a, we would expect to be able to infer a ~ Int, but we can’t. 
+11:58:08 <dyl> So you write type family F a = r | r -> a to indicate that r (the result of applying F to a) uniquely identifies the a.
+11:58:15 <dyl> AWizzArd: does that clarify at all?
+12:32:02 <merijn> So, is there a way to make GHC print a value without adding a show constraint for it?
+12:32:31 <merijn> Propagating a show constraint on a polymorphic type through tons of code sounds decidedly unfun
+12:33:47 <c_wraith> how dirty are you willing to get?
+12:34:02 <merijn> c_wraith: It's just debugging, so don't care
+12:35:12 <c_wraith> you can introspect the value in memory. having lost type information, interpreting it will be fun.
+12:35:21 <c_wraith> but you can do it!
+12:35:28 <merijn> I was thinking dirty, but useful >.>
+12:36:17 <c_wraith> if you know what the type is in your debugging case, there's also unsafeCoerce
+12:36:37 <c_wraith> just unsafeCoerce it to what it is, and all instances magically appear.
+12:37:08 <mniip> merijn, vacuum
+12:37:27 <c_wraith> mniip, that was my first suggestion.
+12:37:46 <mniip> you didn't mention the library name
+12:39:24 <merijn> hmm
+12:39:37 <merijn> unsafeCoerce seems to not work out :p
+12:40:00 <c_wraith> perhaps you were wrong about what type the value was. :)
+12:40:06 <merijn> Because I'm pretty sure -9223372035747479179 is not, in fact, between 0 and 100
+12:40:43 <merijn> oh, wait >.> You may be right >.>
+12:42:06 <mniip> there's also the ghci rtti
+12:42:16 <merijn> Bah, I hate it when tests don't agree with me how flawless my code is...
+12:46:39 <flux> obviously your tests are flawed. or, could be a compiler bug.
+12:47:23 <c_wraith> worst case, maybe your files stem had a flaw that changed your code to something that type checked but was wrong.
+12:47:34 <c_wraith> .. filesystem.
+12:50:43 <merijn> I think I've asked this before, but here goes: With "+RTS -xc" I'm always seeing a shit ton of stack traces that are completely unrelated to the problem I'm having but I don't understand why
+12:51:34 <merijn> Like 20 stack traces, where I'm expecing one because I'm only seeing one exception occur
+12:53:24 <lyxia> this prints all exceptions whenever they're thrown, whether they get caught or not.
+12:53:39 <ab9rf> flinging exceptions!
+12:53:53 <merijn> lyxia: I'm seeing lots of exceptions that seem like they should occur, though
+12:54:38 <merijn> "*** Exception (reporting due to +RTS -xc): (THUNK_1_0)"
+12:54:49 <merijn> THUNK_1_0 doesn't sound like a useful exception >.>
+12:55:14 <merijn> And the ever present "THUNK_STATIC"
+13:00:30 <AWizzArd> dyl: Just saw your comments about type families. Will read them now.
+13:02:41 <AWizzArd> dyl: Yes okay. So I interpret what you wrote about injective type families like this: without them we run into situations where the compiler rejects a correct program because the equality of types couldn’t be proven.
+13:03:06 <AWizzArd> Now with ITFs we have a tool at hand that can resolve some of those situations.
+13:12:49 <merijn> Well shit...
+13:13:35 <merijn> "heh, that's a weird minor bug" -> "crap, I need to fundamentally rearchitect how I implement this to make this work"
+13:18:18 <delYsid> Is there some version of over that works with a -> Maybe a?
+13:18:19 <merijn> There's no way to block on 2 mvar's is there?
+13:18:49 <merijn> Other than "one thread per mvar and have them signal a single other mvar"
+13:19:24 <delYsid> i.e., if Nothing, do nothing, if Just a, take the a out and replace with the result of a -> Maybe a?
+13:19:46 <merijn> delYsid: That just sounds like >>=
+13:20:00 <delYsid> yeah
+13:20:33 <phadej> merijn: yes, thread blocking on each mvar and signalling forward is the way to do
+13:20:45 <phadej> merijn: or changing to STM :)
+13:20:59 <merijn> phadej: Yeah, although now that I think about it even that's not gonna be enough
+13:21:05 <merijn> Damn...this is gonna be a major hassle
+13:23:58 <merijn> phadej: I have at least one MVar, so switching to STM won't work. And I'm worried adding extra threads and indirection is going to add a lot of overhead to the happy path
+13:30:25 <tdammers> merijn: I bet it's still easier than doing it in C++
+13:30:35 <phadej> well, having _only_ single MVar is ok
+13:30:56 <phadej> because you cannot have a deadlock with only single MVar :)
+13:31:04 <merijn> phadej: Not if I need to wait on it and something else
+13:31:24 <merijn> phadej: I can't deadlock with two either if I'm merely trying to race which is written first
+13:32:27 <phadej> well, my advice to myself is always "make it work correctly first, see if it's performant enough"
+13:33:20 <fool> could I use a Null data type ?
+13:33:28 <fool> I mean a data type with a Null value
+13:34:05 <fool> something like data MyList a = Null | Single a | Many Int a
+13:34:25 <fool> Null is zero element, Single a is one time a and (Many x a) is a x times.
+13:34:41 <fool> Can I do recursive construct for data types ?
+13:34:46 <fool> something like :
+13:35:01 <fool> MyList a = Single a | Many Int a
+13:35:09 <fool> MyNewList a = Null | MyList a
+13:35:29 <fool> is the `|` constructor really associative and transitive ?
+13:36:54 <hololeap> does anyone know of a typeclass that defines a function like this: `forall a. f a -> v` ?  the idea being that `f a` _always_ has some value v available regardless of what `a` is
+13:37:22 <merijn> hololeap: That does not seem particularly useful to define a typeclass for?
+13:37:36 <merijn> hololeap: Why not just write that function yourself?
+13:39:16 <hololeap> i'm trying to find a way of generalizing this idea
+13:39:29 <merijn> Generalise what idea?
+13:39:48 <merijn> I mean, for most data structures you can come up with infinite number of implementations of that
+13:40:29 <fool> it's hard to reason exclusively using types
+13:41:51 <fool> is zero really a special case of integers ?
+13:43:03 <fool> when you type "data MyList a = Single a | Many Int a", how do you constrain correctly the `Int` parameter ? It seems that construct is not really very general.
+13:43:11 <fool> That's why I am asking.
+13:43:54 <fool> The `data MyList a = Null | Count Int a` seems more relevant but then you could put a zero instead
+13:44:04 <fool> That would avoid the need for a special `Null` value.
+13:44:36 <fool> So basically a `data MyList = Count Int a` seems the way to go, but how can you enforce the property on the integer ?
+13:45:12 <hololeap> i suppose i could do something like: newtype Env' f v a = Env' (v, f a) deriving (Functor)
+13:45:38 <pavonia> fool: What property?
+13:45:50 <fool> the property x >= 0
+13:46:15 <pavonia> You can't only from the type
+13:46:19 <fool> I am not a fool. I know that unsigned int in C can easily overflow. 
+13:46:37 <fool> pavonia: so what can you do to enforce this kind of constraints ?
+13:46:55 <merijn> fool: Natural?
+13:46:56 <fool> pavonia: you mean " the compiler can't enforce it "
+13:46:59 <fool> merijn: yes
+13:47:02 <fool> import Natural
+13:47:15 <pavonia> You can hide your constructors and export so called smart constructors, i.e. functions constructing values of this type
+13:47:34 <merijn> In this case I'd say Natural is a more elegant solution
+13:47:53 <pavonia> ^
+13:49:06 <fool> pavonia: it's good practice to use function for constructing values ?
+13:49:18 <fool> I didn't think it was the case.
+13:49:36 <pavonia> Why not?
+13:49:42 <fool> true
+13:50:19 <pavonia> If you are sure to construct legal values within your module, you can still use the unsafe way without the extra sanity check
+13:50:28 <c_wraith> almost all functions construct values.
+13:58:27 <fool> how do you remove the too long prompt in ghci ?
+13:58:52 <fool> :set prompt ">"
+14:00:27 <tdammers> c_wraith: fsvo "construct" and "value", *all* functions do
+14:00:40 <fool> unit testing is not really useful with haskell
+14:00:51 <fool> when the code compile that's almost allright if you are careful.
+14:01:03 <tdammers> unit testing is still useful
+14:01:34 <tdammers> obsessing about coverage is not, though
+14:01:34 <Cale> tbh, I almost never unit test anything
+14:01:58 <Cale> If something is worth writing a test for, it's almost always worth writing a QuickCheck test for
+14:02:14 <tdammers> oh, I consider quickcheck tests at the unit level unit tests too
+14:02:47 <tdammers> Assertion vs. Property is an implementation detail IMO
+14:03:04 <delYsid> x ^? a._Just = x ^. a
+14:03:11 <Cale> But yeah, even then, it's mostly integration testing over here.
+14:03:12 <fool> hspec tests are verbose
+14:03:23 <dstolfa> fool: they are, but i like hspec
+14:03:48 <dstolfa> mostly the `shouldThrow` bits
+14:04:01 <delYsid> that lloks like something hlint could complain about.
+14:04:14 <tdammers> compared to say python, the amount of unit testing I feel is necessary is tiny. but they're still a nice tool to have on your belt.
+14:04:19 <tdammers> also depends on the domain
+14:04:55 <fool> what's your opinion on how to design modules ? Should it be big, is the scoping important to you ?
+14:04:55 <dstolfa> tdammers: what i do is use quickcheck, and if it spits out something unexpected, i turn it into a unit test
+14:05:13 <tdammers> dstolfa: I actually do that too!
+14:05:21 <fool> What's a good module design for you ? Do you have limiting bounds for eg number of functions, sloc count ?
+14:05:30 <phadej> doctests are very very nice for unit testing
+14:06:06 <fool> phadej: also for documentation it is nice
+14:06:08 <phadej> they don't have that "necessary evil" feeling like proper independent test-suites
+14:06:13 <tdammers> fool: no, those are silly metrics. I just try to draw module boundaries in places that make sense. functionally related stuff goes together, less related stuff goes into separate modules
+14:06:18 --- mode: glguy set +v NAV_
+14:06:34 <NAV_> yo 
+14:07:00 <tdammers> sometimes, that means a module only contains one type with a few instances; sometimes, a module has a thousand functions in it. it depends.
+14:07:07 <dstolfa> my criteria are: 1) is it it's own little functionality with its own API? 2) will it be used in multiple places? 3) am i having difficulty following what this module does, do i need to split it up further?
+14:07:09 <fool> I feel like it is important to limit too much imports.
+14:07:27 <fool> tdammers: it could not be a problem if those functions should not be exported.
+14:07:45 <tdammers> an important question I ask myself is "does the rest of the codebase need to know about this?"
+14:08:24 <tdammers> modules are *the* encapsulation mechanism in Haskell, so whenever I want to draw a public/private-like boundary, I use modules
+14:08:54 <tdammers> huge import lists can also be a sign of a module with too many responsibilities
+14:10:19 <tdammers> e.g. if you're importing all of the database modules and also all of the HTML template modules and also all of the domain logic and also all of the API stuff, then chances are your module does too much and needs to be split up, or the module structure as a whole needs to be changed
+14:12:26 <greymalkin> Is there a guard syntax in a case-like syntax, or is that only available at the function level?
+14:12:53 <geekosaur> fucntions desugar to case
+14:13:00 <MarcelineVQ> you can use guard in case
+14:13:10 <MarcelineVQ> *guards
+14:13:57 <Ariakenom> case i of p | g -> r
+14:14:11 <fool> can you apply the substitution principle in Haskell
+14:14:11 <geekosaur> > let x = 5 in case x of _ | x < 4 = "small" |  otherwise = "ok"
+14:14:14 <lambdabot>  <hint>:1:34: error:
+14:14:14 <lambdabot>      parse error on input ‘=’
+14:14:14 <lambdabot>      Perhaps you need a 'let' in a 'do' block?
+14:14:17 <geekosaur> oops
+14:14:22 <fool> I have a question I am not sure I have the answer
+14:14:27 <geekosaur> > let x = 5 in case x of _ | x < 4 -> "small" |  otherwise -> "ok"
+14:14:29 <lambdabot>  "ok"
+14:14:34 <geekosaur> syntax differs in case
+14:15:26 <greymalkin> Huh.. never tried that before, though I kept meaning to and getting caught up in a silly "where would the equals go?" kind of mentality.
+14:15:27 <fool> imagine that you write a function like that: rep n x = if (n==0) then [] else (x:(rep (n-1) x)
+14:16:37 <fool> and then a function replic n (x:xs) = if (null xs) then (rep n x) else (rep n x) ++ (replic n xs)
+14:16:46 <fool> is the algorithm still O(n) ?
+14:17:31 <geekosaur> you can also use case () of () | ..., which iirc is how if-then-else desugars
+14:18:58 <Ariakenom> not "case b True -> a; False -> b" ?
+14:19:38 <geekosaur> you need the of
+14:19:50 <Ariakenom> yes
+14:19:54 <geekosaur> b can be an arbitrary expression, so it can eb ambiguous
+14:21:00 <geekosaur> my poit was more that if your'e not actually using the case pattern but only using the guard, it doesn't much matter what you pattern match against as long as it succeeds so the guard will be evaluated
+14:22:05 <Ariakenom> there is MultiWayIf too
+14:24:35 <geekosaur> true, there is that extension. this part is core haskell though
+14:25:07 <fool> how can you build (x:x:x:) having x and 3 ?
+14:25:24 <greymalkin> Every time I type "{-# LANGUAGE", a little part of me dies.
+14:28:31 <pavonia> :t replicate  -- fool
+14:28:32 <lambdabot> Int -> a -> [a]
+14:28:41 <fool> pavonia: I know replicate
+14:28:51 <fool> but the thing is that basically I want to know
+14:28:57 <Cale> fool: That will be O(n * length xs)
+14:29:07 <fool> Cale: that's bad
+14:29:17 <geekosaur> if you're looking for something resemling a macro, you may need TH
+14:29:22 <fool> I want to have something only with cons 
+14:29:28 <Cale> er, sorry
+14:29:32 <Cale> no, that's fine
+14:29:32 <fool> geekosaur: you talking to me ?
+14:29:37 <geekosaur> yes
+14:29:54 <fool> geekosaur: I don't want to use TH
+14:29:54 <Cale> It's just the size of the list :)
+14:29:57 <geekosaur> its' not clear what problem you're really trying to solve
+14:29:57 <fool> afraid of
+14:30:13 <pavonia> fool: What do you mean by "only with cons"?
+14:30:21 <Cale> But you should write replic n xs = concatMap (replicate n) xs
+14:30:27 <fool> https://wiki.haskell.org/99_questions/11_to_20 <- question 15
+14:30:43 <c_wraith> it's really hard for an algorithm to be faster than the amount of allocation necessary to construct its result.
+14:31:00 <fool> Cale: basically what I'm afraid of is that (replicate n) is n
+14:31:11 <fool> you do that for each element of the original list
+14:31:19 <c_wraith> fool, how could it be any faster than that?
+14:31:22 <fool> then you append using ++
+14:31:28 <c_wraith> fool, that's the size of the output.
+14:32:04 <fool> Well basically if n=3 and the origin list is M long, I expect the complexity to be 3×M
+14:32:17 <fool> so O(`size of the input list`)
+14:32:37 <fool> but i'm not sure it is the case with replicate and consorts.
+14:33:10 <fool> pavonia: if the function could actually build an expression like (x:x:x:y:y:y:z:z:z:[]) it would match the requirement
+14:33:17 <fool> but I can't see how that's possible.
+14:33:25 <c_wraith> have you tried measuring? I find that's far more effective than worrying.
+14:33:30 <fool> A typical imperative code would involve two for loops.
+14:33:41 <fool> c_wraith: yes, I could have, but not sure how to do that accurately.
+14:34:06 <c_wraith> @hackage criterion
+14:34:06 <lambdabot> http://hackage.haskell.org/package/criterion
+14:34:36 <c_wraith> pretty much the gold standard for microbenchmarking in any language.
+14:35:12 <Cale> fool: Of course replicate n x takes O(n) steps, because it's constructing a list of length n
+14:35:24 <fool> yes, but then you concat
+14:35:50 <fool> the question is: what's the complexity of doing [1,2,3] ++ [4,5,6] ++ etc.
+14:36:05 <fishythefish> depends on how you associate ++
+14:36:16 <fool> I think it is left to right ?
+14:36:37 <fishythefish> in your implementation of replic it wasn't
+14:37:08 <fool> so if it is right to left it's good imho
+14:37:18 <fishythefish> you get quadratic complexity from left-association, linear complexity from right-association
+14:37:43 <fool> yes, are you sure my implementation is linear so ?
+14:37:57 <fishythefish> i'm not sure of anything without a benchmark
+14:37:59 <fishythefish> but it seems to be
+14:43:30 <fool> :t (1:)
+14:43:31 <lambdabot> Num a => [a] -> [a]
+14:44:46 <fool> question is, you have (1:) and (2:). How do you combine them in a single function having the same [a] -> [a] signature ?
+14:45:01 <fishythefish> :t (2:) . (1:)
+14:45:02 <lambdabot> Num a => [a] -> [a]
+14:45:23 <fishythefish> > (2:) . (1:) $ []
+14:45:25 <lambdabot>  [2,1]
+14:45:45 <fool> great !
+14:46:51 <fishythefish> fool: given the questions you're asking, you might want to search for "difference lists", AKA "Hughes lists"
+14:46:54 <Cale> It's linear in the length of the list you're producing, which is quadratic :)
+14:47:16 <Cale> (but each element of the list should be produced in constant time after the previous)
+14:47:40 <fool> Cale what really i'm looking for is indeed constant time production and insertion for each element.
+14:51:54 <ab9rf> i hate dealing with multiple different integer types
+14:54:33 <fool> http://vpaste.net/tLhqV <- what do you think of it, Cale, fishythefish ?
+14:55:58 <ab9rf> gah, i just spent the last 25 minutes dancing with the damned monomorphism restriction without realizing that was what was going on
+14:56:27 <fishythefish> i think the difference list encoding is unnecessary since your (++)s are right-associated anyway, but enough people have suggested just measuring performance at this point that i don't have much to add
+14:57:02 <fool> gah, the naive implementation is way faster :(
+14:57:25 <fool> I think i'll have a stack overflow going on
+14:57:47 <fishythefish> why is the naive implementation naive?
+14:57:52 <fool> what if you use `.` operator with 10000 functions ?
+14:58:02 <jle`> fool: then it gets used 10k times :)
+14:58:06 <fishythefish> 9999 times
+14:58:08 <fishythefish> ;)
+14:58:17 <fool> fishythefish: because that's typically my first try
+14:58:26 <jle`> > foldr (.) id (replicate 10000 (+1)) 0
+14:58:28 <lambdabot>  10000
+14:58:30 <fool> but why is it so much faster that's a mistery
+14:58:41 <fishythefish> why do you expect it to be slow?
+14:58:59 <fool> because of the ++ operator
+14:59:07 <fool> everybody says it is slow :)
+14:59:17 <fool> but really i don't get how it works under the hood
+14:59:23 <jle`> fool: check the definition :)
+14:59:25 <jle`> @src (++)
+14:59:25 <lambdabot> []     ++ ys = ys
+14:59:25 <lambdabot> (x:xs) ++ ys = x : (xs ++ ys)
+14:59:25 <lambdabot> -- OR
+14:59:25 <lambdabot> xs ++ ys = foldr (:) ys xs
+14:59:38 <jle`> the first one might be more clear in this situation
+14:59:59 <jle`> fool: note that (xs ++ ys) can re-use ys in memory
+15:00:05 <jle`> fool: however, it has to completely re-allocate xs
+15:00:18 <fool> jle`: yes I see
+15:00:19 <jle`> in both patterns, ys is re-used, so it doesn't have to do any copying, it can refer to the same original ys
+15:00:26 <jle`> but the xs is completely re-allocated and copied
+15:00:29 <fool> the two definitions are equivalent ?
+15:00:36 <jle`> yes
+15:01:00 <jle`> fool: so xs ++ ys is constant-time and space in the length of ys, but linear-time and space in the length of xs
+15:01:15 <fool> so the algo is linear thanks to foldr.
+15:01:21 <jle`> linear in xs
+15:01:23 <jle`> constant in ys
+15:01:54 <jle`> saying (++) is linear-time or linear-space is not accurate
+15:02:07 <jle`> xs ++ ys is linear time and spaces in xs, constant time and space in ys
+15:02:10 <jle`> that's why the associativity matters
+15:02:17 <fool> length (replic 10000 [1..10000]) <- and then if I do, thanks to lazy evalution, willit first calculate (replicate 10000 10000), then append the result ?
+15:02:39 <jle`> here's a good way to answer these kinds of questions
+15:02:39 <fool> result = result of (replicate 10000 9999) 
+15:02:41 <jle`> look at the definition
+15:02:50 <jle`> first, start at the outer-most function
+15:02:54 <jle`> @src length
+15:02:54 <lambdabot> Source not found. BOB says:  You seem to have forgotten your passwd, enter another!
+15:03:05 <jle`> length [] = 0
+15:03:11 <jle`> length (_:xs) = 1 + length xs
+15:03:36 <jle`> and we can look at replicate, as well
+15:03:37 <jle`> @src replicate
+15:03:38 <lambdabot> replicate n x = take n (repeat x)
+15:03:56 <jle`> and try evaluationg it by hand :)
+15:04:02 <fool> jle`: I think it will try to evaluate the list first.
+15:04:12 <jle`> it has to evaluate length
+15:04:16 <fool> befor computing length ?
+15:04:18 <jle`> and length must know: are we looking at [], or (:)
+15:04:22 <jle`> fool: no, it looks at length first
+15:04:31 <fool> jle`: ha yes i'm afool
+15:04:44 <jle`> and length asks: "Are we looking at [], or (:)?"
+15:04:53 <jle`> and we only do as much evaluation as is needed to answer that specific question
+15:04:57 <delYsid> Hmm, I think I am about to build my first EDSL.  Using do-notation for sugar to express a nested structure.  I find scotty a pretty good example for the pattern I want, and it is rather small codebase.  Is there any other thing/article I should read that explains this process?
+15:05:21 <fool> jle`: yes but to know what the head of the list is it will wait untill the list is completed I think.
+15:06:05 <jle`> fool: why does it need to know what the head of the list is?
+15:06:14 <jle`> i told you, it only has to know: "Are we looking at [], or (:)?"
+15:06:28 <jle`> that's what the definition says: length [] = 0; length (_:xs) = 1 + length xs
+15:06:39 <jle`> it doesn't need to know anything about the list other than whether or not it was constructed with [] or :
+15:07:01 <jle`> it's a one-track mind
+15:07:07 <jle`> it doesn't care about anything else.  just [] or :?
+15:07:18 <fool> my question was rather at the first call to length, waht will _ be ?
+15:07:28 <jle`> haskell doesn't care
+15:07:37 <jle`> all it does is try to answer: [] or (:) ?
+15:07:39 <fool> I find it confusing.
+15:07:49 <jle`> i think this is simpler, isn't it?
+15:07:56 <jle`> all you need to know: [] or (:)?
+15:08:01 <jle`> you don't have to care about anything else
+15:08:09 <fool> probably in your picture but I want to understand what computation is performed at which time.
+15:08:24 <jle`> if you had to care about extra external factors, then it would be complicated.  however, haskell doesn't care, so it's simple :)
+15:08:41 <jle`> fool: in order to understand that, you have to ask "how do we find out if it is [] or (:)?"
+15:08:49 <jle`> "[] or (:)" drives all evaluation
+15:09:01 <fool> yes, so how do we find out ?
+15:09:11 <jle`> it depends on what the list we are finding the length of is
+15:09:14 <philippD> I'm playing around with servant for the first time. Unfortunately I'm getting an empty response when trying to return some JSON https://github.com/chisui/servantTest
+15:09:26 <Solonarv_> it's also implementation-dependent ;)
+15:09:27 <jle`> let's do a simple example, `length (replicate 2 (sum [1..]))`
+15:09:30 <philippD> Am I doing something wrong?
+15:09:45 <jle`> fool: so, we follow: [] or :?
+15:09:49 <fool> yes
+15:09:51 <jle`> to do that, we have to look at the definition of replicate
+15:10:02 <fool> @src replicate
+15:10:02 <lambdabot> replicate n x = take n (repeat x)
+15:10:08 <jle`> replicate 0 x = []
+15:10:14 <jle`> replicate n x = x : replicate (n - 1) x
+15:10:22 <jle`> this definition is a little simpler for illustration purposes :)
+15:10:33 <fool> k
+15:10:37 <jle`> so, looking at `replicate 2 (sum [1..])`, how do we figure out if it is [] or :?
+15:10:49 <jle`> it looks like it is [] if n is 0, and (:) if n > 0
+15:11:01 <jle`> it doesn't need to care about x
+15:11:09 <jle`> the only thing we need to know is if n is 0 or not
+15:11:23 <fool> man that's awesome
+15:11:28 <jle`> basically, replicate branches on the same question that length does
+15:11:33 <jle`> length asks "[] or (:)?"
+15:11:39 <jle`> replicate asks "0 or not 0?"
+15:11:49 <jle`> you can tell because of the patterns they match on
+15:11:54 <jle`> length branches on [] and (_:xs)
+15:12:01 <jle`> replicate branches on 0 and n (not being zero)
+15:12:19 <fool> could this still work if replicate was defined as: replicate x 0 = [] ?
+15:12:36 <jle`> so length (replicate 2 (sum [1..])) becomes length (_ : replicate 1 (sum [1..]))
+15:12:42 <EvanR> :t replicate
+15:12:44 <lambdabot> Int -> a -> [a]
+15:12:45 <jle`> which becomes 1 + length (replicate 1 (sum [1..]))
+15:12:57 <jle`> which becomes 1 + length (_ : replicate 0 (sum [1..]))
+15:13:11 <jle`> which becomes 1 + (1 + length []), which becomes 1 + (1 + 0)
+15:13:37 <EvanR> replicate x 0 = [] would work if you change the type signature to have args in different order
+15:13:56 <EvanR> or delete the type sig, since it could be inferred
+15:13:58 <jle`> at all points the question of what to do next is driven by what the outermost function needs to scrutinize to know what answer to return 
+15:14:07 <jle`> length only cares baout [] or (:), and replicate only cares about 0 or not-0
+15:16:03 <fool> jle`: I tried to use it for evaluating the time it would take to build the list
+15:16:12 <fool> this is seriously magice
+15:16:31 <jle`> if you look at a high level, all length tells you is "how many :'s were used in the construction of this list?"
+15:16:32 <EvanR> ideally a list is not ever fully built
+15:16:40 <jle`> it doesn't tell you anything about the contents
+15:16:45 <EvanR> it would be a waste of memory
+15:17:18 <fool> so if I do let repli (x:xs) integer = (replicate integer x) ++ (repli xs integer) in length (repli [1..1000] 1000), what will happen ?
+15:17:27 <jle`> fool: what happens when you try it?
+15:17:33 <jle`> or, are you talking about how this will be evlauated?
+15:17:38 <jle`> i recommend trying it out by hand, like what I did :)
+15:18:26 <fool> jle`: it's hard
+15:19:13 <jle`> just take it step by step
+15:19:40 <jle`> length (repli [1..1000] 2)     -- simpler version
+15:19:42 <jle`> what is the first step?
+15:19:55 <jle`> what do we need to konw first?
+15:20:04 <fool> well (:) or []
+15:20:06 <jle`> yes
+15:20:10 <fool> length is eager for that
+15:20:18 <jle`> so, is `repli [1..1000] 2` made with [] or (:) ?
+15:20:28 <fool> it must check the definition
+15:20:42 <jle`> by "it", you mean "you", right? ;)
+15:21:10 <fool> with the parenthesis going on, we enforce evaluation on one of the two terms of the `++` operator
+15:21:13 <fool> yes
+15:21:23 <fool> @src (++)
+15:21:23 <lambdabot> []     ++ ys = ys
+15:21:23 <lambdabot> (x:xs) ++ ys = x : (xs ++ ys)
+15:21:23 <lambdabot> -- OR
+15:21:23 <lambdabot> xs ++ ys = foldr (:) ys xs
+15:21:44 <jle`> so you must ask, is `replicate i x ++ repli xs i` made using (:) or [] ?
+15:21:56 <fool> again (++) wants to know if it is (:) or [] on the lhs (?)
+15:22:06 <jle`> yes
+15:22:15 <jle`> see, it's not exactly hard, just mechanical
+15:22:17 <fool> so it evaluates (replicate integer x) and it sees a (:)
+15:22:27 <fool> jle`: can be daunting
+15:22:30 <jle`> it doesn't necessarily evaluate it, it just checks to see if it was [] or (:)
+15:22:41 <fool> yes, it sees a (:)
+15:22:46 <jle`> fool: 'boring' might be a better word i think
+15:23:01 <jle`> or 'tedious'
+15:23:17 <fool> it's not exactly a thought train I am used to and very different from almost any computer language
+15:23:30 <jle`> looks like you have the hang of it already :)
+15:23:47 <jle`> yeah, it's all extremely mechanical, and doing a few of these takes all of the magic out of it
+15:24:18 <EvanR> lazy evaluation might seem odd, especially if you never learned the mechanics of eager evaluation. which is just as odd but in a different order
+15:24:27 <jle`> it's just a different mechanical process than the mechanical processes you might be used to.  but in a way i think it's much simpler
+15:24:37 <jle`> in other languages you have implicit state; in this case, there is no implicit state to keep track of
+15:24:40 <fool> i'm more used to strict evaluation :)
+15:24:41 <EvanR> explaining how a computer evaluates the complex expression with eager evaluation is just as complex
+15:25:40 <fool> what is surprising is that indeed lazy evaluation saves resources when it can. Maybe it is easier to have good performances with it than with strict language ?
+15:25:45 <EvanR> actually i think many languages skip the explanation of subexpression evaluation entirely. I recall in ruby many people prefer to do even 1 thing per line and assign the result to a variable
+15:25:56 <alp> philippD, did you get an answer to your servant problem?
+15:26:00 <jle`> fool: it's all situational, and i wouldn't compare lazy language vs strict language
+15:26:09 <philippD> alp: nope
+15:26:11 <jle`> fool: i'd compare specific situations using lazy evaluation vs situations using strict evaluation
+15:26:35 <jle`> fool: in practice both strategies have situations where they outshine the other in space usage and performance
+15:26:56 <jle`> fool: in Haskell we use both, but just default to lazy.  in other languages you could, too, use both.  but they just default to strict
+15:27:17 <jle`> so it's not really a language issue.  you can write code using strict evaluation in haskell, as well
+15:27:30 <fool> philippD: sorry to monopolize this channel. I need to learn much about Haskell.
+15:27:41 <jle`> in haskell we always try to make a conscious decision about which strategy is better in each situation
+15:28:05 <jle`> instead of always using one or the other
+15:28:33 <jle`> haskell isn't about always being lazy, it's about making being lazy easier when it is appropriate
+15:29:03 <alp> philippD, how are you issuing the request to test your app?
+15:29:21 <jle`> and i think arguably it's easier to write explicitly strict code in a lazy-by-default language than it is to write explicitly lazy code in a strict-by-default language.  but that's 100% opinion :)
+15:29:42 <philippD> alp: through curl. both with an explicit Accept header and without
+15:29:45 <EvanR> haskell unlocks laziness
+15:30:20 <fool> jle`: I was starting to think the same, defining lazy constructs in strict languages can be hazardous
+15:30:46 <philippD> alp: ok, I just tried it from the browser and it works.
+15:30:59 <philippD> but curl returns a 200 without a body?
+15:31:05 <tcsiwula> Hi, my ghci is broken. Please advise 😅 https://gist.github.com/tcsiwula/a73e143bd6b074a9563997fc4ddbb2f7
+15:31:27 <fool> philippd, you probably didn't put the right headers in the request
+15:31:34 <fool> try `copy as curl` in your browser.
+15:31:38 <jle`> tcsiwula: yikes
+15:31:43 <jle`> are you by any chance using stack?
+15:31:49 <fool> to copy the request you sent. And then retry. And tell us the result.
+15:31:50 <jle`> does the stack-wrapped ghci work?
+15:31:51 <tcsiwula> yes
+15:31:56 <jle`> `stack ghci`
+15:32:56 <tcsiwula> getting this, so kinda? https://gist.github.com/tcsiwula/6f8aca403be527ddf411ed93eede6d4a
+15:33:26 <philippD> fool: nope, same error and I don't think that the user-agent header makes a difference
+15:33:37 <alp> the user agent doesn't make a difference
+15:33:58 <jle`> tcsiwula: yeah that's what you'd probably expect if you ran it from within a project
+15:34:00 <alp> but the precise header we expect for our default JSON content type IIRC is: application/json;charset=utf-8
+15:34:03 <jle`> tcsiwula: are you currently in a project directory?
+15:34:30 <MarcelineVQ> "To resolve, remove the flag(s) from the cabal file(s) and instead put them at the top of the haskell files." is pretty sound advice
+15:34:36 <tcsiwula> jle`: yes. should i not be for it to launch into a interactive mode? 
+15:34:51 <alp> philippD, see e.g right above the subsection title "More endpoints" that this link points to: https://haskell-servant.readthedocs.io/en/stable/tutorial/Server.html#more-endpoints
+15:35:04 <alp> where it seems we usually don't need it
+15:35:04 <jle`> tcsiwula: interactive mode should work :)
+15:35:12 <jle`> tcsiwula: you just have to answer which executable's dependencies you want to load
+15:35:24 <jle`> since your project has three executables, each with a distinct set of dependencies
+15:35:27 <alp> I think my version of curl just defaults to JSON by itself
+15:35:47 <fool> philippD: can you copy/paste the request you made with your browser using F12 (devtools) and right clicking  and doing copy as a curl on the requests' log ?
+15:35:48 <jle`> and also different defs in their main modules
+15:35:55 <jle`> tcsiwula: if you pick 1..3 then it should jump into itneractive moade
+15:35:57 <tcsiwula> jle`: okay yeah works outside of the project too. thanks
+15:36:08 <jle`> leaving it blank and just pressing enter should just load the lib only with no executable deps
+15:36:22 <philippD> alp: maybe something is funky in my console. I can access the endpoint using firefox, which is ok for now and firefox doesn't send a an accept header at all
+15:36:47 <fool> did you try adding the curl flag '--output -' ?
+15:39:09 <philippD> fool: As I said, even with the exact headers from the firefox request it doesn't work. Also -o just redirects stdout to a file
+15:40:20 <philippD> to clarify, firefox does send an accept header but application/json isn't present in its value
+15:42:36 <tcsiwula> jle`: back and running. thanks much ^_^
+15:42:57 <jle`> ofc ^_^
+15:44:55 <wroathe> philippD: I scrolled up and didn't see what you were sending a request to with curl... Which endpoint are you hitting?
+15:45:34 <philippD> wroath: http://localhost:8080/users
+15:45:41 <philippD> wroathe: ^
+15:46:06 <wroathe> philippD: And this is code you wrote? This users service?
+15:46:23 <philippD> https://github.com/chisui/servantTest/blob/master/src/Quotes.hs
+15:48:24 <wroathe> Got it, so you're using this to define your API? https://haskell-servant.readthedocs.io/en/stable/tutorial/ApiType.html?
+15:48:47 <philippD> jup
+15:49:18 <philippD> I'm hitting the endpoint with this call `the Call `curl -vH "Accept: application/json;charset=utf-8" http://localhost:8080/users`
+15:49:54 <wroathe> First off, what happens when you just do "curl -vs http://localhost:8080/users"
+15:51:20 <philippD> 200 OK with Content-Type: application/json;charset=utf-8
+15:51:31 <alp> empty body?
+15:51:33 <wroathe> And a non-empty body?
+15:51:49 <philippD> as far as I can see the content is a newline
+15:52:12 <c_wraith> that's the separator between headers and body in http
+15:52:14 <philippD> could be just a line separator in curls output though
+15:52:21 <wroathe> And you said you're getting a response body in your browser, right, but not with curl?
+15:52:52 <philippD> Yes, not even if copy the exact request headers from the dev tools
+15:53:01 <alp> ugh
+15:53:29 <philippD> The response headers are exactly the same in both cases
+15:53:36 <wroathe> philippD: Ok, now do it with: "curl -vs -H 'Accept: application/json' http://localhost:8080/users"
+15:53:38 <philippD> It doesn't work with wget as well
+15:54:14 <philippD> wroathe: exact same response
+15:55:36 <c_wraith> philippD, is there neither a content-length nor transfer-encoding header?
+15:55:49 <philippD> transfere-encoding is chunked
+15:56:02 <philippD> but lo length
+15:56:08 <philippD> s/lo/no
+15:56:29 <c_wraith> yeah, no length is set when its chunked transfer encoding.
+15:56:34 <wroathe> For a GET rquest that shouldn't matter
+15:56:49 <wroathe> There's something going on with the way servant is wiring this together
+15:57:38 <wroathe> Your intention is to simply serve an endpoint at /users that responds to GET requests with an array of users, and from what I see in your code that shouldn't require any special headers
+15:57:47 <Evelf> philippD: it may be an artefact, firefox may fix broken pages
+15:58:51 <philippD> wroathe: I just followed the tutorial and when it didn't work for a list of users I tried a plane User which still didn't work.
+16:00:36 <wroathe> Unless that Github repo is only partial I don't see where you're wiring up your server?
+16:00:41 <wroathe> https://haskell-servant.readthedocs.io/en/stable/tutorial/Server.html
+16:01:00 <philippD> Nope, the repo is all I'm using
+16:01:00 <fool> philippD: why don't you want to paste the curl request issued with firefox ?
+16:01:15 <philippD> I just run "nix build" and then ./result/bin/quoteService
+16:01:51 <philippD> fool: I did and it returned the exact same output, do you want to see the console output?
+16:01:59 <fragamus> Cale I made myself an example of GADT to existential and back to GADT
+16:02:19 <fool> nevermind
+16:02:35 <fool> i'm surprised that the curl output is not 100% iso with what the browser gives
+16:02:55 <fool> could be related to -H 'accept-encoding: gzip, deflate, br'
+16:03:07 <fool> as someone told you
+16:03:21 <fool> also try with content-type: */*
+16:03:47 <fool> -H 'accept: */*' I mean
+16:03:54 <philippD> wroathe: I just added nix package pinning so the build is more reproducible. I'm using curl 7.61.0
+16:03:59 <philippD> fool: */
+16:04:11 <philippD> fool: */* is the default accept header for curl
+16:04:24 <fool> I'm curl 7.61.1
+16:04:48 --- mode: glguy set +v Mibbit
+16:05:47 <Mibbit> hi
+16:06:25 <fool> philippD: I mean at some point that's just text being echanged over a socket.
+16:08:02 --- mode: glguy set +v tiredsounds_
+16:08:04 <wroathe> philippD: I see that the Servant API requires you to construct a settings object before initializing an application
+16:08:04 <tiredsounds_> is this more efficient?
+16:08:12 <wroathe> You should see if you can log your final settings object
+16:08:22 <wroathe> I'm guessing that will shed some light on what's happening here
+16:08:57 <wroathe> Here's a minimal example: https://github.com/haskell-servant/example-servant-minimal/blob/master/src/App.hs
+16:09:04 <wroathe> You should check that against what you've done
+16:09:15 <philippD> wroathe: I added that settings logging stuff after I didn't get any data. before that I was using run/runEnv which both behaved exactly the same
+16:12:00 <elated> I've written a function split :: Int -> [a] -> ([a],[a]) without using take and drop, but instead using the monoid for tuples. Is this efficient? Is concatenating singleton lists still worse than just consing? Here's the source: https://gist.github.com/TiredSounds/6b3e5feb76a09428b4a79782c6446bd8
+16:12:54 <ab9rf> hm.
+16:13:14 <crestfallen> there's something very basic I don't see about polymorphism..
+16:13:41 <fool> elated: what is (<>) ? GHCi tells it is for semi-groups
+16:14:03 <elated> fool, it is mappend provided by Data.Monoid
+16:14:07 <elated> but also by Semigroup
+16:14:13 <elated> but I'm using the former
+16:14:15 <geekosaur> it's also for monoids, whicha e semigroups with identities
+16:14:39 <ab9rf> elated: to answer that requires that you look at the definition of (<>) in the particular monoid instance
+16:14:41 <c_wraith> elated, I think you're going to run into issues with constructing a bunch of unnecessary (,) values.
+16:14:52 <elated> I see
+16:15:01 <Mibbit> Hi, I've just started learning Haskell, can anybody tell me what I should use instead of guards to get rid of the parse error https://i.imgur.com/ktksAKo.png
+16:15:02 <c_wraith> elated, but.. benchmark. ghc can sometimes be clever.
+16:15:35 <ab9rf> iirc, monoid for [] uses a list comprehension
+16:15:36 <elated> yes
+16:15:40 <glguy> Mibbit: You need to indent the | further in than the 'f' you're defining
+16:16:00 <elated> (to cwraith)
+16:16:36 <ab9rf> elated: you might want to look at the source for Data.Monoid
+16:16:39 <c_wraith> crestfallen, what are you unsure of?
+16:17:05 <ab9rf> ther eis a lengthy comment in the source regarding the performance of the implementation of mconcat for [] there
+16:17:12 <ab9rf> http://hackage.haskell.org/package/base-4.11.1.0/docs/src/GHC.Base.html#line-300
+16:17:26 <wroathe> philippD: Ah, https://github.com/yesodweb/wai/blob/master/warp/Network/Wai/Handler/Warp/Settings.hs#L122
+16:17:42 <wroathe> I see that you're using Wai for the server
+16:18:51 <philippD> What's so bad about that?
+16:18:58 <MarcelineVQ> crestfallen: it's best to phrase questions in the form of a question
+16:19:21 <wroathe> Nothing, I'm just trying to verifying what you've got in that Github repo for correctness
+16:19:53 <ab9rf> this isn't functional programming jeopardy
+16:20:46 <philippD> If I just drop the App.hs into my project it doesn't build. Maybe I have some version conflicts ... which would be strange since I'm using Nix. Anyway I'm going to bed now. I'll take a look at that again tomorrow.
+16:21:28 <crestfallen> sorry MarcelineVQ I was interrupted...
+16:23:24 <crestfallen> c_wraith: yeah apologies. well if I function is in a Type signature, if it transforms a value from say (a  -> b) , its never written (a -> a)   ie in the case ...
+16:23:44 <crestfallen> (+1) :: Int -> Int
+16:24:11 <crestfallen> so b is polymorphic and actually means a here I guess
+16:24:57 <glguy> Can you phrase that as a question?
+16:25:27 <ab9rf> crestfallen: i'm not understanding your question
+16:25:38 <ab9rf> :t (+1)
+16:25:40 <lambdabot> Num a => a -> a
+16:25:52 <ab9rf> (+1) _is_ polymorphic
+16:26:17 <c_wraith> it's worth remembering that when ghc compiles something, all* (*not all, but close enough for a first pass) types get unified with something concrete eventually.
+16:27:07 <crestfallen> but in the case where its defined (+1) :: Int -> Int
+16:27:41 <crestfallen> that narrows the definition to (a -> a)
+16:28:14 <crestfallen> source :  https://monadmadness.wordpress.com/2015/01/02/monoids-functors-applicatives-and-monads-10-main-ideas/
+16:28:52 <crestfallen> under Main Idea #3
+16:29:27 <c_wraith> I think you're getting bit by the lack of explicit quantifiers.
+16:29:48 <crestfallen> pls explain
+16:31:32 <c_wraith> the type (a -> b) *could* mean the polymorphic function with type "forall a b. a -> b". or it could mean a function referring to unknown types a and b that are inferred from context.
+16:32:40 <c_wraith> people (including me) write both of those the same way as a shortcut, but they're not the same.
+16:33:57 <crestfallen> ok a function referring to unknown types is by tradition written as a -> b
+16:34:48 <crestfallen> correct?
+16:36:08 <c_wraith> eh. sometimes I write it as A -> B, just to clarify it isn't polymorphic
+16:36:41 <crestfallen> "eh" means "aye" ?
+16:36:49 <c_wraith> but really, there are a lot of different things it can mean, and it depends on context.
+16:37:22 <c_wraith> "eh" means "sort of, but there's no real preference"
+16:37:35 <crestfallen> ok, thanks, so you'd never see  f :: (a -> a) -> a -> [a]
+16:38:06 <c_wraith> sure, you'd see that. it has more context.
+16:38:59 <crestfallen> when you use the upperCase you're talking about sets or categories ?
+16:40:03 <c_wraith> well, if that's a type ascription provided before an implementation of f in a binding, it has the context "this is a polymorphic type signature, so assume it starts with a forall"
+16:40:47 <c_wraith> when I use uppercase, I'm just talking about Haskell types. I just mean "some concrete type".
+16:43:00 <crestfallen> the key was when you said a function referring to unknown types a and b that are inferred by context. so (a -> b) is generalizing as far as possible
+16:43:44 <c_wraith> it can certainly mean that, but remember that it also means that a and b are no longer polymorphic. they're just unknown.
+16:46:33 <crestfallen> yet in the blog they use (a -> b) to transform type a's to type b's and then give the example (+1) :: Int -> Int which I thought would be (a -> a)
+16:47:05 <c_wraith> it unifies with either.
+16:47:45 <c_wraith> the key is that in a type that accepts a function (a -> b) as an argument, it can't tell if a and b are the same, even if they are.
+16:48:04 <c_wraith> so it has to treat them as though they're different.
+16:48:27 <fragamus> cale
+16:49:06 <c_wraith> I think a lot of your confusion would be cleared up if you thought of every use of a polymorphic function as also having to specify what types it's using. 
+16:49:57 <c_wraith> the function being called. can never know what is being specified.
+16:50:19 <c_wraith> because each caller could specify something different.
+16:50:51 <shachaf> Would you say that the values ('a' :: exists x. x) and (True :: exists x. x) are equal?
+16:51:28 <shachaf> What's a precise notion of equality to use for that?
+16:51:58 <EvanR> the set of things you can do with those values is the same
+16:52:28 <c_wraith> and they behave the same in all uses.
+16:53:10 <crestfallen> above what you meant is that a and b are no longer *separately* polymorphic, they're just unknown c_wraith
+16:53:55 <crestfallen> so you don't like at the function as a whole, say (a -> b) and say "that is polymorphic"
+16:54:15 <c_wraith> shachaf, I'd sthink ay that in a language like Haskell, they're extensionally equivalent, but not intensionally?
+16:54:27 <c_wraith> err, I think I'd say...
+16:54:55 <shachaf> You need something like parametricity to say that, right?
+16:55:16 <shachaf> I suppose that in Haskell (exists x. x) has two inhabitants, like ()
+16:55:51 <c_wraith> crestfallen, I mean, it matters where (a -> b) is coming from. I think you specifically mean in the context of the type of fmap, but I've sort of been guessing at that.
+16:57:18 <c_wraith> crestfallen, as a top-level type signature, (a -> b) implies it either crashes or worse.
+16:57:39 <crestfallen> don't follow
+16:58:02 <c_wraith> at the top level, those type variables are both polymorphic.
+16:58:34 <c_wraith> which means the function's type reads as "give me one of anything, and I'll give you back one of anything else"
+16:59:02 <c_wraith> that can only work by either never returning, or by violating type safety.
+16:59:17 <shachaf> In normal Haskell (with a few exceptions), when you write "name :: ...", where the "..." contains type variables, there's an implicit "forall" right after the :: for each of the type variables.
+16:59:58 <shachaf> "forall" isn't part of standard Haskell, but if you want to understand polymorphism well, you'll probably do better with it.
+17:00:45 <shachaf> Or with something more explicit like GHC Core/System F, like c_wraith was getting at before.
+17:01:07 <crestfallen> still, there's nothing polymorphic about (+1) :: Int -> Int    right?
+17:01:24 <c_wraith> that is correct.
+17:01:40 <hpc> yeah, foralls are one of those weirdly important things that you don't realize for a year or two
+17:02:04 <crestfallen> so why use a function where being unknown is implicit: (a -> b)
+17:02:06 <crestfallen> ?
+17:02:29 <crestfallen> I mean why use that in the signature?
+17:02:43 <c_wraith> because it's not the complete type signature.
+17:03:03 <c_wraith> :t ($)
+17:03:05 <lambdabot> (a -> b) -> a -> b
+17:05:04 <c_wraith> that contains (a -> b), but that's not entire signature.
+17:05:37 <EvanR> forall a b . (a -> b) -> a -> b   -- ahhh there we go
+17:05:48 <EvanR> now everything is right in the universe
+17:06:22 <c_wraith> yeah, I'd be happy if lambdabot printed explicit forall again, for this conversation at least.
+17:07:52 <crestfallen> very sorry but when you write (+1) :: Int -> Int    you are essentially writing a stricture into the signature. but the actual type is 
+17:07:59 <crestfallen> :t (+1)
+17:08:00 <lambdabot> Num a => a -> a
+17:08:21 <EvanR> you mean it's inferred type is that
+17:08:32 <crestfallen> so all this they are using to explain "Functions of type a -> b"
+17:09:06 <c_wraith> well. "actual" is a bit too strong. that's the most general possible type. "actual" is... harder to define.
+17:09:07 <EvanR> (+1) can have type Int -> Int depending 
+17:10:28 <crestfallen> i.e. my confusion is valid :)
+17:11:24 <crestfallen> so ghci will give you the most general type until it sees what youre trying to do
+17:11:58 <c_wraith> in general, that's Haskell's type inference rule.
+17:12:24 <crestfallen> > (+1) 5.0
+17:12:26 <lambdabot>  6.0
+17:12:51 <crestfallen> :t (+1) 5.0
+17:12:53 <lambdabot> Fractional a => a
+17:13:12 <crestfallen> ok I get it very sorry many thanks
+17:13:44 <c_wraith> asking for the expression to be evaluated forces ghci to pick a type, using some defaulting rules.
+17:15:00 <c_wraith> it's uncommon for the defaulting rules to come into play in many applications. (there are times they do, of course.)
+17:15:30 <crestfallen> I'm going to get this language. the bartosz videos are helping a lot. and .. I think I have a tutor ! (graduate math student) the book I'm using is dismally terse
+17:16:15 <c_wraith> if you enable -Wall, ghc or ghci will tell you when they use defaulting to choose a type.
+17:16:27 <c_wraith> that can be interesting information
+17:16:30 <elated> c_wraith, have you considered the From First Principles book?
+17:16:32 <elated> it is very good
+17:16:46 <elated> sorry not c_wraith 
+17:16:48 <elated> crestfallen, 
+17:17:21 <crestfallen> so in our case the default would be 
+17:17:29 <crestfallen> :t (+1)
+17:17:31 <lambdabot> Num a => a -> a
+17:17:55 <c_wraith> no defaulting there.
+17:18:06 <c_wraith> > (+1) 3
+17:18:09 <lambdabot>  4
+17:18:23 <c_wraith> that does defaulting, though. it needs to actually evaluate.
+17:18:59 <crestfallen> right it sticks to Integers until you ask for a float what-have-you
+17:19:53 <crestfallen> elated: thanks kindly I really dislike learning from textbooks. I need people. I must be mentally challenged
+17:20:46 <sleepster> any thoughts on this book ? https://github.com/hmemcpy/milewski-ctfp-pdf
+17:21:51 <crestfallen> sleepster: his first name's bartosz I am getting a lot from his video lectures
+17:22:33 <crestfallen> bartosz milewski
+17:22:58 <crestfallen> thanks kindly c_wraith et al
+17:25:07 <sleepster> thanks crestfallen 
+17:25:19 --- mode: glguy set +v linxnp
+17:29:28 <crestfallen> he's cool sleepster watch plenty of them there is a lot of redundancy and some are hard to see white boards. just keep watching he teaches theory and code together
+17:32:27 --- mode: glguy set +v dataN
+17:32:35 <koz_> Bartosz also wrote Category Theory for Programmers, which I very much recommend.
+17:32:42 <sleepster> crestfallen: https://www.youtube.com/watch?v=I8LbkfSSR58&list=PLbgaMIhjbmEnaH_LTkxLI7FMa2HsnawM_
+17:32:46 <sleepster> are those the videos?
+17:32:48 --- mode: glguy set -v dataN
+17:33:30 <dataN> is there a way to match on pattern synonyms in type families?
+17:35:09 <crestfallen> yeah hes got a youtube channel... and his website covers it too sleepster yeah see koz_ above a couple of books now?
+17:41:11 <koz_> crestfallen: Yeah... it made for interesting reading, although I think I'll have to take _many_ more looks at it to fully get it all.
+17:41:14 <koz_> There's a lot there.
+17:47:14 <dataN> for something like this; https://gist.github.com/dataN-hs/bc636ee784c6d29e9ffb6c00ac030c70
+17:51:01 <dataN> then could have;
+17:51:04 <dataN> type instance SetS' Nothing = Empty'
+17:51:21 <dataN> type instance GetS' Empty' = Nothing
+18:04:23 <dataN> or Empty'' as the synonym would need a new name
+18:06:09 <koz_> @pl \(k, v1, v2) -> (k, (v1, v2))
+18:06:09 <lambdabot> (line 1, column 10):
+18:06:09 <lambdabot> unexpected "v"
+18:06:09 <lambdabot> ambiguous use of a non associative operator
+18:06:37 <koz_> Uhh, wat.
+18:07:18 <koz_> :t \(k, v1, v2) -> (k, (v1, v2))
+18:07:20 <lambdabot> (a1, a2, b) -> (a1, (a2, b))
+18:07:30 <monochrom> I think @pl's parser is incomplete.
+18:09:35 <koz_> monochrom: Awww.
+18:09:43 <koz_> I was wondering if there was a less hideous way to write that.
+18:09:55 <koz_> I find asking @pl can be helpful occasionally.
+18:14:25 <geekosaur> the problem with @pl there si it has no idea how to pointfree decompose tuples larger than 2 elements
+18:15:20 <geekosaur> so it only parses 2-tuples and explodes when handed a 3-tuple
+18:28:40 <Solonarv_> to be fair, @pl doesn't have anything in scope that could decompose 3-tuples and above (afaik)
+18:30:24 <dataN> is it wrong to make a defunctionalisation symbol for Apply?
+18:31:39 <dataN> e.g. to pass (f @@) 
+18:31:52 <dataN> or a symbol for (@@ x)
+18:32:14 <dataN> using; type FlipApply x f = Apply f x 
+18:43:13 <dataN> hmm seems to work
+18:43:14 <dataN> https://gist.github.com/dataN-hs/130cefdc82b42c011bb81954ed05e77d
+18:43:27 <dataN> (@@ x) is kind of like ($ x)
+18:43:45 <dataN> data FlipApplySym0 :: k2 ~> ((k1 ~> k2) ~> k2)
+18:43:55 <dataN> looks like its returning a continuation 
+18:44:11 <dataN> :t \x -> ($ x)
+18:44:13 <lambdabot> a -> (a -> b) -> b
+18:44:37 <dataN> a -> ((a -> b) -> b)
+18:48:02 <EvanR> any help on understanding what this Char ... is
+18:48:28 <EvanR> > text ['\x2fe0']
+18:48:31 <lambdabot>  �
+18:48:39 <EvanR> o_O
+18:49:11 --- mode: glguy set +v derek
+18:49:15 <EvanR> like, some sites claim this is an "invalid character", unicode standard doesn't mention it at all
+18:50:22 <EvanR> is this like, unicode is to pokemon as 2fe0 is to missingNo ?
+18:52:03 <byorgey> EvanR: I'm not familiar with pokemon.  But 2fe0 is indeed not defined by the Unicode standard.  Or rather, it is a number which is not (yet?) assigned as the codepoint of any Unicode character.
+18:53:04 <byorgey> I'm not sure why calling 'text' produces some characters.  Probably something to do with an encoding mismatch
+18:53:37 <EvanR> um
+18:54:19 <EvanR> the standard goes to some effort to ensure that "Noncharacters" are properly handled by a processor, that they arent removed or mangled
+18:55:28 <EvanR> however it almost explicitly does not defined 2fe0 to be a "noncharacter" which is specifically ffff fffe, those points in other planes, and a particular other segment in the BMP that is apart from 2fe0
+18:55:52 <EvanR> i could not determine if this means that 2fe0 is reserved for future use
+18:56:09 <EvanR> one chart i found displays the range 2fe0 in as a series of red ?'s o_O
+18:56:42 <EvanR> the standard is so meticulous that this range has no definition seems weird to me
+18:57:58 <EvanR> > generalCategory '\xffff'
+18:58:01 <lambdabot>  NotAssigned
+18:58:09 <EvanR> > generalCategory '\x2fe0'
+18:58:11 <lambdabot>  NotAssigned
+18:59:43 <EvanR> maybe the standard is just inappropriately meticulous
+19:00:39 <ChaiTRex> Haskell is back on Unicode 7 or so.
+19:00:44 <ChaiTRex> GHC at least.
+19:08:17 <geekosaur> byorgey, I thik it just did a straight utf8 encoding of it without checking validity. What I saw over here was it getting decoded as iso8859, presumably because utf8 decode yielded an invalid character
+19:09:20 <ChaiTRex> > text . filter ((/= NotAssigned) . generalCategory) . map chr $ [12240 .. 12275]
+19:09:22 <lambdabot>  ⿐⿑⿒⿓⿔⿕⿰⿱⿲⿳
+19:09:34 <ChaiTRex> Here are the surrounding characters.
+19:10:54 <EvanR> yeah i saw those. the radicals are followed by ... NotAssigned, or hashmarked squares in the tables, even before 2fe0
+19:11:42 <EvanR> see unicode ranges are separated into "blocks", some blocks contain reserved characters. but 2fe0, 2fe1... is not in any block so it seems odd
+19:12:23 <EvanR> so theres some missing chars in the chinese radicals block, and then missing chars in no block
+19:13:12 <EvanR> geekosaur: but why would it be considered an invalid character, and trip up the heuristic
+19:13:54 <EvanR> it certainly can be utf8 encoded and decoded fine
+19:14:20 <geekosaur> sure, bu that's mechanical. and is defined well past the range of unicode
+19:15:25 <EvanR> > text "\2fd5\2fd6"
+19:15:28 <lambdabot>  fd5fd6
+19:15:31 <EvanR> > text "\x2fd5\x2fd6"
+19:15:33 <lambdabot>  ⿕⿖
+19:15:51 <EvanR> > text "\x2fd5\x2fd6\x2fdf\x2fe0"
+19:15:54 <lambdabot>  ⿕⿖⿟�
+19:15:57 <EvanR> ha
+19:16:02 <EvanR> > text "\x2fd5\x2fd6\x2fdf"
+19:16:05 <lambdabot>  ⿕⿖⿟
+19:16:07 <Clint> ChaiTRex: https://git.haskell.org/ghc.git/commitdiff/14d88380ecb909e7032598aaad4efebb72561784
+19:16:21 <EvanR> ridiculous
+19:16:49 <EvanR> so what is special difference between 2fdf and 2fe0
+19:16:56 <ChaiTRex> Clint: Oh, good. They committed it :)
+19:21:19 <glguy> Are you able to reproduce the bad behavior of \x2fe0 outside of lambdabot?
+19:21:39 <glguy> Does it look the same when I send it between these brackets? [⿠]?
+19:22:10 <EvanR> now it looks like [<squared-?>]
+19:22:10 <dmwit> looks more different to me
+19:22:39 <EvanR> instead of a-circumflex upsidedown-?
+19:23:22 <glguy> I'm not able to reproduce the encoding error in ghci or with the text package or in vty, doesn't really seem like GHC or Haskell's fault in general
+19:23:52 <EvanR> yeah thats what i get, putStrLn doesn't act like lambdabot
+19:24:42 <glguy> > show (text "\12256")
+19:24:44 <lambdabot>  "\12256"
+19:24:46 <glguy> > "⿠"
+19:24:48 <lambdabot>  <hint>:1:2: error:
+19:24:48 <lambdabot>      lexical error in string/character literal at character '\12256'
+19:25:00 <geekosaur> fwiw I see a solid block with 2FE0 inside it, which I assume is my IRC client and/or pango
+19:25:48 <glguy> I'm sending and receiving it with my GHC compiled IRC client :)
+19:26:14 <glguy> via the text package
+19:27:04 <EvanR> good i figured it was getting through
+19:27:39 <EvanR> so the show instance for Doc is buggy or something
+19:28:01 <EvanR> in lambdabot
+19:30:05 <glguy> I think my line of code above 【 show (text "\12256") 】demonstrates that the show instance is OK.
+19:31:07 <glguy> > 0x2fe0
+19:31:09 <lambdabot>  12256
+19:31:17 <EvanR> right... 
+19:31:42 <EvanR> so what is the magic of ... "executing" the Doc directly in lambdabot
+19:34:38 <ChaiTRex> EvanR: I think that's the only way to get the actual text rather than a show version of it.
+19:34:50 <ChaiTRex> > putStrLn "test"
+19:34:52 <lambdabot>  <IO ()>
+19:35:11 <EvanR> actual text
+19:35:21 <geekosaur> pretty sure it's the client that's doing it. if my client sees other stuff it decodes with a placeholder haracter; if not, it re-decodes as iso8859
+19:36:29 <EvanR> if irssi is doing that, everything i know is wrong
+19:36:52 <geekosaur> if you're running irssi then it's your terminal that's (mis)doing it
+19:36:58 <glguy> I'm seeing the stuff lambdabot sends encoded incorrectly
+19:37:10 <geekosaur> unless it has the same "clever" re-decode logic hexchat doews
+19:37:18 <glguy> but I'm seeing the stuff I send encoded correctly when I loop it back, so I don't think it's on our side
+19:46:00 <EvanR> % > text "\x2fe0"
+19:46:00 <yahb> EvanR: ; <interactive>:27:1: error: parse error on input `>'
+19:46:04 <EvanR> % text "\x2fe0"
+19:46:04 <yahb> EvanR: ⿠
+19:46:10 <EvanR> :thumbsup:
+20:01:39 <infinity0> dmwit: sorry to bother you again, i was wondering if you could point me to some more detailed explanation of that class/dynamic dispatch thingy
+20:01:48 <infinity0> i'm happy to read a paper or something that explains it, i'm guessing the full explanation will take longer than IRC has space for
+20:02:05 <infinity0> also i figured out that the associated type ToS you were defining, is actually unnecessary for the workaround to work
+20:02:07 <infinity0> https://repl.it/repls/KhakiSurprisedFlashmemory -- to recap
+20:49:25 <mac10688> http://hackage.haskell.org/package/servant-0.14.1/docs/Servant-API.html#g:8
+20:49:35 <mac10688> I'm not sure how to make sense of the AddHeader class type definition
+20:49:41 <mac10688> not sure what the pipe means
+20:55:55 <c_wraith> mac10688: https://wiki.haskell.org/Functional_dependencies
+20:56:51 <mac10688> thanks!
+20:58:31 <mac10688> (KnownSymbol h, ToHttpApiData v, new ~ Headers (Header h v ': ([] :: [*])) a) => AddHeader h v a newSource
+20:58:42 <mac10688> can someone tell me what that tilde is called?
+20:59:02 <mac10688> like what subject do i google to unearth the mysteries of the tilde in type signatures
+20:59:15 <EvanR> type equality constraint
+20:59:32 <EvanR> :k a ~ b
+20:59:33 <lambdabot> error: Not in scope: type variable ‘a’
+20:59:34 <lambdabot> error: Not in scope: type variable ‘b’
+20:59:41 <EvanR> :k Int ~ Char
+20:59:42 <lambdabot> Constraint
+21:00:29 <mac10688> wow. that makes no sense lol. I found a blog on it. going to read up and hit the channel up if I still have questions
+21:01:13 <maerwald> how do you set ghc options in project.cabal
+21:01:36 <maerwald> the file format is underdocumented
+21:02:24 <EvanR> maybe you meant newSource ~ Headers (....)
+21:06:09 <EvanR> you may eventually find it helpful to think of => as a sort of function arrow, stuff to the left are prerequisites you need before you can have stuff on the left. stuff you need in that case are instances or evident equalities of types
+21:06:24 <EvanR> urg... before you can have stuff on the right*
+21:14:22 --- mode: glguy set +v iamme
+21:26:14 <infinity0> dmwit: ok i think i figured it out, it's a combination of two reasons
+21:26:40 <infinity0> if we try to express the constraint with a type family, we can't possibly write one that is injective, for what i need. but even if we did write one we'd run into #10833
+21:27:34 <infinity0> OTOH if we try to express the constraint using a class but have the method be outside of that class, we run into the issue described here https://stackoverflow.com/a/35260970
+21:28:01 <infinity0> and unfortunately for my case there's no way to write this using a superclass constraint for all instances, since the instances must have different constraints
+21:30:20 <infinity0> as a simple example e.g. https://repl.it/repls/FrillyWorseStatistic
+21:30:42 <infinity0> if we remove the superclass constraint (a ~ b) from (Same a b) it breaks with the same error "could not deduce"
+21:49:01 <infinity0> holy shit i figured it out! we just need to use data family instead of type families
+21:49:16 <infinity0> https://wiki.haskell.org/GHC/Type_families "Alternatively, you can use data families, which create new types and are therefore injective. The following code works:"
+21:50:10 <infinity0> dmwit: https://repl.it/repls/FrillyWorseStatistic
+22:00:41 <koz_> How often do we get LTS releases on Stackage?
+22:04:20 <hololeap> i'm just starting to look into data kinds using Nat. i've looked briefly at vector-sized, indexed-list-literals, and finite-typelits... i want to know how to build something like this but for an arbitrary number (~10 max) of powers: http://dpaste.com/3FMP8QC
+22:04:59 <koz_> hololeap: So you want something like 'Power (n :: Nat) a' ?
+22:06:17 <koz_> You can see that any given Power m a consists of a fixed-length lest (of length m) of Power (m - 1) as, except for your base case.
+22:06:29 <koz_> This should be enough to get you started.
+22:06:50 <koz_> Well, and read this thing by jle`: https://blog.jle.im/entry/fixed-length-vector-types-in-haskell.html#the-structural-way
+22:07:08 <koz_> s/lest/list/ argh
+22:08:10 <hololeap> koz_: ok, i will check out that article
+22:08:56 * koz_ is determined to plug jle` 's work until he finally writes part 3 of his singletons tutorial. :P
+22:10:32 <koz_> Well, and because it's good.
+22:12:36 <EvanR> "use KnownNat to reflect an n type down to the value level"
+22:12:48 <EvanR> why do i want to call that "reify" instead
+22:12:56 <koz_> EvanR: Reification goes the other way.
+22:13:08 <koz_> Although the sentiment is understandable, since I also feel that way.
+22:13:09 <EvanR> reification = "turn your values into types" ?
+22:13:34 <jle`> yea it's odd
+22:13:34 <koz_> I _think_ that's the vocab I see jle` use, although he's probably gonna chime in at some point to correct me.
+22:13:35 <EvanR> who defined this utter jargon
+22:13:38 <MarcelineVQ> well this doens't help "Data.Reflection""Reifies arbitrary terms at the type level. "
+22:13:40 <koz_> Lol, hi jle` !
+22:13:53 <jle`> hi :)
+22:13:57 <jle`> the reflection library uses these terms
+22:14:10 <jle`> reify brings values to types, reflect brings types to values
+22:14:14 <MarcelineVQ> "class Reifies -> method reflect"
+22:14:18 <EvanR> that was a rhetorical question
+22:14:18 <koz_> I always think value -> type is 'promotion' and type -> value is 'reification'.
+22:14:21 <shachaf> That always seemed odd to me.
+22:14:24 <jle`> those are the literal names of the function
+22:14:36 <EvanR> clearly kmett is usually to blame
+22:14:38 <shachaf> I think of values as more concrete than types so why is it called reification?
+22:14:59 <jle`> i remember having a discussion on irc before about why things should be opposite too
+22:15:12 <koz_> shachaf: Yeah, now that you mention it, that makes sense.
+22:15:50 <EvanR> reflection as a package name sounds sexier?
+22:16:15 <jle`> this is what edward kmett says on the matter: https://stackoverflow.com/a/5316014/292731
+22:16:24 <EvanR> on average more people feel like they know what reflection should do, and have no idea what reification is
+22:16:29 * koz_ mentally prepares himself for a lot of category theory.
+22:16:56 <koz_> "In this vein, I spend a lot of time reifying concepts from category theory into Haskell code." <-- ain't _that_ just the truth
+22:17:17 <jle`> his reasoning is in this sentence: "here the 'concrete' domain is the type system, and the abstract domain are the terms."
+22:17:21 <jle`> aka: it's arbitrary
+22:17:41 <koz_> I think Sandy Maguire talked about this whole 'naming' business in a blogpost.
+22:17:51 <koz_> (using natural transformations because why not)
+22:18:14 <EvanR> haha... basically programming in the haskell type system is your main activity, main concern. and the values are secondary in importance
+22:18:33 <EvanR> from his perspective 
+22:18:35 <koz_> EvanR: Reminds me of how it goes in compsci. It's something like:
+22:18:45 <koz_> Computability theorists: Once it's decidable, who cares?
+22:18:51 <koz_> Complexity theorists: Once it's P, who cares?
+22:19:13 <koz_> Etc.
+22:19:35 <dminuoso> jle`: I like the precision of edward words. The fact that `reification` is a rather generic term is so important because most people using the word `reify` have some contextual reified meaning of the word reify.
+22:19:36 <EvanR> so reflection is a way to view the world of values inside the type system, to get direct access haha
+22:20:52 <EvanR> and get the power of values at type level
+22:21:09 <EvanR> rather than the "power" of the java class system at runtime
+22:22:27 <shachaf> The words are Kiselyov's and Shan's
+22:22:36 <dminuoso> I wonder though, using that definition how is the name of TH's reify justified?
+22:22:43 <dminuoso> What abstract concept does it make concrete?
+22:22:51 <koz_> dminuoso: What does TH's reify do?
+22:23:28 <dminuoso> koz_: It's basically just some "tell me what you know about XYZ"
+22:24:03 <dminuoso> giving you https://hackage.haskell.org/package/template-haskell-2.13.0.0/docs/Language-Haskell-TH.html#t:Info
+22:24:18 <EvanR> right so, that should be called reflection in TH...
+22:24:27 <EvanR> according to the SO post
+22:27:56 <dminuoso> EvanR: So I suppose one might call quoting and splicing reflect and reify respectively.
+22:28:04 <dminuoso> *reflection and reification
+22:29:09 <EvanR> somehow the forgetful functor and the left adjoint make things warm and fuzzy again
+22:30:45 <dminuoso> Unrelated question, what exactly *is* the Q monad anyway?
+22:31:12 <EvanR> a monad to control the magic TH process, and do IO
+22:31:14 <dminuoso> Is it something roughly comparable to `StateT CompilationUnit IO`?
+22:31:36 <dminuoso> EvanR: Well yeah, but what "is" it. What does >>= do exactly?
+22:31:50 <EvanR> that seems about right
+22:32:05 <EvanR> a pile of mutable state and access to IO
+22:33:37 <geekosaur> it's kinda a hack, actually. it's a wrapper for a computation in some type with a Quasi instance. IO has a Quasi instance for debugging purposes
+22:34:02 <geekosaur> https://downloads.haskell.org/~ghc/latest/docs/html/libraries/template-haskell-2.13.0.0/src/Language.Haskell.TH.Syntax.html#Q
+22:34:53 <EvanR> so thinking about it differently, if type level nats consist of Z and Ss, then sending them to Int or Integer, whose structure is opaque and so forgotten, is like forgetful, more abstract and so reflecting
+22:37:03 <dminuoso> geekosaur: Uhh and Q itself has a Quasi instance as well.. what is this circular.. thing?
+22:38:34 <geekosaur> it's not circular. TH itself lives in the Quasi class. Q implements the interesting parts of it; IO just enough to do Quasi's runIO and a few more trivial things
+22:39:18 <geekosaur> mtl does the same thing, for example MonadState is the "actual" definition of a state monad
+22:39:34 <maerwald> seems you can't set ghc flags in cabal.project for your entire project
+22:39:57 <mniip> oh this is like reverse dependency injection
+22:40:23 <geekosaur> StateT is a basic definition thereof, RWS another (that also does MonadReader and MonadWriter), and you can derive others through newtypes or implement your own MonadState-based state 
+22:40:24 <mniip> geekosaur, dminuoso, and then GHC defines an actual instance of Quasi but it's hidden from everyone?
+22:40:27 <dminuoso> instance Quasi Q where ...; 
+22:40:28 <dminuoso> newtype Q a = Q { unQ :: forall m. Quasi m => m a }
+22:40:51 <geekosaur> right, and just above that you find: instance Quasi IO where ...
+22:41:28 <geekosaur> so if you're testng soemthing that uses runIO, you don;t have to set up a Q insance, you can do it in IO
+22:41:37 <dminuoso> geekosaur: Okay let me process this thought for a moment.
+22:41:39 <geekosaur> as long as it doesn't rely on anything else
+22:44:43 <dminuoso> geekosaur: Okay I think I understand it now. 
+22:45:30 <koz_> If the plural of 'schema' is 'schemata', why is the plural of 'pragma' _not_ 'pragmata'?
+22:46:43 <geekosaur> koz_, it's been done. the reactions weren't pretty
+22:47:18 <koz_> But I guess the plural of 'house' isn't 'hice' either so yeah.
+22:47:33 <MarcelineVQ> Hoose
+22:47:56 <geekosaur> come to think of it, anyone who's not a math nerd says "schemas" too. (see database management systems)
+22:47:57 <MarcelineVQ> if you pronounce it Hoose it's already a plural form
+22:48:28 <koz_> geekosaur: Linguistics folks (and some anthropologists) use 'schemata'. Folks who study language teachign academically also.
+22:48:40 <koz_> (I actually know that plural from the last option)
+22:49:53 <MarcelineVQ> schemoose
+22:50:04 <koz_> MarcelineVQ: That sounds like a verb.
+22:51:03 <EvanR> way ahead of you, any word ending in a vowel can do it. burritota, pizzata, shoeta
+22:51:27 <geekosaur> frittatata?
+22:51:30 <koz_> EvanR: Any word ending in 'ma' is the usual heuristic for me.
+22:51:35 <koz_> So 'schema' and 'pragma'.
+22:51:38 <EvanR> yes frittatatata
+22:51:44 <koz_> (lemma too I guess)
+22:51:49 <infinity0> Prelude> :kind! (':)
+22:51:53 <infinity0> <interactive>:1:2: error: Operator applied to too few arguments: :
+22:52:03 <EvanR> but first, we need 12 lemmata
+22:52:08 <infinity0> why doesn't this say k -> [k] -> [k] ?
+22:52:18 <infinity0> (i have datakinds, polykinds, typeoperators switched on)
+22:52:23 <koz_> EvanR: Yeah, that's actually a thing I might have to write in my thesis.
+22:52:27 <jle`> :k '(:)
+22:52:28 <lambdabot> a -> [a] -> [a]
+22:52:32 <jle`> ^ infinity0 
+22:52:44 <jle`> i know, right
+22:53:05 <koz_> EvanR: As an aside, if I ever meet a group of people named Emma, they shall forever be known as Emmata.
+22:53:12 <koz_> This has yet to happen.
+22:53:15 <koz_> But it must.
+22:53:16 <MarcelineVQ> "lists being special was a mistake" -bruce willis
+22:53:17 <infinity0> jle`: ah right thanks
+22:53:35 <jle`> that list? albert einstein.
+22:53:48 <infinity0> hm so how can i define a poly-kinded heterogenous list
+22:53:56 <MarcelineVQ> 'That list? You guessed it. Frank Stallione!'
+22:54:00 <koz_> infinity0: First, you cry.
+22:54:07 <koz_> Then, you check out fixed-vector-hetero.
+22:54:10 <koz_> Then you cry more.
+22:54:16 <koz_> (seriously, I've been there)
+22:54:28 <cocreature> then you ask yourself what you are even doing and go back to the good old homogenous list
+22:54:30 <EvanR> '[] heres one
+22:54:48 <mniip> EvanR, it's monokinded though
+22:54:49 <koz_> cocreature: I haven't forgotten about the on-stream song I gotta sing you.
+22:54:53 <EvanR> :k '[]
+22:54:53 <infinity0> well actually each element is of the same kind
+22:54:54 <lambdabot> [k]
+22:55:18 <cocreature> koz_: glad to hear that!
+22:55:36 <infinity0> basically the type param should be [k] rather than [*]
+22:55:53 <cocreature> infinity0: the lifted version of [] should already give you that
+22:56:02 <koz_> I'm deliberately gonna do it right at the start and pick the most cringey melody possible. Current thought leader is 'Hit Me Baby One More Time'.
+22:56:31 <koz_> Although I guess 'Friday' would also work.
+22:58:20 <EvanR> oh
+22:58:36 <EvanR> you want each element to possibly have a different kind? O_o
+22:58:47 <infinity0> cocreature: hm i thought so but this code https://repl.it/repls/RashBitesizedTelecommunications gives me "Data constructor ‘:::’ constrains the choice of kind parameter: k ~ *" in GHC 8.4.3
+22:58:56 <infinity0> on that website it's using GHC 8.0 with a different error
+22:59:52 <EvanR> youll have to parameterized it by a list of kinds, which conveniently will have kind Type itself
+23:01:23 <infinity0> EvanR: no each element should have the same kind, the problem is i'm doing some constraint-based unification on two HLists one which has kind [*] and one which has kind [* -> *]
+23:01:28 <cocreature> infinity0: GHC also tells you what you need to do to allow this definition: enable TypeInType
+23:01:35 <infinity0> i think the problem is it's trying to unify against HNil and getting confused
+23:01:46 <EvanR> so you need like a type level FunList
+23:01:46 <infinity0> yes i tried that, and now am getting more errors
+23:02:15 <cocreature> infinity0: one error is easy to fix, import Data.Kind and replace * with Type
+23:02:38 <cocreature> infinity0: the other error is that sequenceLoad is broken. you can’t have a list with values of kind * -> *
+23:02:43 <cocreature> values always have kind *
+23:03:28 <infinity0> the values are of type HList fs and HList xs and it's fs that has kind [* -> *], so i should be ok?
+23:04:02 <cocreature> fs has kind [* -> *] so the individual values in the HList fs will have kind * -> *
+23:05:04 <infinity0> so how do i express wanting to have a HList of functions
+23:06:35 <cocreature> it looks like you want to make a type parametrized by the codomain of each function (which is identical) and a list of the domains for the individual functions
+23:07:59 <infinity0> yes i think the kind rabbit hole might have been a distraction from what i was trying to do originally, let me update the paste
+23:09:28 <infinity0> ok there we go, it's a slighty different error which i was trying to fix by annotating stuff with * -> * but i guess that was the wrong approach
+23:11:15 <sshine> what am I missing:
+23:11:21 <sshine> @pl \(score, letters) -> L.map (first toLower . (,score)) letters
+23:11:22 <lambdabot> (line 1, column 47):
+23:11:22 <lambdabot> unexpected ','
+23:11:22 <lambdabot> expecting expression
+23:11:38 <glguy> You can't write: (,score)
+23:11:57 <sshine> oh, ok.
+23:12:03 <cocreature> infinity0: how about something like https://gist.github.com/cocreature/d1dc53fadaeeb15d461d0d0338c18ca9
+23:12:23 <geekosaur> it's an extension (TupleSections) which @pl doesn't support
+23:13:34 <infinity0> cocreature: i had that originally but i was trying to do a different more generic solution
+23:14:04 <infinity0> i thought it might be a bit messy exposing FunList in the API, especially since i also need the countepart with cods::[Type] and dom::Type
+23:14:31 <infinity0> people have to remember to use FCons and whatever, instead of just a unified ::: if this all worked just with HList
+23:14:33 <cocreature> you probably don’t need FunList, give me a minute
+23:18:00 <trcc> Eta seems pretty cool. This will be my opportunity to write "haskell" at work! But I guess it will have quite an impact on regular Haskell
+23:19:05 <koz_> trcc: My main wish is that I can use Eta to write Android apps.
+23:19:39 <sshine> trcc, what's Wta?
+23:19:43 <sshine> s/Wta/Eta/
+23:19:45 <cocreature> ah no, GHC doesn’t like my idea :(
+23:19:53 <trcc> sshine: Haskell-like for the JVM
+23:20:06 <trcc> eta-lang.org
+23:20:29 <koz_> :t zip3
+23:20:30 <lambdabot> [a] -> [b] -> [c] -> [(a, b, c)]
+23:21:46 <sshine> trcc, so it's enough of a Haskell-like that they serve Haskell's Servant as an example of something that works in Eta!
+23:22:01 <sshine> koz_, it clearly should have been named ziiip.
+23:22:14 <trcc> sshine: as I understand it, you can use most haskell packages
+23:22:26 <sshine> trcc, I'm impressed.
+23:22:41 <trcc> Me too. Cannot wait for an opportunity to use it.
+23:22:44 <koz_> sshine: Wait, but zip isn't named 'ziip'.
+23:23:05 <koz_> So wouldn't zip3 be named 'ziip' in your approach?
+23:23:16 <koz_> 'ziiip
+23:23:19 <koz_>  would be zip4./
+23:23:28 <sshine> koz_, I agree to disagree.
+23:28:08 <infinity0> cocreature: what was your idea, out of interest?
+23:28:27 <infinity0> i'm giving up for now and i'll just stick with the FunList-related thing
+23:29:01 <infinity0> i had trouble defining StructOf earlier too, until i had the realisation of doing it as a data family instead of a type family. but i don't think i can write LoaderAll in terms of a data family here
+23:30:05 <cocreature> infinity0: I wanted to write a TypeFamily "MakeFun cod (doms :: [Type])" that gives you the list of function types and then use HList (MakeFun r xs) instead of FunList
+23:30:15 <infinisil> hi
+23:30:36 <cocreature> infinity0: the problem is that GHC can’t deduce xs ~ '[] from MakeFun r xs ~ '[] and I wasn’t able to get it to do that even with an injectivity annotation
+23:31:00 <infinity0> cocreature: heh yes i ran into that just a few days ago with an older variant of this https://ghc.haskell.org/trac/ghc/ticket/10833#comment:12
+23:31:10 * infinisil was hoping he'd get the highlight steal
+23:31:24 <cocreature> you might be able to throw in another type family or something like that to enforce that but I’m out of time for playing around with that :)
+23:32:22 <infinity0> yeah i've spent too long on this sort of thing in the past few days too. but i think i better understand what the limits are now
+23:43:07 <trcc> koz_: https://brianmckenna.org/blog/eta_android

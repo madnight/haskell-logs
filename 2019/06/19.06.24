@@ -1,0 +1,376 @@
+00:00:08 <fresheyeball> so typeclasses
+00:00:16 <fresheyeball> the compiler picks the implimentation based on the type
+00:00:23 <dminuoso> fresheyeball: Can you perhaps show the related code?
+00:00:34 <nshepperd> it sounds like you *would* want (), except aeson's FromJSON instance for () is daft and checks for an empty array instead of just ignoring the input
+00:00:44 <fresheyeball> right
+00:00:46 <dminuoso> fresheyeball: To me it still sounds like you shouldnt be returning anything at all.
+00:01:02 <dminuoso> fresheyeball: The aeson parser allows you to error out.
+00:01:10 <dminuoso> So not erroring out carries the meaning of "this was successful"
+00:01:10 <fresheyeball> its not an error
+00:01:21 <dminuoso> 08:59:22 fresheyeball | [06:54:45] "junk means success"
+00:01:32 <dminuoso> If all you want to communicate is "success", then communicate this by simply not failing.
+00:01:36 <fresheyeball> so lets say I have a thing like this
+00:01:58 <fresheyeball> data ServerObject = SO { json :: ByteString, ... }
+00:02:16 <fresheyeball> and I have some functions that have useful logic expecting that to be valid json
+00:02:19 <fresheyeball> like this
+00:02:47 <fresheyeball> myUsefulThink :: FromJSON a => ServerObject -> (a -> Thang) -> Thang -> Thang
+00:03:15 <fresheyeball> the myUsefulThink function uses decode, because its normally part of the logic
+00:03:23 <fresheyeball> I guess I could take the parser as an argument
+00:03:34 <fresheyeball> but I already have lots of code using the typeclass to pass that arg for me
+00:03:41 <fresheyeball> this one time I KNOW its going to be trash
+00:03:56 <fresheyeball> and I want decode to be a no op
+00:04:43 <dminuoso> fresheyeball: What do you mean by `no op`?
+00:05:05 <fresheyeball> ultimately, if I was taking the parser as an argument, instead of using the FromJSON constraint
+00:05:18 <fresheyeball> I would pass in (const $ return ()) as the parser
+00:05:43 <nshepperd> you mean there are times that you call myUsefulThink when you don't need anything out of the json
+00:05:44 <fresheyeball> but instead my code uses the FromJSON constraint instead of taking an arguement of the parser
+00:05:58 <fresheyeball> there is ONE time
+00:06:07 <dminuoso> fresheyeball: Const is your friend!
+00:06:16 <fresheyeball> do tell
+00:06:18 <nshepperd> you want to write 'myUsefulThink serverObject (\_ -> foo) bar'
+00:06:34 <fresheyeball> that is going to error out
+00:06:39 <fresheyeball> because it doesn't know the type of _
+00:06:41 <dminuoso> fresheyeball: So `FromJSON a => ServerObject -> (a -> Thang) -> Thang -> Thang` is parametrized over a FromJSON dict, right?
+00:06:42 <nshepperd> and the question is what should the type of that _ be, to satisfy the fromjson constraint
+00:06:57 <fresheyeball> nshepperd: you got it
+00:06:59 <nshepperd> without bothering to actually parse anything from the json
+00:07:13 <dminuoso> fresheyeball: So the simplest way would be to make up a `newtype Ignore a = Ignore`, write a trivial FromJSON for it, and choose that as your type.
+00:07:14 <nshepperd> normally that would be (), but the FromJSON instance for () is dumb
+00:07:29 <nshepperd> so you need to write your own () i guess
+00:07:34 <dminuoso> Or wait, perhaps just `data Ignore = Ignore`
+00:07:38 <dminuoso> nshepperd: Indeed.
+00:07:40 <fresheyeball> nshepperd: is there a problem with using `Void` for this?
+00:07:50 <fresheyeball> I had this
+00:07:53 <fresheyeball> data Ignore 
+00:07:53 <nshepperd> you don't want Void
+00:07:55 <dminuoso> fresheyeball: Void is the wrong type then
+00:07:59 <fresheyeball> ok
+00:08:25 <nshepperd> Void is for the impossible; in this case what you have is 'very possible but boring'
+00:08:41 <fresheyeball> nshepperd: I also like the Void is no cost
+00:08:49 <dminuoso> fresheyeball: `data Ignore = Ignore; instance FromJSON Ignore where parseJSON _ = pure ()`
+00:09:16 <fresheyeball> but I guess the slightly costy was is better
+00:09:56 <dminuoso> oops
+00:10:01 <nshepperd> Void isn't really no cost. creating an 'error' thunk costs as much as making any other data constructor
+00:10:01 <dminuoso> I meant `... parseJSON _ = pure Ignore` of course.
+00:10:40 <dminuoso> fresheyeball: ^- this will give you the semantics you are asking for. The `Ignore` instance will simply ignore its input and provide instant success with no information attached to it.
+00:11:04 <nshepperd> Ignore will probably be no cost if it's inlined. but anyway that doesn't really matter, the cost is so trivial
+00:12:13 <fresheyeball> yeah
+00:14:13 <dminuoso> fresheyeball: You can always think of `unit` and all things isomorphic to it as representing `no information`. It's equivalent to the confusingly named `void` in say C or C++, where `void f(int) { ... }` can be thought of as `f :: Int -> ()` - it produces a result but one that has no information.
+00:17:59 <fresheyeball> dminuoso: so I now have a module Data.Ignore that has the data Ignore = Ignore type and does not export the constructor
+00:18:07 <fresheyeball> good enough for me :)
+00:27:15 <nshepperd> why not export the constructor
+00:27:35 <fresheyeball> nshepperd: because you should never need to evaluate it
+00:27:56 <nshepperd> but you need to make them
+00:28:23 <fresheyeball> exclusively to ignore
+00:28:40 <nshepperd> that was the whole point of giving it a FromJSON instance
+00:28:48 <nshepperd> hiding the constructor doesn't do anything
+00:28:52 <dminuoso> fresheyeball: You are conflating things.
+00:28:57 <dminuoso> fresheyeball: Evaluating () is not harmful.
+00:29:27 <fresheyeball> I agree its not harmful
+00:29:33 <fresheyeball> its just contrary to my semantic
+00:29:54 <dminuoso> nshepperd: For what its worth, the FromJSON instance would be in Data.Ignore, the constructor wouldn't be useful anyway.
+01:37:37 <merijn> So...apparently (one of) the winners of this years obfuscated C contest is...a Haskell compiler?
+01:37:55 <merijn> I'm intrigued...can't wait until the sources are released
+01:38:14 <Ferdirand> a haskell compiler written in C ?
+01:38:37 <Ferdirand> that must be quite the sight
+01:39:26 <merijn> Ferdirand: A Haskell compiler written in C...for the International Obfuscated C Contest ;)
+01:39:51 <cocreature> merijn: a haskell compiler written in C? some people really love pain …
+01:39:59 <merijn> cocreature: ...for IOCCC
+01:39:59 <Ferdirand> so what does it do, it subltly breaks the type system in a way that you can launch missiles without unsafePerformIO ?
+01:40:20 <merijn> cocreature: Also, everyone who submits to IOCCC loves pain
+01:40:27 <merijn> Ferdirand: You're thinking of the underhanded C context
+01:40:28 <cocreature> merijn: I’m scared of looking at the source (once it’s released)
+01:40:31 <merijn> s/context/contest
+01:40:44 <Ferdirand> ah, yes
+01:40:57 <jgt> [in spooky voice] I heard it introduces JavaScript's idea of equality to Haskell!
+01:41:24 <merijn> jgt: That already exists
+01:41:28 <merijn> jgt: See acme-php
+01:41:31 <merijn> @hackage acme-php
+01:41:32 <lambdabot> http://hackage.haskell.org/package/acme-php
+01:41:43 <merijn> (For proper enjoyment, please view the source, rather than docs)
+01:43:55 <Ferdirand> data Bool = TRUE | FALSE | FILE_NOT_FOUND
+01:44:01 <Ferdirand> i feel very old for understanding that reference
+01:44:23 <merijn> One of last years winners: https://ioccc.org/2018/yang/prog.c
+01:45:04 <cocreature> merijn: send help, I clicked on the docs of acme-php https://hackage.haskell.org/package/acme-php-0.0.5/src/docs.html
+01:46:33 <merijn> ...I didn't even know that happened
+01:46:42 <merijn> It used to have proper (if useless) hackage docs
+01:55:47 <jgt> f :: a -> b
+01:56:13 <jgt> error: Unexpected T_PAAMAYIM_NEKUDOTAYIM in pattern: f
+01:56:19 <jgt> merijn: plz help
+01:57:38 <merijn> :)
+01:59:32 <jgt> I like that it depends on acme-left-pad. I should have written an acme-is-thirteen.
+02:02:23 <merijn> @hackage acme-everything
+02:02:23 <lambdabot> http://hackage.haskell.org/package/acme-everything
+02:03:26 <Taneb> This is reminding me that I never got around to publishing my super-fast property testing library, acme-onecheck
+02:09:18 <tdammers> I would probably one-up you and public acme-zerocheck, the even faster property testing library where your tests will always pass
+02:09:55 <Taneb> :P
+02:10:28 <hexagoxel> nah, in haskell we ensure that the tests _compile_
+02:10:35 <Taneb> acme-omegatest, where the tests always fail
+02:16:04 <merijn> I've been tempted to write a fuckit-hs template haskell library that would generate random haskell code and check if tests passed, so you'd only have to write a type signature and tests ;)
+02:16:17 <merijn> If anyone is motivated, you have my blessing to steal that and implement it :p
+02:16:52 <cocreature> sounds like you’ve reinvented program synthesis :)
+02:30:16 <gentauro> merijn: so "real probabilistic programming" :P
+02:31:20 <tdammers> real_probabilistic_programming_ex2() // this time we got it right, I swear
+02:35:51 <jgt> Angular version 8.0.0 -- This time it's definitely final, until the next time.
+04:23:15 <cocreature> do inline type signatures e.g. (1 :: Int) have a special name? expression type signatures or something like that?
+04:23:37 <merijn> "type annotation"?
+04:24:11 * cocreature facepalms
+04:24:14 <cocreature> thanks merijn :)
+04:24:36 <merijn> Although I suppose they're technically all type annotations
+05:00:14 <Synthetica> Is there a reason to strongly prefer any of `data Foo = Bar Int | Baz (NonEmpty Foo)` , `data Foo = Bar Int | Baz Foo Foo, or `data Foo = Bar Int | Baz (Pair Foo)` over the others? (Given that Pair is a 2-length vector)
+05:01:42 <phadej> Synthetica: depends on what you'll do with it.
+05:04:06 <Synthetica> Let me rephrase, what are the upsides and downsides of each variant? In my domain, they semantically boil down to the same thing
+05:05:28 <Ferdirand> with the NonEmpty, won't you have to write off the n=1 and n>2 cases every time you match it ?
+05:08:11 <merijn> tbh, the difference is marginal
+05:08:21 <bollu> hackage docs are down?
+05:08:21 <bollu> http://hackage.haskell.org/package/containers-0.6.2.1/docs/Data-Set.html
+05:08:22 <merijn> I'd just use whatever is most convenient
+05:08:25 <bollu> "Not Found: There is no documentation for containers-0.6.2.1. See http://hackage.haskell.org/package/containers/docs/Data-Set.html for the latest version."
+05:08:36 <merijn> bollu: They haven't been generated yet
+05:08:44 <bollu> ah. 
+05:08:47 <bollu> well, dang
+05:08:57 <merijn> Just click to the previous version?
+05:09:06 <merijn> bollu: New version was uploaded this morning
+05:09:19 <Synthetica> merijn: Which should I prefer if I'm writing a general-purpose library?
+05:09:42 <merijn> I'd be tempted to just use a tuple, tbh
+05:10:16 <Synthetica> Even if Foo had a few arguments?
+05:16:59 <lyxia> I'm not sure you're going to get any meaningful answers with such vague objectives.
+05:18:42 <Synthetica> lyxia: That's fair, I guess I'll try some things and see what works best
+05:33:48 <merijn> Synthetica: The great thing about types is that if you wanna try something later, you just change the definition and then fix the compile errors one by one :p
+05:38:27 <dminuoso> merijn: How would a tuple help?
+05:40:54 <merijn> dminuoso: I didn't say there's a reason? :p
+06:12:20 <statusfailed> I have a function "choice :: MonadLogic f => [a] -> f a" which for f = [] is just the identity
+06:12:23 <statusfailed> can I tell GHC this somehow?
+06:12:33 <statusfailed> it runs about 500x slower for some reason otherwise
+06:13:28 <statusfailed> (that is, 500x slower than just specialising all my code to [])
+06:13:41 <statusfailed> if it matters the function is this: choice = foldl interleave mzero . fmap pure
+06:13:49 <statusfailed> maybe i'm doing something stupid there, I don't know
+06:14:27 <jle`> statusfailed: you can use rewrite rules for things like this
+06:14:53 <jle`> 'base' does it, for instance, for fromIntegral :: Int -> Int
+06:14:59 <statusfailed> oh nice
+06:15:08 <statusfailed> thanks!
+06:15:12 <jle`> it's easy to write code that breaks unexpectedly this way, of course
+06:15:18 <jle`> so it's only meant to be used as a low-level optimization
+06:15:38 <jle`> but yeah, that's a road you can look down for this in specific :)
+06:16:27 <statusfailed> jle`: yeah I think it's more likely I didn't understand why "MonadLogic" is behaving this way :
+06:16:30 <statusfailed> heh
+06:16:39 <statusfailed> but rewrite rules are what I asked for :D
+06:20:42 <hyperisco> Warning: foldl detected! Try foldl'?
+06:21:31 <statusfailed> hyperisco: good shout, but no change- I actually switched from foldl' to foldl in case MonadLogic was relying on laziness or something
+06:22:37 <hyperisco> I could imagine it being 500x times slower on specifically [], but on the average input? Wow.
+06:23:03 <statusfailed> no, not on average
+06:23:13 <statusfailed> actually it's about the same on random datastructures
+06:23:24 <hyperisco> Are you measuring [] specifically?
+06:23:27 <statusfailed> but a specific one that I would expect to be very fast is for some reason very slow
+06:23:32 <statusfailed> by [] I meant the type, not the value
+06:23:47 <hyperisco> Oh.
+06:25:01 <hyperisco> You can use the SPECIALISE pragma to produced a specialised version for []. As to why it is so much slower I do not know, but generally speaking an unspecialised function is slower than a specialised one
+06:25:27 <hyperisco> I am guessing that when specialised, GHC can take advantage of various list fusion optimisation things.
+06:26:43 <statusfailed> ahh I think I figured it out actually
+06:27:12 <statusfailed> "interleave" basically is like breadth first search across all the items in the list
+06:27:23 <statusfailed> whereas I guess the >>= of [] is more like depth first search?
+06:27:46 <statusfailed> I had a slightly different condition for the input to "choice" to one that was checked later on
+06:27:48 <hyperisco> How can you distinguish those about a list? The branching factor is 1…
+06:27:58 <statusfailed> and so "choice" ended keeping track of a bunch more branches 
+06:28:04 <statusfailed> hyperisco: wym?
+06:28:16 <hyperisco> What is "wym"?
+06:28:44 <statusfailed> "what you mean"
+06:28:47 <statusfailed> I didn't understand :D
+06:29:14 <statusfailed> distinguish what about a list? 
+06:29:15 <hyperisco> What is the difference between depth-first and breadth-first in a list?
+06:29:50 <statusfailed> I have only a hand-wavey understanding, but it's about using [] for logic search
+06:30:14 <statusfailed> you can either "expand" the first item in the list as much as possible searching for an answer, then proceed to the second
+06:30:20 <statusfailed> or you can fairly do them all in parallel, one step at a time
+06:30:23 <statusfailed> does that make sense?
+06:30:51 <hyperisco> :t interleave
+06:30:53 <lambdabot> error: Variable not in scope: interleave
+06:31:02 <statusfailed> it's part of the logict library
+06:31:11 <statusfailed> http://hackage.haskell.org/package/logict-0.6.0.3/docs/Control-Monad-Logic-Class.html
+06:31:17 <hyperisco> I am guessing it has the same definition I wrote 6 years ago
+06:32:09 <statusfailed> can't help you there I'm afraid, I don't know how this library works under the hood
+06:33:01 <hyperisco> I'd have to see what the list instance is
+06:33:14 <hyperisco> I have a suspicion it is a poor choice for what you're doing
+06:33:51 <statusfailed> the list instance only specifies msplit
+06:34:04 <statusfailed> what I'm doing is a bit like a sudoku search, it fits pretty well
+06:34:25 <hyperisco> Well, that's too much noise to figure out.
+06:34:36 <statusfailed> I figured out the problem anyway, I just have to bring the condition that invalidates the branch "earlier" in the program
+06:34:45 <hyperisco> [1,2,3] `interleave` [4,5,6] `interleave` [7,8,9]  is what?
+06:35:34 <hyperisco> That's not really figuring out the problem though is it… that's making a guess and observing the symptoms go away.
+06:38:51 <hyperisco> Okay, it looks to me like interleave is flawed, but it'd be more sure to try some inputs and outputs
+06:40:46 <hyperisco> I think it'll produce  [1,7,4,8,2,9,5,3,6]
+06:41:38 <hyperisco> What's the problem… the problem is that elements are not drawn fairly from every sublist.
+06:43:42 <hyperisco> "interleave ensures fair
+06:43:42 <hyperisco>  consideration of both branches of a disjunction"
+06:43:51 <hyperisco> The key there is "both branches", not "n branches"
+07:37:02 <Jinna> I am running `stack build --file-watch` but I can’t see any output. Is that expected behaviour when docker is enabled in my stack.yaml?
+07:37:42 <mightybyte> If anyone here is interested, Compose Conference videos are streaming live today at https://www.youtube.com/channel/UC0pEknZxL7Q1j0Ok8qImWdQ
+07:44:50 <Taneb> mightybyte: thanks!
+07:46:16 <alx741>  Jinna: I don't think it is, for it to build in docker you have to `stack build --docker`
+07:55:55 <solonarv> Axman6: oh, actually: absurd1 x = case x of {}; -XEmptyCase makes this very clean
+07:55:57 <dminuoso> `v :: IO (Maybe T)` `f :: T -> IO U`, is there a compact way to turn this into `IO (Maybe U)` without a monad transformer that Im not seeing?
+07:56:00 <solonarv> statusfailed: in this case you can write a very simple {-# RULE "choice-[]-is-id" choice = id #-}
+07:56:10 <solonarv> (at least, if that rule is actually true)
+08:00:36 <dminuoso> Oh I guess I could just do `maybe (pure Nothing) f`
+08:03:10 <XorSwap> quick question, assuming `y` is an infinite list, is `head y: map (:[]) (tail y)` the same as `map (:[]) y`?
+08:04:07 <Taneb> XorSwap: no, the first one is, I think, a type error
+08:04:22 <Taneb> > let y = repeat 0 in head y : map (:[]) (tail y)
+08:04:24 <lambdabot>  error:
+08:04:24 <lambdabot>      • No instance for (Num [Integer]) arising from a use of ‘e_10’
+08:04:24 <lambdabot>      • In the expression: e_10
+08:04:41 <XorSwap> shoot you're right, should have checked there first, thanks!
+08:05:16 <Taneb> XorSwap: the similar [head y] : map (:[]) (tail y) is the same as map (:[]) y, though, by definition of map
+08:07:29 <sm[m]> mightybyte: cool, thanks
+08:07:31 <XorSwap> and that's exactly what I was looking for, cheers
+08:11:50 <Jinna> Doing `stack build` works just fine. In the background it runs the docker container and I see all compiler outputs.
+08:12:12 <Jinna> But `stack build --file-watch` is just hanging, no outputs. And when I save a file it doesn’t react.
+08:14:20 <[Leary]> % :t (=<<) . traverse -- dminuoso
+08:14:21 <yahb> [Leary]: (Monad m, Traversable t) => (a -> m b) -> m (t a) -> m (t b)
+08:15:48 <sm[m]> Jinna: tried latest stack ?
+08:16:47 <Jinna> sm[m]: not yet, still 1.9.3. But will give the newer one a shot.
+08:18:44 <Jinna> Nope, also does not work. I hit enter, the cursor jumps into the next line and then it is not reacting at all. It should print output tho.
+08:20:27 <Jinna> sm[m]: But can you confirm that it _should_ work, even if  for `enable: true` is set?
+08:23:42 <Jinna> Hmm. It seems that just hitting <Enter> makes it run.
+08:29:23 <sm[m]> Jinna: I have no experience using it with docker, I just remembered something about it in the recent release notes
+08:30:35 <alx741> latest stack don't let you make a container for the app, but it still lets you build the app in docker
+08:41:44 <hjt> so i implemented a double-ended queue in haskell for an exercism.io exercise, and it works, but im not sure if it's "good" haskell
+08:41:58 <hjt> if anybody has any comments then it'd be appreciated! https://pastebin.com/pgxcVtQP
+08:42:39 <Welkin> just use a normal queue ith two stacks
+08:42:57 <Welkin> it can work as a deque if you add two extra functions
+08:43:06 <Welkin> data Queue a = Queue [a] [a]
+08:50:07 <Jinna> I have n Maybe values. How can I fold/combine them into one single n-tuple or Nothing value?  Maybe something like `traverse`?
+08:50:45 <Welkin> sequence
+08:50:52 <Jinna> foo mv1 mv2 mv3 => (v1, v2, v3)    if all maybe values mv1 to mv3 are Justs. If a single one is Nothing I want a Nothing.
+08:51:00 <Welkin> > sequence [Just 3, Just 4, Just 9]
+08:51:02 <lambdabot>  Just [3,4,9]
+08:51:23 <Jinna> Yes good, that’s it.
+08:51:26 <lavalike> yahb: :t sequence @Maybe @[Int]
+08:51:34 <lavalike> % :t sequence @Maybe @[Int]
+08:51:34 <yahb> lavalike: ; <interactive>:1:18: error:; * Expected kind `* -> *', but `[Int]' has kind `*'; * In the type `[Int]'; In the expression: sequence @Maybe @[Int]
+08:51:34 <Jinna> thx
+08:51:42 <lavalike> % :t sequence @Maybe @[]
+08:51:42 <yahb> lavalike: Maybe [a] -> [Maybe a]
+08:52:00 <lavalike> I wish lambdabot did typeapplications
+08:52:07 <Welkin> that's a lot of junk
+08:52:10 <Welkin> :t sequence
+08:52:12 <lambdabot> (Monad m, Traversable t) => t (m a) -> m (t a)
+08:52:13 <Welkin> that's all you need to know
+08:52:31 <Jinna> works
+10:06:46 <Jinna> a) (\events event -> pure $ event:events)    or   b) ((pure .) . flip (:))   ?
+10:15:20 <dmwit> a
+10:17:51 <chewie[m]> > 1 + 1
+10:17:53 <lambdabot>  2
+10:58:56 <gentauro> Jinna: can't you just write a) and then pass it with the pointstyle tool? (iirc you can do it here)
+11:16:43 <aveltras> for those using emacs with dante here, what's the big selling point of dante vs bare haskell-mode ?
+11:23:43 <d34df00d> What's the right way to do an async computation that's essentially a server that's running `forever`? `wait`ing in the main thread and doing `cancel` leads to `wait` rethrowing the corresponding exception.
+11:23:52 <d34df00d> Which I could surely handle myself, but it seems wrong.
+11:31:35 <Synthetica> The HaTeX guide talks about "Pretty-print Haskell values in LaTeX", but I can't find it in the HaTeX guide. Any pointers?
+12:21:36 <argent0_> :q
+13:02:25 <ivegotasthma> hello, what's the preferred way to develop haskell on nixos?
+13:04:02 <corin[m]> I'm also curious about that!
+13:12:05 <infinisil> I'm usually using callCabal2nix to define the package, haskellPackages.shellFor for the nix-shell, and haskell-ide-engine with emacs as an IDE
+13:12:51 <infinisil> And cabal build/repl
+14:09:56 <Guest48582> hi
+14:43:21 <sicklorkin> > 1e6 / 100
+14:43:24 <lambdabot>  10000.0
+14:50:26 <noipmusp> Is there any easy way to use mtl's get/modify/state functions on record field (in case when state is record)? 
+14:51:04 <Rembane> noipmusp: gets is good. modify (\r -> r { ... })
+14:52:31 <noipmusp> But for "state", I have to write a function "state$FieldName$" for each field, right?
+14:52:57 <Rembane> What do you mean?
+14:53:05 <dmwit> :t state
+14:53:06 <lambdabot> MonadState s m => (s -> (a, s)) -> m a
+14:53:30 <dmwit> :t state $ \s -> (3, s { subForest = [Node () []] })
+14:53:31 <lambdabot> (Num a, MonadState (Tree ()) m) => m a
+14:54:17 <dmwit> (Possibly you are looking for the lens package. Not sure, though. Like Rembane, I don't really understand the question yet.)
+14:54:24 <noipmusp> But I have always lift subForest to record.
+14:54:43 <noipmusp> When I want to use state function.
+14:54:48 <dmwit> huh?
+14:54:56 <dmwit> What does "lift X to record" mean?
+14:56:41 <dmwit> Perhaps you'd better show us some code you don't like, and some hypothetical pseudocode that you do like.
+14:56:48 <Rembane> +1
+14:56:51 <boj> i think they are after gets/puts
+14:56:54 <dmwit> (I mean some working code that you don't like.)
+14:57:26 <boj> :t gets
+14:57:29 <lambdabot> MonadState s m => (s -> a) -> m a
+14:58:28 <dmwit> boj: What is puts? =)
+14:58:36 <boj> :t puts
+14:58:37 <lambdabot> error:
+14:58:37 <lambdabot>     • Variable not in scope: puts
+14:58:37 <lambdabot>     • Perhaps you meant ‘put’ (imported from Control.Monad.State)
+14:58:56 <boj> hmm, i thought there was an equivalent puts, my bad
+14:59:09 <boj> :t modify
+14:59:11 <lambdabot> MonadState s m => (s -> s) -> m ()
+15:30:51 <basic> is it just me or is ghcjs insanely hard to build?
+15:31:11 <basic> what would be the steps i need to do, clone, clone submodules, cabal install, makePackages?
+15:32:45 <phadej> basic: on ubuntu, i'd use https://launchpad.net/~hvr/+archive/ubuntu/ghcjs
+15:32:52 <phadej> otherwise, nix
+15:33:04 <phadej> i.e. avoid building from source at all costs
+15:34:50 * basic has no clue what nix is 
+15:35:22 <hpc> it's a package manager with some quite nice properties
+15:35:53 <basic> well okay, i'll give it a shot tomorrow
+15:36:03 <basic> thanks
+15:36:13 <basic> but, that i have problems buildding it from scratch is to be expected?
+15:36:28 <basic> did i get that right?
+15:48:23 <phadej> basic: it's quite specific task, takes time, and with troubleshooting you are almost on your own
+15:48:44 <phadej> thus I won't recommend, if you aren't really sure you can solve possible problems by yourself
+19:09:03 <alx741> hello all. I'm trying to update the dependencies in a project and I'm getting this error: http://sprunge.us/ddt6kt when building stm-2.4.5.1
+19:09:40 <alx741> it complains `always` and `alwaysSucceeds` aren't in scope, but the haddocks for that version have them
+19:12:01 <alx741> what gives? I'm running `cabal v2-build`
+19:23:28 <lyxia> your version of stm is too old for your ghc
+19:23:55 <lyxia> 2.5.0.0 mentions that these functions have been removed https://hackage.haskell.org/package/stm-2.5.0.0/docs/src/Control.Monad.STM.html
+19:25:59 <lyxia> it's odd though that you didn't get a complaint earlier, did you turn off upper bounds by any chance?
+19:35:44 <alx741> lyxia: oh! got it, thank you
+19:55:43 <jackdk> jle`: Is there any chance of HTraversable from hedgehog making it into functor-combinators and the giant blog post you wrote? Seems like it would fit
+20:06:35 <ullbeking> hey all, i don't have a problem, but i was just looking at my books and thought of something chit-chatty that is relevant...
+20:07:05 <maerwald> shoot
+20:08:10 <ullbeking> so, when i was first learning haskell, in about 1999 or so, we used the first edition of "haskell: the art of functional programming" by thompson.
+20:09:07 <ullbeking> but when i was browsing in the library, i found this beautiful book, "Introduction to Functional Programming" by Bird & Wadler.  it was so poetic and really just... lovely to read and study from.
+20:10:06 <ullbeking> i'm reacquainting myself with haskell now, after a long separation, and i picked up a copy of "Introduction Functional Programming: Haskell Edition", which is the second edition of Bird & Wadler.
+20:10:46 <ullbeking> even though Haskell is my goal, i found the first edition which, iirc, used miranda, to be much more... idk... beautiful.  in a way?
+20:11:25 <ullbeking> has anybody else here read both editions of bird & wadler and actually prefers the 1st ed. over the 2nd ed.?
+20:11:43 <ullbeking> 1st: https://www.amazon.co.uk/Introduction-Functional-Programming-International-Computing/dp/0134841972/
+20:11:55 <ullbeking> 2nd: https://www.amazon.co.uk/Introduction-Functional-Programming-International-Computing/dp/0134841972/
+20:12:14 <ullbeking> ooops
+20:12:20 <ullbeking> 2nd is really: https://www.amazon.co.uk/Introduction-Functional-Programming-Prentice-Hall-Computer/dp/0134843460/
+20:12:54 <ullbeking> it's just a bit of light conversational fluff that i thought i'd blow into the wind
+20:43:24 <jle`> jackdk: i actually have an HTraversable in the test module heh. i decided to keep the scope small, otherwise it's easy to go pretty deep into it and being more than just functor combinators
+20:43:40 <jle`> but also HTraversable from hedgehog is the wrong kind
+20:43:45 <jle`> * htraverse
+20:44:32 <jle`> the main purpose of functor-combinators was not to add any 'new' functionality to the ecosystem, but just re-export what was already out there in a nice unified way
+20:44:52 <jle`> so i'm cautious of a small step that might blur the line
+20:46:48 <jle`> but...i already do have HBind in there for some reason.  HTraversable/HFoldable might just be something i end up adding if i'm bored :)
+20:51:21 <jackdk> any plans to turn that around, so everything else depends on functor-combinators?
+20:52:58 <jle`> i doubt it :) functor-combinators would have to basically become a ghc boot package, since a lot of functor combinators comes form *transformers*
+20:53:55 <jle`> 'free' or 'kan-extensions', maybe.  but they are depended on by a lot of libraries
+21:00:31 <jackdk> it seems like there's a happy middle ground there where you don't become a boot package, but other people depend on you instead of reinventing machinery. maybe. What did you mean that hedgehog's HTraversable is of the wrong kind?
+21:00:45 <jle`> usually for something to get incorporated that deep, it has to have a long track record of being a useful abstraction that is worth the cost
+21:01:01 <jackdk> seems like a good rule of thumb :)
+21:01:18 <jle`> every abstraction has a cost, and we don't really know which ones are worth it yet :)
+21:01:27 <jle`> but in a few years if the library becomes well-tested then we'll have a better answer
+21:01:50 <jle`> jackdk: functor-combinator hfunctors are (* -> *) -> (* -> *)
+21:01:55 <jle`> take a functor, return a functor
+21:02:18 <jle`> hedgehog's htraverse is (* -> *) -> *
+21:02:27 <jle`> take a functor, return...an inhabited type?
+21:02:47 <jle`> it's a different 'kind' of abstraction
+21:03:18 <jle`> those aren't 'functor combinators'; they might be described as functor-indexed types
+21:12:37 <monochrom> (* -> *) -> * sounds like the kind for a fixed point of a functor.
+21:13:56 <jle`> jackdk, monochrom: incidentally this is also the kind of the abstractions in the rank2classes library, and i don't fully understand why
+21:13:58 <jle`> https://hackage.haskell.org/package/rank2classes-1.3/docs/Rank2.html
+21:14:31 <jle`> the package doesn't have any instances other than basically proxy/const/identity
+21:15:10 <jle`> oh, hm, i think i see
+21:15:18 <jle`> they're meant to be used with GADTs
+21:15:40 <jle`> and existential type wrappers
+21:15:45 <monochrom> Hey at least it splits <*> from pure. :)
+21:16:49 <jle`> ooh wait, i think i see. not GADTs, but rather that 'higher-kinded data' pattern
+21:17:04 <jle`> data Person f = Person { age :: f Int, name :: f String }
+21:17:38 <jle`> neat. there's another library i saw doing something similar, barbie
+21:17:47 <jle`> * barbies
+21:18:48 <monochrom> Oh God, barbies = many clothes to change to
+21:19:29 <jle`> the name is both delightful and horrifying
+21:20:48 <monochrom> Math is hard, let's go for category theory.
+21:21:31 <monochrom> But "Data.Barbie.Bare" is golden.
+21:22:11 <monochrom> Anyone want to make a Ken library too? >:)
+21:22:24 <jle`> ken-extensions
+21:22:26 <maerwald> bstripFrom
+21:22:37 <maerwald> wait, is this of type Stripper?
+21:23:16 <maerwald> seems it's just Bare Identity, lol
+21:39:53 <jackdk> ah hm, the main point of hedgehog's HTraversable is to swizzle data types around, turning Var Symbolic x into Var Concrete x

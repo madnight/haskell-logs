@@ -1,0 +1,866 @@
+00:11:17 * hackage linear-circuit 0.0.0.1 - Compute resistance of linear electrical circuits  https://hackage.haskell.org/package/linear-circuit-0.0.0.1 (HenningThielemann)
+00:47:06 <coldpress> glguy: thank you very much for the th-abstraction implementation, but I'm a newb, and not sure where to start in converting gadtCs into normalCs... what do I do after running reifyDataType?
+01:19:39 <hpyCdr> is there any way to mark / disallow reexports in a module?
+01:23:20 <hpyCdr> I keep splitting a module into smaller ones. And if the "top" module still uses the separated one, the initial exports are now all reexports
+01:24:06 <hpyCdr> I then have to check myself, which functions were moved and drop those from the export list
+01:45:19 <fen2> is it slower to use check isLast :: f a -> Bool and then use get :: f a -> (a,f a) than to implement getS :: f a -> (a,Maybe (f a))
+01:45:43 <fen2> is the if statement over the Bool slow?
+01:46:28 <fen2> does the compiler cache the constructor it pattern matches over to check isLast, or does it have to do that twice?
+01:48:46 <fen2> it makes most sense that a class providing get is a superclass to one providing the isLast check, so that the getS is then just a function with that class as a constraint, instead of a class defining funciton. but it might be slow to use this isLast check each time get is called
+01:50:16 <fen2> it might be faster to demand getS as a class function of the subclass of Get (defined by get) and have the get function have a default in terms of GetS
+01:52:10 <fen2> but this style is only justified if its actually slower to do that check each time. and it might not be as nice a style as just requiering the user implements get and isLast, which would be better style (arguably) than requiering getS and isLast are implemented, and get then having a default, so that instance Get is empty if GetS is implemented
+01:53:48 <MarcelineVQ> In the vast majority if cases it's best to try all ways one can think of and then do actual benchmarking. Whether some boolean check or part of a result being Maybe are faster is entirely determined by how these values end up being used.
+01:54:00 <fen_> not sure how the compiler handles if then else statements and if it is reasonable to expect that it could do the isLast check without cost
+01:55:25 <fen_> MarcelineVQ. thanks, there sure are a lot of Maybes in the code, but was hoping that fmap over maybe is more reasonable to expect to have zero cost than the if statements
+01:56:45 <fen_> the compilation to core or benchmarking as a check could work sure, but these need to be accompanied by understanding whats going on in the compilation process.
+01:56:54 <MarcelineVQ> afaik constructors aren't free in general, which is why we have newtype and coerce, but finding out if a particular constructor matters in a specific case requires looking at the core that was produced from the use and benchmarking
+01:57:54 <MarcelineVQ> Someone with more experience than me could give you better pointers, this is all I can think of on the subject atm
+01:59:01 <fen_> that was more about if eg data Nonempty a = End a | Nonempty a (Nonempty a), then if the isLast check found Nonempty constructor instead of End, that it might cache this check so it wouldnt be more expensive than the pattern match used in getS
+02:01:11 <fen_> obviously that assumes the if statement in getS xs | not (isLast xs) = let (x,xs') = get xs in (x,Just xs')
+02:01:22 <fen_> is costless
+02:01:51 <fen_> well its not exactly an if statement, its a | conditional result 
+02:04:42 <fen_> isLast can be defined in terms of getS as isLast = (null . snd . getS)
+02:04:47 <fen_> > null Nothing
+02:04:49 <lambdabot>  True
+02:05:32 <fen_> but the systematic approach to the class hierarchy is just that get is defined in addition to isLast
+02:05:43 <fen_> but obviously if this is slower its not a good approach
+02:06:29 <fen_> thats about as much as can be said to explain, would be great if anyone had and intuition about how the compiler works here
+02:20:04 <MarcelineVQ> I'm having trouble nailing down the question being asked here but there's no such thing as a costless conditional in computing.
+02:22:09 <fen_> that was basically the irksome suspicion 
+02:22:32 <fen_> might not bother with the benchmark in that case
+02:22:38 <fen_> heres the code anyway;
+02:22:41 <[exa]> fen_: about the speed -- pattern matching and branching causes only relatively small overhead when compared to allocation of thunks and constructors
+02:22:53 <MarcelineVQ> consider that a pattern match is also a conditional
+02:23:22 <fen2> https://pastebin.com/mF3Xvxrm
+02:24:22 <fen2> ooh, this is nicer to read https://pastebin.com/raw/mF3Xvxrm
+02:24:29 <[exa]> fen_: in particular, allocating the Maybe may cost something if it's not inlined/inline-able, and allocating the (,) for result may also cost something (suggest you have 2 functions for that instead if you can't check whether the compiler actually inlines it out)
+02:25:32 <fen2> not sure quite what your referring to about 2 functions...
+02:26:59 <[exa]> your get :: ... -> (a, f a)  could be better as head :: ... -> a ; tail :: ... -> f a
+02:27:19 <[exa]> especially if you pattern-match that '...' is non-empty right before calling head/tail in the code
+02:27:26 <fen_> oops, one of the patterns of  getS1 is missing
+02:28:34 <fen_> oh right, this is another consideration about the cost of (,), had
+02:28:39 <fen_> had never thought of that
+02:29:24 <fen_> hmm, well the more complete code also introduces a pattern 
+02:29:54 <[exa]> anyway, class methods aren't inlined very easily, it requires specialization of the whole construction
+02:30:03 <fen_> so that its something like pattern matching on (:) instead of using head and tail
+02:30:40 <fen_> [exa]: previous benchmarks seemed to perform ok
+02:30:56 <fen_> compiling with -O2 seemed to make things fast
+02:31:09 <fen_> like, Nonempty folded as fast as a list
+02:31:23 <fen_> even with the Maybes and stuff
+02:31:27 <[exa]> chances are that ghc just reorganizes the thing into a good form
+02:31:48 <[exa]> can you eg. dump the optimized Core and see what was changed?
+02:32:15 <fen_> yeah, its really confusing to understand what it does though, to be able to rely on it. thats why this new consideration with an if statement or conditional pattern guard thing was concerning
+02:33:19 <fen_> [exa]: sure, did this for the other benchmarks and they inlined completely. just trying to think of a decent test case
+02:33:50 <MarcelineVQ> oh uhm, pattern matching, guards, and pattern guards are slightly different things
+02:33:50 <fen_> basically assuming thta th
+02:34:03 <fen_> that the Maybes are costless based on these previous benchmarks
+02:34:12 <MarcelineVQ> Though it is all pattern matching in the end
+02:34:51 <fen_> trying to avoid a hefty benchmarking process on the complete code by tackling it in sections
+02:35:36 <fen_> and yeah, this consideration kind of brings into question the fundamental class structure, so wouldnt want that change to propegate through the whole rewrite
+02:36:17 <fen_> that is, the choice between the 1 & 2 styles of the paste
+02:36:45 <fen_> 1 seems to be a nicer style, 2 seems safer by avoiding the isLast guard
+02:37:57 <[exa]> fen_: you can always smash the INLINE directive there, to be sure. :D
+02:39:47 * hackage mmtf 0.1.3.0 - Macromolecular Transmission Format implementation  https://hackage.haskell.org/package/mmtf-0.1.3.0 (zmactep)
+02:39:56 <fen_> heres the code with the typo corrected https://pastebin.com/raw/4KDriUZB
+02:40:57 <fen_> [exa]: wasnt sure if there was any question here, that style 2 is basically forced to avoid the slowness. 
+02:42:47 * hackage mmtf 0.1.3.1 - Macromolecular Transmission Format implementation  https://hackage.haskell.org/package/mmtf-0.1.3.1 (zmactep)
+02:44:43 <fen_> generally perfering the style that does not use defaultSignatures because it changes the way of thinking that was previously natural before this extension existed.
+02:46:04 <MarcelineVQ> it's hard to tell if you're asking or stating in your last 2 lines :X
+02:46:31 <fen_> the quarm here is that GetS isnt just Get + isLast, which seems natural, and instead the superclass Get is implemented by default in terms of the subclass GetS. and this subclass overwriting superclass implementations by default is a newer way of thinking
+02:47:13 <fen_> MarcelineVQ: well if they were both the same cost, which would you prefer?
+02:48:09 <fen_> its only annoying if this performance consideration forces a clumsy style
+02:50:42 <fen_> so really its not just a question of performance, its also a question of style, though this discussion only is possible if they are actually both equivalent in terms of performance 
+02:50:44 <MarcelineVQ> It's not a super helpful response but my preference would be avoiding classes as much as possible
+02:51:19 <fen_> yeah, thats not the goal here
+02:51:23 <MarcelineVQ> *avoiding inventing classes
+02:51:38 <fen_> they are not invented! they are fundamental 
+02:51:47 <fen_> thats why it would be good to fix the style 
+02:52:03 <fen_> which is obviously not fundamental 
+02:53:17 <MarcelineVQ> What sort of types do you have in mind to implement for this class?
+02:53:21 <fen_> and it would also be great if the compiler allows both styles by allowing the zero cost isLast check when performing get
+02:53:26 <MarcelineVQ> That is to say, what types come to mind right away
+02:53:34 <fen_> most of them
+02:53:52 <fen_> all traversables are isomorphic to one of them at least
+02:54:07 <fen_> its the basis of a pointers library
+02:54:08 <[exa]> fen_: btw did you see how they solve this in Data.Text?
+02:54:35 <fen_> is that something to do with specificity matching?
+02:54:38 <MarcelineVQ> hmm, what is the implementation of Get1/Get2 for [a] ?
+02:55:12 <fen_> MarcelineVQ: thats actually another subclass, where Get + isLast + empty
+02:55:30 <fen_> but the pointers are all nonempry
+02:55:44 <fen_> thats a theorem about zippers
+02:55:59 <fen_> as a one hole context they always "point" to a value
+02:56:10 <fen_> basically, they are comonads, so they always have extract
+03:00:07 <fen_> [exa]: how did they solve this in Data.Text?
+03:00:31 <elgoosy> hi, what is this operator (:=>) BackendRoute_Missing :=> Identity ()? Why can't i query it with :t (:=>)?
+03:02:03 <[exa]> fen_: not entirely sure but they have a lot of zero-cost function fusion, which seems helpful in your case
+03:03:59 <fen_> ok
+03:04:15 <fen_> ill do this benchmark then check
+03:14:18 <fen_> MarcelineVQ: see what I mean though? like even how its normally described, like Get + isLast + empty, its normal to think of subclasses as adding an extra function to the hierarchy, but the way with adding Maybes to the signature of get is equivalent, but more opaque, thats what is confusing about this choice of styles
+03:15:46 * hackage dunai-test 0.1.0.0 - Testing library for Dunai  https://hackage.haskell.org/package/dunai-test-0.1.0.0 (IvanPerez)
+03:19:26 <fen_> really cant see how checking isLast at each value of a fold would be zero cost, so it force this unconventional style of class hierarchy 
+03:24:08 <adius> Has anyone every implemented this in Haskell? https://apps.dtic.mil/dtic/tr/fulltext/u2/a066992.pdf
+03:24:35 <fen_> but then maybe the guard using isLast is equivalent to the 2 patterns that would be checked, ie End a or Nonempty x xs
+03:26:22 <fen_> adius: whats that? looks ancient! any idea how it compares to modern approaches?
+03:28:27 <adius> Yeah it is ancient, but just 3 years older than Haskell, so there's that 😜
+03:28:48 <saaffa> @search Samin Nosrat
+03:28:48 <lambdabot> Unknown command, try @list
+03:30:03 <fen_> adius: what about SQL, how does it compare?
+03:30:16 <adius> fen_: I can't make any statements about the intrinsics, but it looks like a straight forward functional syntax for performing database queries
+03:30:25 <adius> Which is definitely something I would like 😁
+03:31:02 <fen_> there is https://categoricaldata.net/fql/haskell.pdf
+03:31:24 <fen_> but it might be something totally different, it does not reference this previous work
+03:38:35 <adius> Plagiarism 😅 … some examples look eerily similar ^^
+03:49:30 <fen_> have compiled with -ddump-simpl and -O2, how is this core to be read to check to see if the isLast inlines?
+03:50:02 <fen_> https://pastebin.com/raw/wArsWBtz
+03:50:19 <fen_> or would it be better with criterion?
+03:58:37 <hpyCdr> godbolt?
+03:59:44 <cocreature> criterion and reading core are orthogonal. you use criterion to figure out if something is slower, you read the core to figure out why
+04:08:01 <fen_> so i cant see if its slower from that?
+04:10:19 <WilliamHamilton[> hi, if anyone used the "z3" bindings in haskell, I'd like some help in converting a z3 datalog example
+04:11:54 <hpyCdr> I thought that when using IO (via Monad) the functions will be executed in order
+04:12:38 <hpyCdr> but if I use readFile to lazily read the content and use that at the end, the read might execute way past the following instructions
+04:12:59 <hpyCdr> so what does the order guarantee?
+04:43:52 <merijn> hpyCdr: readFile uses lazy IO and it guarantees...almost nothing :p
+04:44:46 <mpickering> Does anyone know how relative paths in `cabal.project` files are suppose to work?
+04:45:09 <mpickering> If I specify ./foo/bar as a -ghc-option it doesn't put anything in ./foo/bar
+04:45:14 <mpickering> if I specify the absolute path it works
+04:45:19 <mpickering> relative paths in cabal files work fine
+04:46:04 <merijn> mpickering: relative paths for what?
+04:46:12 <mpickering> `-hiedir`
+04:46:20 <mpickering> Which specifies the location to put hie files
+04:46:45 <mpickering> So I have `package groups: ghc-options: -fwrite-ide-info -hiedir=./foo/bar`
+04:46:56 <merijn> mpickering: Oh!
+04:46:58 <mpickering> So when it builds groups, I want it to put the hie files in a directory relative to the cabal.project file
+04:47:12 <mpickering> which works fine if I clone groups and modify the .cabal file
+04:47:16 <merijn> mpickering: If you're using cabal.project isn't it calling ghc relative to something deeply nested in dist-newstyle?
+04:47:31 <mpickering> well perhaps but that's not how cabal files resolve relative paths
+04:47:51 <merijn> mpickering: I don't understand why you think cabal resolves that path at all?
+04:48:04 <merijn> mpickering: afaik it just passes ghc-options straight to ghc
+04:48:23 <merijn> mpickering: So if GHC gets called in a different working dir, ghc is going to interpret those paths relative to that dir
+04:48:35 <mpickering> then why does it work adding it to the cabal file but not the ghc.project file?
+04:48:47 <mpickering> cabal.project sorry
+04:48:54 <merijn> hmm
+04:49:28 <merijn> weird
+04:58:08 <mpickering> merijn: https://github.com/haskell/cabal/issues/5881
+05:22:23 <fen> cant seem to build criterion
+05:22:26 <fen> hangs at;
+05:22:27 <fen> Building     math-functions-0.3.1.0 (lib)
+05:22:42 <fen> using cabal new-install math-functions
+05:23:17 <kritzefitz> How long has it been hanging?
+05:23:40 <fen> forever!
+05:23:46 <kritzefitz> For me building large libraries often takes a long time, because I run out of physical memory and swapping slows the compilation considerably down.
+05:24:03 <kritzefitz> How did you manage to start the compilation that early?
+05:24:19 <fen> restarted the system to make sure nothing else was using memory 
+05:24:39 <fen> to no avail
+05:24:51 <kritzefitz> Can you check if you currently have free memory?
+05:25:22 <fen> windows task manager says its only 50% 
+05:25:31 <fen> and the build is still running in the background
+05:25:35 <kritzefitz> What order of magnitude is “forever” in? Hours? Days? Weeks? Years?
+05:26:00 <fen> an hour
+05:26:14 <fen> never taken this long before
+05:27:17 <fen> trying to check which of these is faster; https://pastebin.com/raw/4KDriUZB
+05:27:37 <kritzefitz> I think if math-functions uses UndecidableInstances or similar, the type-checker might go into a loop, but otherwise I never encountered a build that actually hangs instead of just taking very long.
+05:28:03 <merijn> kritzefitz: undecidableinstances times out after a finite amount of time
+05:28:30 <kritzefitz> merijn, Ah. Good to know.
+05:28:39 <merijn> I've had compiles of an hour, there's some corner cases where GHC is *really* slow (specifically deriving instances for classes with a huge number of constructors)
+05:29:00 <merijn> There's a dependency of pandoc that can frequently take like 45 minutes to build. If it's swapping then things slow down WAY more
+05:29:29 <fen> its never taken this long before
+05:29:44 <kritzefitz> I think TemplateHaskell might also loop, but I'm not sure if that also has a timeout.
+05:29:45 <fen> there were issues with the old cabal
+05:29:51 <fen> but it would throw an error at least
+05:29:57 <hpyCdr> I once had an issue where I had to lower optimization for a file
+05:30:00 <kritzefitz> Have you ever built this library before?
+05:30:08 <hpyCdr> since it couldn't compile with the highest
+05:30:24 <hpyCdr> fen, what are your specs?
+05:30:30 <fen> anyone who could do that benchmark?
+05:31:09 <fen> trying to tell if the isLast function being called can be inlined to be the same as a pattern match over the 2 constructor cases
+05:31:59 <fen> in a recursion such as fold
+05:33:30 <hpyCdr> fen, have you checked out https://godbolt.org/z/a4FfB1 ? I mean the site in general
+05:34:00 <fen> what is it?
+05:34:04 <fen> and why?
+05:34:20 <hpyCdr> shows the assembly instructions mapped to source line
+05:34:29 <fen> what?
+05:34:48 <hpyCdr> hm I thought you were checking the assembly to test for inlining
+05:34:53 <hpyCdr> nm then
+05:35:09 <fen> oh right its some kind of better core?
+05:35:44 <hpyCdr> I haven't used core before, so I don't know what its features are
+05:35:54 <hpyCdr> and whether godbolt is any better
+05:36:45 <hpyCdr> the code is sent to them, tho
+05:37:16 <fen> ok, tried installing using cabal install instead of cabal new-install and its thrown an error
+05:37:56 <Lears> Core is almost a subset of Haskell, so it's a lot easier to read than assembly.
+05:37:58 <fen> should try with stack?
+05:39:00 <fen> can nobody just tell from reading the code if it should be equivalently as fast for either version? 
+05:39:12 <fen> https://pastebin.com/raw/4KDriUZB
+05:40:53 <fen> kind of rely on cabal working 2bh
+05:42:56 <fen> like, at this point, without a benchmark or some reasonable understanding about how it compiles, and with most of the rest of the library depending on the form of this class, basically stuck at this point
+05:47:56 <fen> you would expect this simple a question about folding lists to be fairly common and the question be answerd
+05:48:05 <fen> like, already
+05:50:22 <fen> im going to ask here later to see if anyone can help with this benchmark 
+06:39:02 <WWMD> Hello!
+06:39:30 <WWMD> Is anyone here familiar with the Accelerate library?
+07:14:12 <WilliamHamilton[> hi, I'd like some help on an issue I opened here https://github.com/IagoAbal/haskell-z3/issues/11 about using the z3 bindings
+07:24:03 <Athas> I have become curious about migrating pack to pure cabal from stack.  My main concern is that I want to be sure my users use exactly the same dependencies and GHC version that I do (particularly the second, since GHC is so unstable).
+07:24:03 <Athas> Does anyone know of any other Haskell programs that do that, and how they document it for their (potentially non-Haskell) users?
+07:24:40 <Athas> Right now I can get away with saying "install Stack and then run 'stack install'" (and then link to the Stack website), which is delightfully simple.
+07:24:55 <Solonarv> you can do this with cabal by checking in a freeze file
+07:25:43 <Athas> Yes, I vaguely remember freeze files, so I'm not so concerned about that part.
+07:25:54 <__monty__> Don't bounds on base restrict the GHC version?
+07:26:11 <Solonarv> Indeed they do.
+07:26:32 <Athas> __monty__: that doesn't help ensure my users have/use the right GHC version; it just means they'll get an incomprehensible error in case they don't.
+07:26:42 <Athas> I really like that stack just installs whatever GHC they need.
+07:27:24 <Athas> ghcup can install the right GHC version, but I wonder how I should describe using it to my users.  That's why I'm looking for examples of other projects who've already figured it out.
+07:27:24 <__monty__> Would a freeze file help then? Cabal can't install the right GHC so it'll have to throw an error.
+07:27:46 <Solonarv> that *is* the incomprehensible error, I think.
+07:27:59 <Athas> A freeze file helps with fixing the package dependencies, which is also a concern.  But I'm mostly concerned with freezing the GHC version (and helping my users install it).
+07:28:42 <__monty__> Nix is also an option. Then users only have to issue one command "nix-env -iA myNixExpression"
+07:29:20 <__monty__> Wouldn't say it's any better than stack unless you get your package in nixpkgs though, then they could get cached binaries.
+07:29:21 <Solonarv> you can freeze base to freeze GHC (e.g. base == 4.12.* means ghc 8.6.*), and in your documentation provide the ghcup invocation to install the right version
+07:34:03 <Athas> Does ghcup support Windows?
+07:35:21 <maerwald> Athas: no
+07:35:33 <Athas> Drat.  Then it's a no-go.
+07:35:40 <Athas> Guess I'll have to stick with Stack for now.
+07:35:42 <maerwald> but you can use WSL ubuntu
+07:35:42 <Solonarv> Nope. I installed ghc through chocolatey, which was fairly painless - but support for multiple versions is probably worse than ghcup
+07:36:01 <Solonarv> Only on win10; which isn't the only windows version around!
+07:36:42 <Solonarv> You can still provide ghcup+cabal as an alternative to stack, though
+07:37:04 <Solonarv> if your project builds on the most recent GHC then it should be no problem on windows either
+07:37:18 <Solonarv> (that's 8.6.2; 8.6.3 is broken on windows)
+07:37:20 <Welkin> what is ghcup?
+07:37:35 <maerwald> Welkin: https://github.com/haskell/ghcup
+07:38:59 <Athas> Solonarv: I can't say I enjoy build systems enough to ensure that two of them both work for my program.
+07:39:19 <Athas> It's bad enough that Homebrew insists on using cabal for Haskell formulae (and old-build at that).
+07:39:41 <Solonarv> it's really not hard to make sure your project builds with cabal. You just need to actually have version bounds in your cabal file.
+07:39:57 <Welkin> if your project doesn;t build with cabal-install, something is seriously wrong
+07:40:05 <Welkin> don;t lock your users into the stack walled garden
+07:40:23 <maerwald> cabal is the only build system we have, stack is built on top
+07:40:28 <Welkin> yes
+07:40:31 <Welkin> stack is not a buld system
+07:40:39 <Welkin> it's a wrapper
+07:40:58 <maerwald> some complicated project configuration may require both stack.yaml and cabal.project files, but that's a different thing
+07:41:27 <Athas> My project builds with cabal-install just fine, but I don't know whether it will tomorrow.  If I used a freeze file (which I probably will, just in case), then I could be pretty sure, I think.
+07:41:42 <maerwald> Athas: freeze file is good for binaries yes
+07:41:51 <Athas> But Homebrew also insists on using whichever GHC they currently have as the newest in their formula (currently 8.4).
+07:41:56 <hpc> version upper bounds should suffice to ensure it always builds
+07:42:04 <maerwald> no
+07:42:05 <Welkin> what are you doing with ghc with homebrew?
+07:42:11 <Welkin> why would you ever use homebrew with ghc?
+07:42:21 <maerwald> upper bounds are not for ensuring something builds, they are for saying "this does not build with later versions" :)
+07:42:24 <Athas> Welkin: my program, which is written in Haskell, is in Homebrew.
+07:42:40 <Welkin> oh, you are distributing a binary through homebrew
+07:42:56 <Athas> Well, Homebrew builds from source as the ground truth, and then builds binaries for convenience.
+07:43:15 <Athas> The Formula file describes how to build from source, and users may ask for from-source builds at any time, if they wish.
+07:43:15 <hpc> well, semantic versioning - upper bounds are just the part of it that people forget most often
+07:43:58 <maerwald> upper bounds are misused for "I don't know if it builds with later versions", while it should only be "I know it doesn't build with later versions". If you want to ensure something builds, use freeze files or stack
+07:44:15 <maerwald> it damages the ecosystem
+07:44:29 <__monty__> maerwald: That's a controversial claim.
+07:44:31 <Solonarv> Athas: if your project is up on github or similar, I can have a look
+07:44:39 <hpc> you can't add upper bounds after the fact
+07:44:56 <hpc> so it's impossible to use them in the way you describe
+07:45:05 <maerwald> hpc: sure you can
+07:45:16 <Welkin> if you need to bump the upper bound you can do so easily
+07:45:19 <Solonarv> maerwald: well, there's no way to indicate "I don't know if it builds with later versions"; being conservative means you end up having to bump upper bounds, which can happen with hackage revisions; being liberal means broken build plans
+07:45:48 <Welkin> however I do see exact versions specified sometimes, which is annoying
+07:45:54 <maerwald> Solonarv: broken build plans means people fix bugs :) if you want reproducible builds, don't use hackage, it's not
+07:46:27 <maerwald> there is nix, there is stack, there are freeze files, there are tons of solutions to this problem
+07:46:30 <maerwald> upper bounds are not
+07:46:42 <hpc> assuming immutable package versions (which you have to assume to stay sane), updating version upper bounds to be more permissive is a patch release
+07:46:57 <maerwald> hpc: hackage has revisions
+07:49:00 <hpc> revisions are a hack to keep the packages of bad maintainers working
+07:49:13 <maerwald> I know
+07:50:00 <hpc> ... so let's rely on it for basic packaging functionality?
+07:50:01 <maerwald> upper bounds are a hack to keep stuff of bad maintainers compiling ;)
+07:50:03 <hpc> no wait, the other thing
+07:50:12 <hpc> upper bounds are a fundamental part of semantic versioning
+07:50:19 <Clint> a bad part
+07:50:21 <maerwald> you can misuse them
+07:50:42 <Athas> In perfectly executed semantic versioning, wouldn't upper bounds be implicit?
+07:51:00 <gentauro> hpc: `semantic` or `syntactic` versioning?
+07:51:32 <gentauro> elm-langs way of doing it, it's kind of nice :-)
+07:52:03 <hpc> ideally there's a "~" constraint operator which knows which level of the version number is the api version
+07:52:03 <Solonarv> how are you supposed to know which not-yet-released breaking API change actually breaks your package? you'd have to predict the future!
+07:52:06 <gentauro> even though, it just checks `api syntax` changes with the latest version
+07:52:10 <hpc> and it creates the upper and lower bounds automatically
+07:52:15 <gentauro> so you can actually bypass it with two changes
+07:52:22 <maerwald> Solonarv: exactly, it's useless
+07:52:32 <maerwald> nothing saves you from a library author (accidentially or intentionally) changing the behavior of a function in a micro version bump
+07:52:47 <maerwald> the only "upside" now is for doing intentional breaking changes you (in theory) don't have to change the function name
+07:52:50 <maerwald> in practive, everyone does
+07:52:54 <hpc> nothing stops them from mutating the package out from under you too
+07:52:54 <maerwald> including in haskell ecosystem
+07:53:08 <hpc> what today is conduit or snap, might tomorrow be unsafePerformIO stealAllYourBitcoins
+07:53:08 <gentauro> maerwald: that's why the term `semver` shouln't be used, but `synver` instead ;)
+07:53:28 <Solonarv> That's not what I mean. What I said also applies to packages that do actually follow the PVP (or semver, or whatever variant the ecosystem uses)
+07:54:37 <hpc> PVP is just semver with an extra number for breaking api changes
+07:54:38 <gentauro> hpc: you can at any point ensure that `unsafePerformIO stealAllYourBitcoins` can't be done. Just add the `SAFE` pragma to your code.
+07:54:56 <gentauro> that way, even if the libs you use, inject `nastyness`, it will break when you try to compile
+07:55:00 <gentauro> (easy
+07:55:02 <gentauro> )
+07:55:19 <hpc> gentauro: it doesn't have to be unsafePerformIO'd, it was just an example ;)
+07:55:51 <Solonarv> you can't change source code in hackage revisions, AFAIK - you can only change (parts of!) the cabal file
+07:56:20 <maerwald> yes
+07:56:31 <gentauro> Solonarv: what? you can change a `.cabal` file that is already submitted?
+07:56:34 <gentauro> that's wrong
+07:56:38 <maerwald> yes
+07:56:41 <gentauro> :'(
+07:56:46 <gentauro> is that `hackage`?
+07:56:52 <maerwald> yes
+07:56:58 <gentauro> I guess that's why they made `stackage LTS`
+07:57:00 <Solonarv> the main intent is to fix version bounds, I'm not sure what else is allowed
+07:57:00 <maerwald> And it causes trouble for distros ;)
+07:57:28 <Clint> so do spurious upper bounds
+08:01:19 <maerwald> when it's about API, languages like Go are far stricter than haskell ;) type system is not everything... as soon as you get convenient tools to break API, people will do it
+08:02:48 <hpc> but mutable package definitions could /never/ be misused...
+08:03:22 <maerwald> well, we have it because upper bounds are misused... :P
+08:03:27 <hpc> i don't see how just modifying things could possibly be a better model for packaging than using upper bounds and actual version updates for reproducibility
+08:04:13 <hpc> if we're going to go down the "trust nothing" rabbit hole, why use anyone else's code in the first place?
+08:04:29 <hpc> if they can't get the version number right, who's to say the code is right either? just write it all yourself
+08:04:39 <maerwald> I often do that
+08:05:02 <siorai> Ahoy hoy.
+08:05:03 <hpc> not all of us have the time to be so nihilist
+08:05:03 <maerwald> which is why I don't rely on filepath, directory and half of base
+08:05:29 <maerwald> most stdlibs in most languages are somewhat awkward
+08:06:04 <maerwald> but that's a different problem
+08:06:19 <Welkin> that's true
+08:06:26 <Welkin> the standard library in most languages is a disaster
+08:07:42 <hpc> base comes with ghc - are you sure you can trust the compiler to make your code do the right thing? better assemble it by hand as well
+08:08:01 <yushyin> I don't see where it is defined how to use upper bounds properly. PVP only says 'use them'
+08:08:05 <maerwald> hpc: well, of course you cannot trust GHC, because it doesn't use any formal methods
+08:08:13 <hpc> maybe ghc-8.6.3 is different today from tomorrow
+08:08:24 <hpc> it's a mutable package after all
+08:08:36 <siorai> Yeah I feel that, for Python, there's urllib which practically no one uses, it's all about the Requests
+08:08:41 <hpc> version freezing won't even work on that
+08:09:24 <maerwald> but the programs I write don't run in aircrafts or in space, so I am fine without that level of trust
+08:09:42 <hpc> there doesn't even have to be an actual mistake in order for your model to fall apart
+08:10:00 <hpc> i'd rather have something that works correctly in theory, than something that doesn't work at all
+08:10:06 <Welkin> well nasa and defense software has different concerns
+08:10:45 <Welkin> the system must be able to recover from errors, and operate under conditions of partial failure, as well as have radiation shielded hardware
+08:11:05 <maerwald> yeah, pretty sure they don't use semver xD
+08:11:14 <Welkin> there is no way to guarantee that something will not break/have errors
+08:11:26 <Welkin> so you need to be able to manage the errors and recover from them
+08:12:37 <Welkin> it's great to use ideals as a goal, but in reality it doesn't exist, which is why it's called an ideal
+08:28:01 <fen> ok got criterion to compile
+08:28:12 <fen> using cabal install (not new-install)
+08:28:25 <rocketll> So Haskell seems to have installed its own version of mingw at C:\Program Files\Haskell Platform\8.6.3\mingw\bin\gcc.exe. When I run gcc, this version of mingw gcc runs instead of my desired version at C:\MinGW\bin\gcc.exe. Is it safe to remove C:\Program Files\Haskell Platform\8.6.3\mingw\bin from my system PATH?
+08:29:30 <fen> the benchmarks show that both versions are equivalent 
+08:29:32 <fen> https://pastebin.com/raw/YZmbNi4x
+08:29:37 <Solonarv> rocketll: pretty sure, yes
+08:30:16 <fen> which means its totally a matter of preference. 
+08:30:35 <fen> would be good then to get some commentary as to which style is better
+08:31:14 <rocketll> Right, thanks, hopefully that doesn't mess anything up.
+08:32:15 <fen> is the extension of streams to finite containers better as the definition of an isLast function, or via rewiting get :: f a -> (a,f a) as getS :: f a -> (a,Maybe (f a)) as a class function and having that implement the default in the class get
+08:32:16 <fen> ?
+08:32:56 <fen> here is the shorter paste without the benchmarking clutter; https://pastebin.com/raw/4KDriUZB
+08:34:30 <WilliamHamilton[> heath: hi, are you the author of this pr on fix-point operators in the z3 bindings? https://bitbucket.org/iago/z3-haskell/pull-requests/19/added-new-functions-and-changed-getdomain/diff
+08:35:27 <fen> maybe the user would find it easier to write isLast than to write getS, or maybe the other way round
+08:36:06 <fen> which makes it seem like the GetS class should have both and have mutual definitions
+08:36:39 <fen> still confused about how this extends to the superclass though
+08:38:31 <fen> isLast + get = getS. where either side of the = can be implemented, but the get function is in the superclass
+08:41:26 <fen> get is defaulted if getS is implemented in its subclass. isLast is also defaulted and is of the same class as getS. 
+08:41:49 <fen> but getS is defaulted if get and isLast are implemented
+08:42:21 <fen> which is broken, as get could rely on its explicit implementation
+08:50:31 <fen> here is that implemented; https://pastebin.com/raw/fyPMqMP7
+08:50:40 <fen> it does not throw a compile error
+08:50:55 <michaels_> say I'm constructing a DatabaseT, is it better to have to use `DatabaseT :: ReaderT DbConn a` or DatabaseT :: ReaderT DbConnInfo a`?
+08:51:29 <michaels_> My question being should I have a reader over the connection or the connection info? With the latter option, I could abstract away the actual connecting to the database from the user.
+08:53:11 <fen> the use of :: in that makes it difficult to understand
+08:53:27 <fen> things on the lhs of :: should be values and in lowercase
+08:54:12 <fen> are you defining a type synonym?
+08:55:22 <hpc> it could be a GADT data constructor, but yeah i think you meant to use "="?
+08:58:49 <michaels_> newtype DatabaseT a = DatabaseT { unDb :: ReaderT DbConn a } or newtype DatabaseT a = DatabaseT { unDb :: ReaderT DbConnInfo a }
+08:59:00 <michaels_> sorry, got carried away typing too quickly.
+08:59:46 <fen> so what is meant about "abstracting away the actual connecting..." ? not familiar with the libs being used here..
+09:00:16 <fen> wow this throws a really strange error!
+09:00:33 <fen> the cyclic mutual definitions just give a runtime error
+09:00:44 <fen> they *dont* even give a runtime error
+09:00:46 <fen> https://pastebin.com/raw/zfcU7pZU
+09:00:53 <fen> the just loop forever
+09:01:25 <fen> not the kind of thing you want to ship with a library...
+09:01:43 <fen> is there a minimal definition pragma that will extend to superclasses?
+09:02:56 <michaels_> So for example, the first case requires `runDatabaseT :: DbConn -> DatabaseT a -> a`. Which means a db connection must be established before calling the run function.
+09:03:36 <michaels_> in the second case, the run function would take in a DbConnInfo and establish the connection in the run, therefore abstracting away db connectivity from the user.
+09:03:50 <michaels_> btw, these aren't standard libs or anything, just theorizing what best practices are
+09:04:23 <michaels_> and I guess since I'm doing Transformers it's really `runDatabaseT :: DbConn -> DatabaseT m a -> ma`, but w/e
+09:04:47 <michaels_> I feel like I've seen both approaches in practice
+09:06:24 <fen> if the connecting process is slow wouldnt you want to do that once and then have a reusable connected database?
+09:07:02 <michaels_> Yeah, I guess the second case doesn't make much sense because I wouldn't have a persistent connection.
+09:07:10 <michaels_> It would require a new connection per run basically.
+09:07:26 <michaels_> and that would be up to the user to handle ultimately
+09:08:24 <fen> but then if its a cheap thing to establish and is totally defined by the info, not having like, an label given to it depending on what connection number it was or something, then maybe it would be ok
+09:08:53 <michaels_> Yeah, I see.
+09:09:42 <fen> like, if it was as simple as a list, then maybe there might be no reason to reuse the "connected" reader 
+09:10:26 <fen> but then if it was like a zipper, where it would remain at the most recent access point, and have faster retrieval of close by data, then it might be worth "keeping the connection open"
+09:10:39 <fen> if thats an ok way to think about it
+09:11:14 <fen> so its not just the cost of connection then, its savings from reusing an open connection
+09:11:42 <fen> if neither of those are issues, then making a new connection each time shouldnt matter
+09:13:10 <fen> is there a minimal mutual definition that would solve this situation? https://pastebin.com/raw/zfcU7pZU
+09:13:27 <fen> pragma*
+09:13:59 <michaels_> Gotcha, thanks fen
+09:15:03 <fen> aye
+09:21:01 <UnkDevE> Hey I've been writing a kmeans implementation and it clusters everything into the 0th cluster and I can't figure out why, can you see anything that doesn't make sense? https://github.com/UnkDevE/Kmeans-Haskell/blob/master/src/Kmeans.hs
+09:21:59 <fen> can you give a demonstration of that behaviour along with the code?
+09:23:29 <fen> is it worth opeing a ghc ticket with this problem? https://pastebin.com/raw/zfcU7pZU
+09:23:52 <UnkDevE> sure give me a sec
+09:24:06 <fen> not sure we have support for mutual definitions using DefaultSignatures
+09:24:40 <fen> and if we do, would anyone be able to show how its done?
+09:25:51 <UnkDevE> https://gist.github.com/UnkDevE/e77576f3f721e76398c69d0a2e0cc471
+09:26:42 <fen> {-# MINIMAL (isLast,get) | getS #-} gives the error  `get' is not a (visible) method of class `GetS'
+09:27:36 <fen> UnkDevE: how was that produced?
+09:29:10 <UnkDevE> by taking the mean of the pairwise differences of each cluster
+09:29:26 <fen> add support for minimal pragmas across class constraints!
+09:29:38 <fen> UnkDevE: no, the code
+09:29:51 <fen> its not clear which functions were called to produce that output
+09:30:46 <fen> its not looking like this issue is going to be solved any time soon so its back to square one.
+09:30:53 <fen> gonna duck out now
+09:31:07 <UnkDevE> oh! it would be iterateKmeans for the trace call
+09:45:10 <dmwit> UnkDevE: How does that even type-check?
+09:45:19 <dmwit> Division with (/) on Word8 shouldn't work at all.
+09:45:21 <dmwit> > 3/8 :: Word8
+09:45:24 <lambdabot>  error:
+09:45:24 <lambdabot>      • No instance for (Fractional Word8) arising from a use of ‘/’
+09:45:24 <lambdabot>      • In the expression: 3 / 8 :: Word8
+09:46:05 <dmwit> UnkDevE: Also, probably adding up Word8s is not a very good idea.
+09:47:00 <dmwit> Way too easy to overflow. Convert to a bigger type first; probably either Word32 or Word64 would be big enough unless your arrays are very very long.
+09:47:20 <UnkDevE> ah, ok, do you think that might be the problem?
+09:48:36 <UnkDevE> well I'll fix that and see if that helps, thank you
+09:48:47 <dmwit> Oh, I see, your first, secnd, and thd have fromIntegral calls.
+09:48:49 <dmwit> Gross.
+09:48:53 <dmwit> Anyway that explains how it typechecks.
+09:49:10 <dmwit> Then yeah, the overflow is certainly one bug in this code; there may be others.
+09:59:12 <UnkDevE> Thanks! that was the bug! 
+11:07:19 <bifunc2> Does a Haskell program have access to some "standard" threads (OS threads, not Haskell threads) where I can run IO actions? I need a way to run some of my IO actions always on the same OS thread.
+11:07:48 <hpc> you want to make your thread with forkOS instead of forkIO
+11:08:04 <hpc> and then use the same method of passing actions to it, like Chan (IO ()) or whatever
+11:10:13 <bifunc2> hpc i can't see how to work with the ThreadId once I've obtained it.
+11:10:19 <bifunc2> how to pass actions on it?
+11:12:28 <monochrom> No, you have to explicitly code your thread to receive messages and act on them.
+11:27:10 <dminuoso> bifunc2: You can use STM or MVars to communicate between your threads.
+11:31:43 <bifunc2> monochrom, hpc that's really cool! getChan does the trick
+11:31:44 <bifunc2> When would you prefer Chans over STM/MVars dminuoso?
+11:31:56 <bifunc2> s/getChan/readChan
+11:32:52 <dminuoso> bifunc2: MVar is a bit orthogonal to Chan (kind of depends on what you are doing exactly)
+11:33:30 <hpc> bifunc2: imagine something like a game with a sim thread and graphics thread
+11:33:37 <dminuoso> bifunc2: STM is more robust and easier to think about.
+11:33:45 <hpc> all the graphics thread needs to do is execute your actions, and you don't even really care about results
+11:34:04 <hpc> so you just have it run through a queue of actions as fast as it can
+11:34:21 <hpc> and all the sim thread cares about is "go do this action eventually, i don't care when"
+11:34:24 <hpc> or something like that
+11:35:34 <hpc> a Chan is going to behave like a queue, where you just throw a job on the pile and move on, and the worker thread grinds through it
+11:35:52 <hpc> an MVar is going to be a single item - if you have two threads throwing on jobs, and one really slow worker thread
+11:36:00 <hpc> then one thing is going to put a job, it'll occupy that slot
+11:36:10 <hpc> and the other thread has to wait in line to put its job down
+11:37:37 <bifunc2> Hmm ok
+11:37:38 <hpc> STM is going to be totally different - instead of a slot that fills and empties you'd have something like an IORef
+11:38:03 <hpc> if you have a thread running an STM action like do {x <- read from var; write to var (complicatedFunction x)}
+11:38:05 <dmj`> what's the easiest way to cross compile Haskell to ARM these days? (Suppose my program is 'main = print 4' )
+11:38:22 <hpc> it's going to come up with a transaction that does that thing
+11:38:47 * hackage terminal 0.2.0.0 - Portable terminal interaction library  https://hackage.haskell.org/package/terminal-0.2.0.0 (LarsPetersen)
+11:38:55 <hpc> if in the middle of running that action, the var changes out from under it, it goes "i couldn't do this atomically, try it again"
+11:39:00 <dminuoso> bifunc2: With STM you get to have transactional memory (so threads get to have consistent view of memory). It's our solution to race conditions. :)
+11:39:38 <hpc> instead of blocking to ensure consistency, it does a check at the end before committing the transaction
+11:40:17 <bifunc2> What I'd like to do is, run a particular breed of IO actions always on the same OS thread. When I call such an IO action, I also want to wait for it to finish, and get the result.
+11:40:30 <bifunc2> Is this possible with a combination of forkOS + Chan/STM/MVar?
+11:40:34 <dminuoso> bifunc2: A common technique in Haskell is it to forkIO threads that for example read bytes off the network socket and fill messages into a TQueue, maybe another forkIO thread reads messages out of the TQueue and handles them.
+11:40:48 <dminuoso> bifunc2: Why is the "on the same OS thread" important to you?
+11:41:47 <hpc> bifunc2: here you'd probably have a Chan for the action queue and each action has an MVar to return the value in
+11:41:54 <c_wraith> usually that matters when dealing with a native library that can't handle multiple threads
+11:42:10 <bifunc2> c_wraith that's it. working with some lib that requires that :)
+11:42:15 <hpc> your main thread would make an empty mvar, then pass an action to the queue using that mvar
+11:42:24 <hpc> the worker thread will run the action, then write the result to that mvar
+11:42:32 <dminuoso> bifunc2: When you want to *wait* for that to finish, you don't need threads.
+11:42:36 <dminuoso> You'd just sequence that in IO.
+11:42:39 <hpc> then back in the main thread, you wait for that mvar to have the value in it before continuing
+11:44:05 <bifunc2> dminuoso Do all IO actions run on the same thread, and is that thread always a bound OS thread?
+11:45:05 <dmwit> main is always a bound thread. You can ask for additional bound threads with forkOS.
+11:45:35 <dmwit> Not all IO actions run on the same thread.
+11:45:49 <hpc> forkIO threads can move around if it works out better to keep things running
+11:45:58 <hpc> http://hackage.haskell.org/package/base-4.12.0.0/docs/Control-Concurrent.html#v:forkOS
+11:46:27 <hpc> depending on workload, it's possible that the bottleneck on forkIO threads is going to be your system's memory
+11:46:40 <dmwit> (Not even all bound threads run on the same OS thread necessarily. The only promise is that once the bound action starts running on *some* OS thread, it never migrates to a different one.)
+11:46:57 <hpc> oh, also see http://hackage.haskell.org/package/base-4.12.0.0/docs/Control-Concurrent.html#boundthreads
+11:47:12 <dmwit> (...and indeed in the threaded runtime, no two bound threads share an OS thread.)
+11:47:39 <bifunc2> hpc this is cool this is going to help me do what i want :)
+11:48:33 <bifunc2> btw, how many bound threads can a program create in practice? are we talking a handful or more?
+11:48:43 <bifunc2> (i only need 1, but i'm curious anyway)
+11:48:57 <hpc> lots and lots
+11:49:03 <dmwit> A thousand is probably within the sensible range.
+11:49:08 <dmwit> A hundred thousand is probably not.
+11:49:20 <hpc> i once wrote an http stress tester, and my way of running concurrent connections was to just make a thread for each of them
+11:50:54 <bifunc2> :)
+11:50:57 <bifunc2> nice
+11:51:07 <hpc> the basic idea is threads are low overhead
+11:51:23 <hpc> you can maybe make a hundred thousand if they're doing absolutely nothing
+11:51:26 <MarcelineVQ> dmwit: a thousand bound?
+11:51:43 <hpc> MarcelineVQ: a thousand forkIO threads
+11:51:51 <dmwit> MarcelineVQ: That was the question I was answering, yes.
+11:51:58 <MarcelineVQ> that's like, a lot of bound isn't it
+11:52:08 <dmwit> It's a lot, yes. Seems unnecessary.
+11:52:37 <dmwit> But, like, there's 30,000ish pids available, so... should be possible.
+11:52:58 <dmwit> Maybe 1,000 of them are left available for your program unless 30 other programs had the same thought.
+11:54:28 <MarcelineVQ> hehe, we might use sensible differently, my version of that word would mean something like core count + 1
+11:55:18 <dmwit> Oh. Maybe I shouldn't have said sensible, you're right. "possible" instead, since that was the question as I understood it.
+11:56:08 <dmwit> "sensible" as in "sensible to make happen". If you need 100,000 bound threads it is still probably possible but you'd need to modify the kernel, the RTS, purchase a lot of RAM, ...
+12:06:25 <bifunc2> Thank you all for this great knowledge!
+12:06:28 <cocreature> does each bound thread in GHC use a separate OS thread? at least in theory it seems like you could still schedule multiple bound threads on the same os thread
+12:10:47 <dmwit> cocreature: I think currently yes, that is how it currently works.
+12:11:24 <dmwit> It does use a thread pool so that it can reuse OS threads, but they will only get reused once the bound thread on it is well and truly dead.
+12:11:44 <cocreature> dmwit: I see, thanks!
+12:12:32 <dmwit> I think you could have multiple bound threads on a single OS thread but then you might have liveness issues if e.g. one thread went off into FFI land and never came back.
+12:13:21 <cocreature> sure but that’s what you get with the non-threaded runtime as well so I wouldn’t necessarily consider it a deal-breaker
+12:13:58 * dmwit nods
+12:15:02 <cocreature> Then again, I’ve also been arguing for making the threaded runtime the default so I’m slightly contradicting myself here :)
+12:17:07 <dmwit> I think it actually makes a fair bit of sense to worry about liveness for bound threads.
+12:17:20 <dmwit> Typically bound threads are that way because they're the main loop of some external library doing sneaky things.
+12:17:54 <dmwit> It would be unfortunate if you tried to write a program that used two FFI-based libraries and found out that one of them stopped the other from being usable.
+12:18:18 <dmwit> (Uh, there's a hidden warrant there, namely that "the main loop" typically *is* in the "goes off into FFI-land and never comes back" category.)
+12:19:28 <cocreature> I completely agree that liveness is preferable to saving OS threads in most curcumstances!
+12:25:35 <POGtastic> stupid question: why does this result in an error "Illegal instance declaration," and how do I fix it? https://pastebin.com/ZVEMFNUJ
+12:26:23 <Solonarv> POGtastic: what's the full error you got? that looks legal to me.
+12:27:38 <dmwit> No, it's not legal.
+12:27:40 <POGtastic> @Solonarv Illegal instance declaration for ‘Foo a’ (All instance types must be of the form (T a1 ... an) where a1 ... an are *distinct type variables*, and each type variable appears at most once in the instance head. Use FlexibleInstances if you want to disable this.) In the instance declaration for ‘Foo a’
+12:27:40 <lambdabot> Unknown command, try @list
+12:28:05 <Solonarv> POGtastic: ah! as the error tells you: enable the FlexibleInstances language extension
+12:28:09 <Lears> The answer is right there in the error.
+12:28:48 <POGtastic> is there any way to do this other than enabling FlexibleInstances?
+12:28:54 <dmwit> Yes, don't define Foo in the first place.
+12:28:58 <Solonarv> depends on what you're trying to accomplish
+12:29:04 <dmwit> Since it obviously isn't giving you anything Show doesn't already give you.
+12:29:29 <tombusby> hey all, is there somewhere  I can go to see a list of all the most common monads. surprisingly hard to find such a list
+12:29:38 <dmwit> (In fact, it gives you significantly less.)
+12:29:50 <dmwit> ?where aam tombusby
+12:29:51 <lambdabot> http://www.haskell.org/haskellwiki/All_About_Monads
+12:30:25 <dmwit> That covers a large chunk of the transformers library, which is also a large chunk of the main monads people use.
+12:30:32 <POGtastic> dmwit: now that I think about it, that's probably the best idea. the homework defines a class and says "Provide instances for int, bool, etc", and I was thinking "why not just make all classes that are instances of Show instances of this class?"
+12:30:46 <dmwit> But there are many other libraries that make their own monads; notably parser combinators frequently define a monad.
+12:30:55 <tombusby> dmwit: fantastic, that's likely roughly what I'm looking for
+12:31:09 <POGtastic> but now that I think about it, I can just define some functions that take a (Show a) and implement the class' functions.
+12:31:24 <POGtastic> i don't even need to make (Show a) an instance of the class.
+12:32:24 <Solonarv> indeed!
+12:32:42 <Solonarv> (I wonder why the exercise didn't say "without using Show")
+12:33:49 <POGtastic> uuuggggh, because this class treats lists in a special way. :/ back to the drawing board
+12:36:21 <trcc>  So I need cabal to build a static link library... Any ideas how?
+12:36:54 <trcc> or any other way of building a static link library would be fine as well
+12:37:02 <Solonarv> trcc: that seems like it should be in the cabal documentation
+12:37:09 <Solonarv> https://cabal.readthedocs.io
+12:37:29 <trcc> Solonarv: it can only build native-shared
+12:37:49 <trcc> so.. I think it need some entirely other approach
+12:39:27 <trcc> guess I need some custom ghc command
+12:41:37 <yushyin> https://cabal.readthedocs.io/en/latest/installing-packages.html?highlight=static#cmdoption-setup-configure-enable-static isn't that what you want?
+12:44:32 <trcc> ah woaw. I found this: https://www.haskell.org/cabal/users-guide/developing-packages.html#pkg-field-foreign-library-type where it says it only supports native-shared libraries
+12:44:32 <fen> ok, so according to this ticket it wouldnt work to have default signatures of a superclass function defined in terms of a mutually defined subclass function with regular default https://ghc.haskell.org/trac/ghc/ticket/10959
+12:44:35 <trcc> yushyin: 
+12:44:46 <fen> it would complain that no explicit implementation was given
+12:47:53 <fen> still open to ideas as to how to solve this; https://pastebin.com/raw/zfcU7pZU
+12:57:39 <dmwit> fen: Your class hierarchy looks backwards to me. In what situation could you have a structure where it's always possible to pull an element out, but still sensible to ask whether that's the last element?
+12:59:08 <[exa]> +1 dmwit
+12:59:24 <dmwit> (I reject the implicit claim in this paste that `Nonempty` can be made an instance of `Get` in a sensible way.)
+13:02:32 <POGtastic> alright, more complete example. Is there any way to do this? I'd like to be able to make Int, Integer, Bool, Char, etc instances of Nodeable while treating lists and tuples separately. https://pastebin.com/9cqBueTn
+13:03:09 <c_wraith> In general...  don't.
+13:03:14 <POGtastic> :(
+13:03:17 <Solonarv> that doesn't seem like a good idea!
+13:03:29 <c_wraith> You can, with ugly hacks like the showList hack in Show
+13:03:43 <c_wraith> but it is a workaround for a bad design, rather than a good design
+13:04:51 <POGtastic> ok, it's not too much copy-pasting, and i can explain that in the comments. thanks guys
+13:06:16 * hackage taffybar 3.1.2 - A desktop bar similar to xmobar, but with more GUI  https://hackage.haskell.org/package/taffybar-3.1.2 (eyevanmalicesun)
+13:06:41 <dmwit> POGtastic: You can `toNodeShow :: Show a => a -> Node` and `instance Nodeable Integer where toNode = toNodeShow` etc.
+13:06:58 <dmwit> POGtastic: If you're into it, you can use DefaultSignatures to automate that, so that `instance Nodeable Integer` expands to that.
+13:07:14 <POGtastic> dmwit: oooo, that's clever
+13:07:22 <POGtastic> thanks
+13:10:48 <Solonarv> DefaultSignatures is neat ;)
+13:10:49 <xenon-> hi. I'm trying to download mobile version of the site so that I make less traffic when scrapping it. this code works on some, but not all sites. is there anything other header I should be setting besides user-agent?
+13:11:02 <xenon-> scraping*
+13:11:13 <xenon-> https://bpaste.net/show/9876bdc390f9
+13:11:37 <c_wraith> is it possible the sites it isn't working on detect via JS instead?
+13:12:00 <xenon-> I'm visiting the same site with my phone (that has above user-agent), and it is getting a mobile site
+13:12:15 <c_wraith> that proves it doesn't use the user-agent
+13:12:20 <c_wraith> but that isn't what I asked. :P
+13:12:41 <Solonarv> (side note: holy shit, user agents are a *mess* these days)
+13:12:55 <c_wraith> yeah, user agents are useless now
+13:12:59 <xenon-> c_wraith, hmm, that's true. let me see
+13:13:07 <dmwit> All user agents begin Mozilla/5.0, even IE
+13:13:11 <xenon-> (what would js inspect instead?)
+13:13:12 <dmwit> Which cracks me up.
+13:13:29 <c_wraith> xenon-: frequently just the dimensions of the screen
+13:13:36 <c_wraith> well, viewport
+13:13:40 <Solonarv> (which is very reasonable!)
+13:13:43 <xenon-> my phone has higher resolution than my desktop :)
+13:13:55 <xenon-> or did you mean physical dimension?
+13:13:56 <c_wraith> but it reports logical pixels, rather than physical
+13:14:03 <c_wraith> and it has a lower logical resolution
+13:14:40 <c_wraith> javascript/the web *also* handle high-dpi screens very poorly
+13:15:04 <c_wraith> designers are still addicted to pixels, but they don't even know that what browsers report as a pixel need not have anything to do with the screen.
+13:15:17 * hackage wkt-geom 0.0.6 - A parser of WKT, WKB and eWKB.  https://hackage.haskell.org/package/wkt-geom-0.0.6 (newmana)
+13:15:17 <Solonarv> to be fair, they're not alone in handling high-dpi poorly
+13:15:56 <xenon-> so assuming site is using js to detect mobile device, is that something I can spoof with http-conduit? if not, what can I use instead?
+13:16:36 <Solonarv> I'm questioning your initial assumption that the mobile version uses less bandwidth than the desktop version
+13:16:51 <c_wraith> Well, no.  If the detection is done by JS, only something that runs JS can switch to it.
+13:18:14 <xenon-> Solonarv, there's less information on the mobile site, so it seems reasonable that html is smaller. only one way to find out though, and for that, I need to convince site to give me mobile version
+13:18:45 <c_wraith> it's fully possible it's just using a different stylesheet that hides some of those elements
+13:19:01 <xenon-> is there no standard semi-standard way to politely request mobile site? in the past, m. prefix usually did the job
+13:19:08 <Solonarv> does the URL change when redirecting to mobile? e.g. from en.wikipedia.org to en.m.wikipedia.org
+13:19:13 <xenon-> no
+13:19:19 <c_wraith> or even that it's using a responsive stylesheet that is exactly the same and just depends on viewport dimensions
+13:19:46 <c_wraith> the web is a mess.  Nothing is well-designed.  There is no standard for anything.
+13:19:59 <Solonarv> you could save the site on your phone, transfer the file to your computer, and compare it to what you get when saving it via a desktop browser
+13:20:46 <xenon-> if I can't download mobile file in haskell, then it doesn't really matter if it is smaller
+13:21:28 <Solonarv> you almost certainly *can*, but if it isn't necessary (e.g. doesn't result in any bandwidth savings) why bother?
+13:22:21 <xenon-> it also has to be reasonably easy. I'm not writing my own http code
+13:23:47 <xenon-> "toggle device toolbar" icon in chrome's developer tools works on every site I tried
+13:24:02 <xenon-> (including that one)
+13:24:16 <systemfault> You could probably spoof the User-Agent header using your download tool
+13:24:35 <xenon-> systemfault, I did, it doesn't work on all sites. https://bpaste.net/show/9876bdc390f9
+13:26:16 <systemfault> Weird, that's how we usually do it. It might not download some assets (like media queries dependent stylesheets and related resources) but I'm surprised it doesn't work.
+13:27:41 <Solonarv> I mean if you're just doing an HTTP request it won't download any secondary resources at all
+13:35:01 <_deepfire> ezyang: hello!  It would be lovely if you could take a look at the StructuredImports proposal, since you're probably the chief expert on GHC's import semantics
+13:40:28 <Ququ> Hi! Could anyone give me some tips how do I parse a string using only the Prelude, Util and Data.Char modules ?
+13:41:21 <c_wraith> What is "Util"?
+13:42:05 <vaibhavsagar> what does "parse" mean in this context?
+13:42:46 <c_wraith> I'm assuming the usual meaning, providing some way of writing a String -> Foo function, for your Foo data type
+13:43:11 <c_wraith> Probably String -> Maybe Foo or String -> Either ParseError Foo, just for the sake of not being partial
+13:43:57 <vaibhavsagar> makes sense, I would like more details about Foo though
+13:44:17 <vaibhavsagar> e.g. how complex it is
+13:44:48 <c_wraith> Sure, but..  the answer almost certainly depends on whatever their class's "Util" class has in it.
+13:45:04 <vaibhavsagar> fair point
+13:45:04 <c_wraith> err.  Module
+13:46:16 <dmwit> Step one is reimplement a parser combinator library. Step two is parse as usual. ;-)
+13:46:26 <c_wraith> I mean, that's what I'd do!
+13:46:34 <dmwit> Me, too. =)
+13:46:42 <Lears> Me three
+13:47:01 <dmj`> I'd just call readMaybe :) 
+13:47:02 <dmwit> I've even done it in other languages...
+13:47:22 <Solonarv> yeah, parser combinators are pretty great
+13:47:39 <dmj`> don't even have to leave base, there's Text.ParserCombinators.ReadP
+13:48:15 <dmwit> dmj`: That doesn't *look* like it's one of Prelude, Util, or Data.Char.
+13:48:23 <c_wraith> Maybe Util re-exports it
+13:48:27 <dmwit> (But perhaps Util is larger than I think!)
+13:48:37 <dmj`> maybe Util re-exports acme-everything 
+13:48:40 <dmj`> :)
+13:48:50 <dmwit> Maybe Util re-exports parsec, and the whole question is moot!
+13:50:17 <Solonarv> Ququ: what's in that 'Util' module? it's hard to give a good answer without knowing that!
+13:51:46 <Ququ> Apparently there is a split function in Util module, but when I try to run it GHCi hangs up :o https://downloads.haskell.org/~ghc/7.6.2/docs/html/libraries/ghc/Util.html
+13:53:31 <Ququ> also, for some reason every time I want to import Util I get a "could not load module 'Util', it is a member of hidden package ghc...", and I have to expose the package every time I run ghci. how can I set it to expose permamently ?
+13:54:21 <dmwit> ghc-pkg expose ghc
+13:54:42 <dmwit> um
+13:54:48 <dmwit> depending on how you've installed it
+13:55:24 <Solonarv> uhh, are you *sure* that's the Util module you're supposed to use?
+13:55:45 <Ququ> dmwit: oh thanks, that worked!
+13:57:32 <c_wraith> I'm pretty sure that's not the right Util package.
+13:57:36 <c_wraith> err, module
+13:57:44 <c_wraith> I'm having real vocabulary issues this morning
+13:59:47 <dmj`> Ququ: you can list if in your set of build-depends as well, in the cabal file
+13:59:51 <dmj`> s/if/it
+14:00:19 <Ququ> hmm, it does seem to be that module. In the given template there's "import Util", and when I run :browse Util it is exactly this one. Apparently, no matter which function from the module I try to run, it always hangs up 
+14:01:00 <Solonarv> Ququ: it seems really strange for a (I assume) introductory course to make you use an internal GHC module
+14:01:42 <Solonarv> (note: it's perfectly legal for there to be multiple modules with the same name!)
+14:04:01 <Solonarv> I'd suggest checking again, or perhaps asking someone
+14:04:25 <dmwit> Ququ: Just because your current ghci installation lists that Util doesn't mean that is the Util your assignment creator intended you to use.
+14:05:02 <dmwit> I, like others here, think it's much more likely the assignment creator made a module named Util and has supplied you with the source code for it somewhere.
+14:09:11 <Ququ> Oh well, you were perferctly right... I am given a module Util which actually has a defined splitOn parsing function...
+14:10:24 <iqubic> heh...
+14:37:59 <xenon-> I have a list of many elements, and I want function returning IO to rotate those elements. I also don't want to bother caller with StateT Int IO () just for this. is top-level IORef initialized with unsafePerformIO my only option?
+14:38:57 <Solonarv> what do you mean by "rotate these elements"?
+14:39:35 <xenon-> Solonarv, it should use first element on the first call, second element on the second call, until it runs out of elements, and then it should start over at the beginning
+14:40:23 <Solonarv> Ah. Sticking the list in an IORef seems like a reasonable option, then;  no need for it to be top-level though!
+14:41:16 <xenon-> how can this work if it isn't top-level?
+14:41:55 <Solonarv> you simply pass the IORef to whichever function needs it
+14:42:38 <xenon-> function accepts just a String, and caller doesn't need to know anything about IORef, that's implementation detail of the library function
+14:43:10 <Solonarv> that seems like bad API design. The function uses mutable state that the caller can't control? Ew!
+14:43:16 <Solonarv> What is the function supposed to do?
+14:46:18 <xenon-> Solonarv, it downloads html, and rotates user agent after every call
+14:48:18 <Solonarv> Ah! in that case, I'd suggest creating a datatype like this: data Context = Context { ctxUserAgents :: [UserAgent], ctxCurrentUserAgent :: IORef Int, ... }
+14:48:33 <Solonarv> having your function take a 'Context' argument
+14:49:14 <Solonarv> the '...' can include a 'ctxHttpManager :: Manager' field too, which http-client uses for connection reuse and maybe a few other things
+14:52:15 <xenon-> Solonarv, I like that
+14:55:00 <Solonarv> it's a fairly common pattern when mutable state and/or some configuration is needed
+14:57:34 <xenon-> what's the best approach for making this thread safe?
+14:57:50 <xenon-> should I be using something other than IORef?
+14:58:06 <dmwit> Yes, MVar or TVar.
+14:58:15 <Solonarv> IORef is fine if you use atomicModifyIORef
+14:58:51 * dmwit . o O ( createRotator :: [UserAgent] -> IO (Url -> IO Html) )
+14:59:12 <Solonarv> TVar is probably the easiest to not not mess up, though
+14:59:58 <Solonarv> 'x <- atomically do modifyTVar var (+1); readTVar var' Just Works (tm)
+15:00:42 <dmwit> Or perhaps even createRotator :: [a] -> IO (IO a)
+15:01:17 <Solonarv> that's an interesting approach
+15:01:18 <xenon-> dmwit, and call that in main? then pass rotator to relevant functions
+15:01:28 <dmwit> xenon-: Yep, exactly.
+15:03:00 <dmwit> :t \xs -> do r <- newIORef (cycle xs); return (atomicModifyIORef r (\(x:xs) -> (xs,x)))
+15:03:02 <lambdabot> error:
+15:03:02 <lambdabot>     • Variable not in scope: newIORef :: [a] -> m t0
+15:03:02 <lambdabot>     • Perhaps you meant ‘newSTRef’ (imported from Data.STRef)
+15:03:23 <dmwit> % :t \xs -> do r <- newIORef (cycle xs); return (atomicModifyIORef r (\(x:xs) -> (xs,x)))
+15:03:23 <yahb> dmwit: [b] -> IO (IO b)
+15:04:28 <dmwit> This is perhaps too clever for its own good.
+15:04:30 <xenon-> will that have constant memory usage?
+15:04:37 <dmwit> It sure will.
+15:06:20 <xenon-> I like it. I was going to use Vector and index, but this is nicer
+15:07:48 <dmwit> Uh, well. It will have constant memory usage if the argument you pass it would itself have constant memory usage when completely forced. =P
+15:08:14 <dmwit> If you pass an infinite list that's on you.
+15:08:57 <gentauro> is there a way to clear the `terminal`? Something similar to `clear` (*nix) / `cls` (Windows)
+15:09:03 <gentauro> https://hackage.haskell.org/package/base-4.12.0.0/docs/System-IO.html
+15:09:10 <gentauro> and I don't seem to find it :-\
+15:10:21 <hpc> check terminfo
+15:10:47 <hpc> (it's see-also'd in the manpage for clear on my system)
+15:12:40 <gentauro> hpc: now I recall having used that package before
+15:12:49 <gentauro> I used it to measure the size of my terminal
+15:13:10 <gentauro> I will try to see if I can find the code once again (might be in some temp folder somewhere on my laptop)
+15:13:13 <gentauro> thx
+15:14:51 <gentauro> hpc: got it -> http://dpaste.com/2BXEQVM :-)
+15:17:49 <gentauro> https://hackage.haskell.org/package/terminfo-0.4.1.4/docs/System-Console-Terminfo-Edit.html <- `clearScreen`
+15:19:21 <xenon-> dmwit unfortunately, ast least in ghci, if I do x <- createRotator [1, 2], and then forever x, it uses all the memory
+15:20:33 <xenon-> maybe strict atomicModify would help
+15:21:07 <c_wraith> Unlikely, given that lists aren't strict structures anyway
+15:22:10 <xenon-> c_wraith, well :)
+15:22:47 <c_wraith> rotating a list isn't very efficient anyway
+15:22:55 <xenon-> it runs in constant memory with atomicModify'
+15:23:24 <c_wraith> I'd just cycle the list and consume from it, instead of rotating it.
+15:23:24 <xenon-> why? tail is O(1)
+15:23:51 <c_wraith> because xs ++ [x] is O(length(xs))
+15:24:25 <xenon-> @src cycle
+15:24:25 <lambdabot> cycle [] = undefined
+15:24:25 <lambdabot> cycle xs = xs' where xs' = xs ++ xs'
+15:25:03 <c_wraith> that trick in cycle makes it actually create a circular linked list in memory, so it stops allocating after you traverse the first cycle
+15:25:53 <hpc> so long as you don't untie the knot afterwards (like with map id)
+15:25:57 <xenon-> why was atomicModifyIORef' need to avoid running out of memory?
+15:26:09 <xenon-> strict version
+15:26:24 <c_wraith> it probably forced enough evaluation eventually
+15:27:30 <xenon-> ok. but what part is inefficient? it has to go through the entire list anyway
+15:28:05 <c_wraith> it would have O(n) unevaluated thunks in addition to the O(n) memory for the list.  So not terrible, but not as good as it could be
+15:50:00 <dmwit> c_wraith: He is cycling it (see above).
+15:51:03 <dmwit> xenon-: If you actually consume the results somehow you won't see memory usage shoot up.
+15:51:10 <dmwit> xenon-: e.g. forever (r >>= print)
+15:52:05 <dmwit> xenon-: (If you don't, then the IORef just points to a deeper- and deeper-nested thunk as time goes on.)
+15:52:15 <xenon-> that makes sense
+15:52:34 <xenon-> and consuming the result (or strict atomicModifyIORef) stops that
+15:53:01 <dmwit> Right, consuming the result forces the head-like thunk, which forces the list thunk.
+15:56:13 <siorai> Phew. I about lost my mind trying to get ghc-mod compiled and running in my editor.  
+16:04:21 <xenon-> I wrote this just for a quick test, but it made me wonder if NOINLINE would be needed anywhere if this was my actual code? https://bpaste.net/show/42860c2c15f3
+16:05:14 <xenon-> since everything returns IO, I don't think ghc is allowed to inline?
+16:05:56 <Solonarv> it is in fact allowed to inline
+16:06:25 <Solonarv> that 'unsafeCreateRotator' you've got there seems like a *really* bad idea to me.
+16:06:32 <xenon-> it can inline unsafeCreateRotator?
+16:06:51 <Solonarv> yes. Anything can be inlined, unless it has a NOINLINE pragme.
+16:08:18 <xenon-> would NOINLINE pragma for unsafeCreateRotator make this safe?
+16:08:46 <Solonarv> what you should do, if you *must* have a global rotator, is to: delete unsafeCreateRotator; replace rotateStrings' definition with 'unsafePerformIO (createRotator ["foo", "bar"])'; and add a noinline pragma to rotateStrings
+16:09:25 <xenon-> I am more interested in making unsafeCreateRotator safe, thus invalidating its name :P
+16:09:57 <xenon-> can this be done?
+16:10:48 <Solonarv> If you change its return type to 'IO (IO String)', yes
+16:11:05 <Solonarv> otherwise: maybe, but I'm not very confident
+16:12:19 <xenon-> well, any reason why {-# NOINLINE unsafeCreateRotator #-} wouldn't make it safe? if it can't be inlined, each rotator will have a newly allocated reference
+16:13:07 <Solonarv> I don't think inlining of unsafeCreateRotator matters at all, but I'm not confident about this
+16:13:16 <Solonarv> and I'm having a really hard time reasoning about it
+16:13:29 <Solonarv> for this reason alone I would advise against having it
+16:18:18 <xenon-> IO are just values. so, if we pretend that unsafeCreateRotator returned Int by wrapping IO Int with unsafePerformIO, NOINLINE program would make this safe. so I'm thinking, this is safe too
+16:18:59 <xenon-> probably :P
+16:19:17 <Solonarv> I *think* you would need noinline on the use sites of unsafeCreateRotator
+16:19:34 <Solonarv> inlining unsafeCreateRotator itself shouldn't make a difference
+16:19:43 <Lears> The unsafePerformIO is hiding behind an argument, so unsafeCreateRotator x is not necessarily shared with unsafeCreateRotator x. So inlining rotateStrings could cause reevaluation of IO.
+16:22:00 <xenon-> Lears, and in that case, it would create a new reference instead of reusing existing one
+16:22:16 <Lears> Yes.
+16:24:53 <xenon-> that makes sense
+16:35:54 <dmwit> What the heck, we went to all this work to design a thing for you that would let you avoid unsafePerformIO'ing a newIORef and you did it anyway?
+16:35:58 <dmwit> How ungrateful!
+16:40:42 <xenon-> heh :)
+16:41:03 <dmj`> I did some unsafePerformIO newIORef w/ INLINE today
+16:41:08 <dmj`> it was great
+17:01:48 <iqubic`> test
+17:02:01 <Solonarv> iqubic`: test success?
+17:16:42 <ddellacosta> so I've been using cabal new-* lately for projects, but I've just installed NixOS and I'm trying to learn to do things the Nix way. Most of what I've found either promotes a stack-based flow, or like https://github.com/Gabriel439/haskell-nix uses cabal the "old" way. Should I not use cabal new-* (a.k.a. "nix-style local builds," hmm) within Nix? I'm a nix newbie if it's not obvious
+17:17:56 <sclv> ddellacosta: there's no great  interface beweteen the cabal new- stuff yet and the nix approach
+17:18:11 <sclv> the gabriel-style stuff tends to be the standard way to mix stuff together
+17:18:29 <sclv> (basically the new- stuff and nix itself both try to lay claim to handle too many of the same responsibilities :-))
+17:18:34 <ddellacosta> sclv: okay, so it sounds like you're implying that--for now at least--I should probably either pick the stack way or Gabriel's approach above huh?
+17:18:46 <sclv> in general, gabriel's approach is the main standard one
+17:18:59 <ddellacosta> got it. Okay that's helpful, thanks sclv!
+17:19:27 <sclv> the stack way is sort of like the cabal-new way -- it uses nix a bit, but mainly delegates responsibilties elsewhere :-)
+17:19:42 <sclv> so they work together, but at the expense of taking advantage of overall nix-integration in the system
+17:19:43 <ddellacosta> ah okay, gotcha. Yeah I'm the least familiar with that so I'll probably stay away from it for now
+17:19:50 <ddellacosta> ah
+17:21:22 <ddellacosta> sclv: related, so is it fair to say that cabal new-* is probably never going to really be the right approach if one is using Nix? I'm guessing that's not the case because it sounds like some day the new-* stuff will be the default for cabal at least?
+17:21:54 <sclv> nah -- there's work underway to let cabal new- stuff delegate stuff back :-)
+17:22:03 <ddellacosta> okay, thanks
+17:22:11 <sclv> so that the advantages beyond store management it brings can be integrated with nix
+17:22:14 <sclv> but we're not there yet
+17:22:42 <ddellacosta> okay. So for now I'll use Gabriel's approach above, and keep my ears open for how things progress with cabal new-*. Thank you again sclv , this was very helpful
+17:46:04 <Lears> ddellacosta: I use nix and cabal new/v2 together all the time, it's a fine combination. Nix provides the dependencies you don't need to touch, and cabal provides incremental recompilation over your local packages within a nix-shell (which is something v2 handles more gracefully than v1).
+17:47:03 <Lears> Maybe some people want a more automatic integration, but it's far from necessary.
+18:10:07 <maerwald> but new-build already caches builds, why would you combine it?
+18:17:57 <Solonarv> non-Haskell dependencies? nix seems like it would make those significantly less painful
+18:21:02 <Lears> The question is why use nix to provide some dependencies when you could get them all via new-build? Simply because it gives you a lot more than some Haskell libraries. It has a binary cache, it gives you non-Haskell deps as Solonarv pointed out, it helps you achieve reproducibility, and it gives you nice toys like per project hoogle indices.
+18:21:14 <Lears> tldr all the reasons you'd normally use nix
+18:23:05 <jackdk> and because you're almost certain to use something with a C binding _somewhere_, all projects are polyglot projects
+18:36:41 <maerwald> most of the time, reproducibility is not a requirement
+18:37:44 <maerwald> and nix pretty much runs stackage versions of packages afaik
+18:39:07 <Levy[m]> It just makes things much simpler
+18:39:17 <Levy[m]> Each project becomes just another nix package
+18:40:10 <Levy[m]> Easier to work in conjunction with others as they have the exact same set of libs, etc
+18:57:02 <maerwald> nix is not easy to work with ;)
+18:57:14 <maerwald> it's more like... once you get it working, it's nice
+20:49:46 <Axman6> dmj`: _with_ INLINE???
+20:50:28 <Axman6> surely you mean with NOINLINE right?
+20:50:39 <dmj`> Axman6: scandalous I know, but INLINE is actually /exactly/ what I wanted. I needed unique IORefs for each individual node in my tree
+20:50:56 <Axman6> :|
+20:51:01 <Axman6> you're a bad person
+20:51:03 <dmj`> Axman6: using NOINLINE caused sharing of the ref to occur, so each node used the same exact value!! which was terrible
+20:51:18 <dmj`> Axman6: NOINLINE is nice for like singleton thread pool stuff
+20:51:35 <Axman6> why not make this explicit though, there's no reason to be doing something like that in pure code
+20:52:38 <Axman6> doing it that way is definitely asking for trouble, one day some optimisation will make all those unique IORefs shared again and you won't know when
+20:52:46 <dmj`> Axman6: it's a hidden implementation detail, I need to carry pointers along a tree as I diff it, initialization shouldn't be in IO, so I just do a little trick with unsafePerformIO newIORef
+20:53:35 <dmj`> Axman6: if I say INLINE it better not make them shared
+20:53:39 <Axman6> sounds like a hidden bug to me
+20:53:44 <dmj`> or that's a GHC bug
+20:54:47 <dmj`> Axman6: to get the external (pure) and internal (mutable) API I want, this is the ticket
+20:55:33 <dmj`> unsafePerformIO is a fantastic for language interop things, that's what I'm doing it for
+20:55:37 <dmj`> fantastic tool*
+20:56:07 <margaritamike> why is ghc so huge? i'm looking at my /usr/lib/ghc directory and it's taking up 592M
+20:56:15 <margaritamike> what the heck O_o
+20:57:42 <dmj`> margaritamike: it's a pretty advanced compiler, many features
+20:57:54 <jkachmar> As I understood it, the GHC binary with profiling support takes up a lot of space
+20:57:54 <jkachmar> https://stackoverflow.com/questions/4858585/why-is-ghc-so-large-big
+21:01:37 <Axman6> dmj`: that sounds very much to me like behaviour which is not guaranteed to work
+21:06:21 <dmj`> Axman6: why?
+21:07:29 <dmj`> Axman6: specifically, what do you think will go wrong? If INLINE doesn't INLINE, that is a bug in ghc imo 
+21:08:52 <Solonarv> the potential bug is inlining-then-CSE
+21:09:49 <dmj`> let me try to enable optimizations, I haven't even compiled with -O2
+21:11:09 <dmj`> seems to be working great with optimizations enabled, maybe even a little faster
+21:11:42 <dmj`> are you saying optimizations could cause non-deterministic behavior
+21:15:25 <Solonarv> in the presence of unsafePerformIO and the like, yes!
+21:16:01 <Solonarv> that's exactly what happens when you (for example) forget to {-# NOINLINE #-} a top-level unsafePerformIO (newIORef _)
+21:17:00 <dmj`> Solonarv: right, but if you do NOINLINE, are you saying that it could still go awry?
+21:17:33 <Solonarv> I don't have a firm enough grasp on GHC to give a confident answer to that
+21:18:26 <Axman6> dmj`: by using pure types, you are telling the compiler "you are free to rearrange things as you please". using unsafePerformIO in this way is lying to the compiler
+21:18:29 <dmj`> We NOINLINE to avoid the possibility of GHC making multiple calls to newIORef, since we want it to be shared. In my case I want to ensure that GHC does exactly that, so I INLINE
+21:19:42 <Solonarv> I don't know what your code looks like, but it'd probably be easier to reason about if you had a single unsafePerformIO wrapped around a large computation
+21:20:09 <Axman6> libraries like ByteString have to jump through some pretty extreme hoops to make sure that its use of IO internally is hidden
+21:20:49 <dmj`> nullRef :: IORef (Ptr Word8); {-# INLINE #-}; nullRef = unsafePerformIO (newIORef nullPtr);
+21:21:02 <dmj`> {-# INLINE nullRef #-}
+21:21:25 <maerwald> Axman6: and then you don't know if it works on other compilers ;)
+21:21:35 <Solonarv> maerwald: what other compilers? :P
+21:21:38 <maerwald> Basically haskell code is fragile ;)
+21:22:00 <Axman6> it's fragile when you lie to the compiler
+21:22:38 <maerwald> It's fragile if the implementation relies on a specific compiler, but yeah, there is not enough competition
+21:23:15 <dmj`> Axman6: I guess I know what I'm doing, so I'm not too worried about it :) I'll let you know if something comes up though
+21:28:56 <Axman6> you should look into the concurrency bugs in unordered-containers to see how this stuff can go wrong, even when the people who know most about thise stuff have thought very hard about it
+21:30:58 <maerwald> strict typing or not, in the end it boils down to "trust some smart people" ;D
+22:25:48 <nshepperd> dmj`: i don't think INLINE means that the value is required to inline, it just gives it a very low cost?
+22:26:37 <nshepperd> it's probably better to inline your unsafePerformIO manually
+22:28:19 <dmj`> nshepperd: inline will force it to replace  the call site with the definition
+22:29:44 <cocreature> dmj`: no it doesn’t. it just makes it more likely that it will be inlined
+22:30:27 <nshepperd> there's a bunch of caveats listed at https://downloads.haskell.org/~ghc/7.0.3/docs/html/users_guide/pragmas.html
+22:30:48 <cocreature> fwiw you probably don’t want the user guide for 7.0, use https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/glasgow_exts.html#inline-pragma
+22:31:09 <nshepperd> err
+22:31:14 <nshepperd> thanks, google
+22:34:12 <dmj`> cocreature: it won’t inline if GHC thinks it’s too expensive to do so or it is partially applied, otherwise it will always do so. The code I pasted above doesn’t fall into the expensive category id say
+22:34:44 <dmj`> Maybe we should inspect source to determine what criteria “expensive” meets
+22:35:31 <nshepperd> i would expect it also wouldn't inline if the unfolder runs out of ticks or something
+22:35:39 <cocreature> it isn’t only about being expensive. there are also things like being fully applied and other caveats mentioned in the user guide
+22:36:12 <dmj`> cocreature: that’s what I said yes, straight from the guide 
+22:36:16 <cocreature> the point is, INLINE is not a guarantee that things will be inlined. it’s a hint to the optimizer that inlining will probably be benefitial
+22:36:39 <kaol> Planet Haskell has lately felt like Planet Rust.
+22:37:43 <dmj`> cocreature: in general sure, in my simple case it is definitely inlining
+23:04:45 <MasseR> kaol: coming to zurihac / monadic party?
+23:04:46 <suzu> kaol: is that good?
+23:08:19 <kaol> MasseR: Unlikely. My employer won't care about us knowing Haskell.
+23:09:59 <kaol> suzu: Depends on whether you care about Rust.
+23:12:40 <MasseR> I'm with kaol on this one. Rust is a nice language, but it's not for me or relevant to my interests
+23:14:26 <Levy[m]> mercury would be interesting if it gained activity again
+23:17:17 * hackage math-grads 0.1.5.1 - Library containing graph data structures and graph algorithms  https://hackage.haskell.org/package/math-grads-0.1.5.1 (AlexKane)
+23:59:23 <sicklorkin> are maybeToEither and eitherToMaybe bijective or isomorphic or both?

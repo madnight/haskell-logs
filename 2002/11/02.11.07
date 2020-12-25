@@ -1,0 +1,813 @@
+05:09:51 <dark> Heh.  I go out of my way to use "Integer" as the type for Content-Length, then I realize how large Int is if I'm actually downloading that many bytes.
+05:11:51 <Igloo> 2^29 isn't impossible
+05:12:45 <Igloo> If it makes a significant speed difference I'd use a type synonym, otherwise Integer (but quite possibly a type synonym anyway)
+05:17:53 <ibid> ghc implements Integer as a union of Int and GMP integers; i doubt using that union to get to the Int is that much slower, and it does have the advantage of being able to switch to GMP if need arises
+05:19:08 <ibid> (actually, the Int side of Integer is an unboxed Int, so it should be quite fast)
+05:19:22 * Heffalump appears from trying to explain types
+05:19:34 <Igloo> Presumably it's looking at flags to see if it is an Int or GMP integer, though?
+05:19:49 <dark> Hmm... I hadn't thought of the 2^29 possibility.  I'm used to ghc :)
+05:19:50 <Igloo> And having the check the overflow status
+05:20:04 <Igloo> 2^32 isn't *that* much more
+05:20:25 <ibid> Igloo: Haskell only has tagged unions, so yes, there has to be that test
+05:21:15 <ibid> anyway, I'd use Integer until such time that a measured speed problem caused by it arises
+05:21:50 * Igloo disappears
+05:21:59 <ibid> (and, using a lazily evaluating implementation of Haskell will add some slowdown anyway)
+05:22:22 <ibid> (and it sounds like dark's program is IO heavy so it will be spending most of its time waiting for IO to happen)
+05:23:17 <dark> Well the problem I ran into is that mallocBytes only takes an Int.
+05:24:23 <ibid> mallocBytes?
+05:24:29 <dark> I'm going through hGetBuf and having to use multiple buffers makes it complicated :)
+05:24:45 <dark> From Foreign.Marshal.Alloc
+05:24:55 <ibid> why Foreign?
+05:25:00 <ibid> are you usinng FFI?
+05:25:17 <dark> Nope, but GHC's hGetBuf is defined that way, it takes a Ptr.
+05:26:18 <ibid> hm
+05:26:50 <ibid> well, the FFI spec does make the implicit requirement that Int be as large as a pointer
+05:26:53 <ibid> bitwise
+05:27:16 <ibid> so if you are using the FFI stuff anyway it shouldn't be a problem
+05:27:23 <ibid> you'll run out of memory first :-)
+05:29:50 <dark> Yeah, this is a problem actually :)
+05:30:29 <ibid> declare that your program will only run on 64-bit systems? :-)
+05:30:33 <dark> What I need to do is make an interface to read from a socket and write directly to a file, without buffering in between, but without using lazy IO (which drops IO errors)
+05:30:56 <ibid> FFI is your friend?
+05:31:05 <dark> Well, the interface probably doesn't need to know which end is a socket and which end is a file :)
+05:31:35 <dark> It should't even be hard, now that I think of it.  Something like transferContents :: Handle -> Handle -> IO
+05:31:48 <Segora> write a new syscall for the reverse of that http acceleration stuff (which copies from a file fd to a socket fd in kernel)
+05:31:50 <Segora> ;)
+05:32:14 <dark> Segora: I think that's sendfile(), which already goes both ways :)
+05:32:50 <Segora> ah. then a Haskell interface for that would be the core of your solution
+05:33:11 <dark> Oh, no... it doesn't: Presently the descriptor from which data is read cannot correspond to a socket, it must correspond to a file which supports mmap()-like  operations.
+05:33:24 <Segora> ah
+05:33:44 <dark> I might have to briefly become a kernel hacker, and then tell people to use my kernel if they want to use my program.
+05:35:08 <Segora> what are you up to anyway?
+05:35:47 <dark> I'm working on the HTTP client module of a version control tool.
+05:36:39 <Segora> btw. we saturated a 10Mbps link with a P200 running a router with latency and packet failure injection functions which was written in Haskell. A friend of mine made the very fast packet handling functions in Haskell.
+05:36:45 <dark> It might actually have to download gigabyte archives at some point :)
+05:37:18 <dark> Segora: Raw IP?
+05:37:26 <Segora> yes
+05:37:52 <Segora> the program could interface to BSD bpf or Linux tuntap to attach interfaces and route between them
+05:38:29 <dark> One thing I like about Haskell is that I never have to worry about buffer overflows.
+05:38:41 <Segora> *g* yes that's a wonderful thing
+05:38:44 <dark> The corresponding problem is that I always have to worry about running out of memory :-)
+05:39:03 <dark> Fortunately that doesn't matter so much in a command-line client.
+05:39:26 <dark> It's not like it was going to do anything else with that memory :)
+05:39:46 <Segora> that depends. if your command line client gets so slow nobody would want to call it from scripts (or is that not a use case?)
+05:40:16 <Segora> .. and it will make the system slow if pages from other processes get swapped out because of your program
+05:41:34 <dark> True, but I think the RTS will kill it before that happens.
+05:42:31 <dark> I'm thinking about how it will behave when under attack, for example when being fed from the server's /dev/zero.
+05:43:19 <Segora> make sure that functions that can be evaluated in constant space really are
+05:43:51 <dark> Right, and that does mean making a transferContents function :)
+05:44:46 <dark> But some things, like directory listings, do need to be held in memory.
+05:45:12 <dark> Hmm, I guess they don't have to be if they're processed lazily, but I haven't found a way to do lazy IO without losing error checking.
+05:45:55 <Segora> hmm
+05:47:26 <Segora> unfortunately, I don't know an easy solution for that either
+05:47:52 <dark> Do you know a difficult one? :)
+05:47:54 * ayrnieu wonders why an attacker would chew memory with dark's program when Emacs would probably also serve.
+05:50:30 <Segora> dark: not now - I would have to dig a bit because I didn't do much with Haskell lately
+05:51:21 <dark> ayrnieu: I don't use emacs :)  I use nvi because vim is too big and slow for me.
+06:00:09 <ibid> bah
+06:00:31 <Segora> dark: basically you have to rewrite getContents to return either a continuation, EOF or an error instead of a string
+06:00:41 <ibid> ghci takes ages to deal with something read slurps from file in no time
+06:00:54 <Segora> the continuation would return a string and a continuation
+06:27:42 <dark> Segora: Sorry for the delay, I was doing morning things :)
+06:28:18 <dark> It sounds like it would mean implementing laziness manually.  I was afraid that would be the difficult way :)
+06:37:21 <Segora> dark: I'm shure one of the real gurus could hide that inside some monad ;)
+06:55:56 * dark competes for the "useless use of do" award.
+07:33:28 <dark> Whoops, it compiled.
+07:33:37 <dark> Now I'm going to have to test the damn thing.
+07:41:43 <liiwi> how boring
+07:59:14 <dark> Is anyone working on hemacs?
+08:01:30 <ayrnieu> I didn't know it existed.  Does it embed GHCi?
+08:02:31 <dark> I don't know if it exists :)  It's just the obvious name.
+08:06:22 <ayrnieu> I'm interested in tasks that require the kind of flexibility hemacs would need.
+08:09:37 <ayrnieu> I think that Lisp has won, though: it has read/print/eval, lightweight syntax, macros, and fast compilation.  Erlang seems to come closest to this ideal, among FP languages, but it's still a hassle (for instance, I've needed to wrap configuration data in a function that stores to process-state).
+08:13:06 <ayrnieu> The problem is that Erlang doesn't really have 'read': it has a function to read data structures (but not anonymous functions or function definitions); it has a function to read Erlang code (function definitions).
+08:14:55 <ayrnieu> Haskell, of course, has neither of these -- but I suppose that you could embed GHCi (has anyone done this)
+08:15:24 <dark> Hmm, does GHCi allow definitions to be added at runtime, other than by invoking a compiler and loading the result?
+08:16:48 <ayrnieu> let fact 0 = (do putStrLn "zero!"; return 1); fact n = (do n' <- fact (n-1); return n*n')
+08:17:43 <dark> Well, okay :)
+08:17:51 <ayrnieu> So I suppose it has runtime-definitions, except that GHCi tends to forget them.
+08:18:58 <ayrnieu> (ah, only when :load'ing; I thought it might forget them when using :module, even)
+08:24:32 <Segora> ghci allows both let and (<-) at the prompt to define values. Definitions can be overwritten.
+09:02:01 <ibid> ayrnieu: what do you call Read's method "read", then?
+09:23:56 <ayrnieu> I would call it an analogue to the first function I described from Erlang.
+09:24:52 <ibid> exactly
+09:25:09 <ibid> you said there is no such thing in haskell
+09:25:55 <ayrnieu> ah, OK.
+09:26:15 <ayrnieu> sorry =)  I was thinking more of the second function when I said that.
+10:45:43 <bronaugh> and there goes my CPU for a while.
+10:45:57 <bronaugh> ah well, my new cost metric should work.
+10:48:35 <ayrnieu> compiling something?
+10:51:15 * dark notes that HTTP works a lot better if you actually send the request.
+10:55:01 <liiwi> your server does not have crystall ball?
+10:56:38 <dark> It's boa.  No mod-crystal-ball.
+11:14:54 <dark> Cool, HTTP really is faster than FTP.
+11:15:20 <dark> At least to localhost :)
+11:15:36 <dark> Factor of 2.5
+11:57:36 * dark kicks Fail: Prelude.last: empty list
+11:59:00 <ayrnieu`> you want 'last [] = []' ?
+12:00:40 <ayrnieu`> ifNil _ [] = []; ifNil f l = f l
+12:06:01 <Vulpyne> Greetings.
+12:06:58 <Vulpyne> Anyone alive?
+12:07:26 <Marvin--> yes
+12:09:26 <Vulpyne> Maybe you can help me... I'm just starting to learn Haskell, and I want to generate a random number.
+12:09:43 <Vulpyne> It seems like the standard random stuff uses IO.
+12:09:52 <stepcut> yep
+12:10:00 <Vulpyne> First - Why does it work that way? And second, how can I get a normal int out of it? :)
+12:10:15 <ayrnieu> Vulpyne - because otherwise you'd always get the same 'random number' =)
+12:10:16 <Marvin--> because generating random numbers has side effects
+12:10:21 <ayrnieu> data Coin = Heads | Tails
+12:10:27 <ayrnieu> flipCoin :: IO Coin
+12:10:48 <ayrnieu> flipCoin = do n <- randomRIO (1,2); return $ if n == 1 then Heads else Tails
+12:11:16 <Marvin--> Vulpyne: in Haskell, everything that has side effects is in IO
+12:11:20 <Vulpyne> Hmm, what if I want a random between 1 and 20, or something like that?
+12:11:26 <Vulpyne> I see.
+12:11:38 <Vulpyne> It makes at least a little sense. I'm very new to functional programming. :)
+12:11:54 <ayrnieu> Vulpyne - there's more here at work than 'functional programming' =)
+12:12:30 <Vulpyne> If you feel like explaining, I feel like listening. :)
+12:12:58 <ayrnieu> Vulpyne - you have to ask a question =)
+12:14:03 <Vulpyne> Well... I'm not sure, what it sounded like you were saying is that there was more to my random problem/random having side effects than I seemed to understand.
+12:14:17 <ayrnieu> dark - what problem did you have with Prelude.tail ?
+12:15:22 <Overflow> Vulpyne in ocaml its random.float 1.20
+12:15:47 <Vulpyne> Thanks, but that doesn't help me. :)
+12:16:01 <ayrnieu> Vulpyne - ah, no; I was saying that being new to Haskell is more than being new to functional programming, as 'functional programming' is rather broad -- it includes O'Caml, for instance.
+12:16:21 <ayrnieu> Overflow - or: Random.int 20 + 1
+12:16:33 <Vulpyne> Ah, I see.
+12:16:36 <dark> ayrnieu: Just that my program fails with that error, even though I audited all my uses of "last".
+12:16:57 <ayrnieu> dark - you think the error is in error, or you are surprised by the error?
+12:17:54 <Vulpyne> rand <- getStdRandom(randomR(1, 36)) -- I can do this, and then return rand as an IO Int
+12:18:02 <Vulpyne> I'm assuming your example returned an IO Coin.
+12:18:03 <dark> ayrnieu: I have no idea what's causingit.
+12:18:07 <Vulpyne> IO is part of the type? Or something else?
+12:18:40 <ayrnieu> Vulpyne - yes; I said that explicitly in my type signature.
+12:19:08 <ayrnieu> Vulpyne - random :: a -> IO a
+12:19:19 <ayrnieu> sorry, return :: a -> IO a
+12:19:26 <Vulpyne> Right... How is an IO Int different from a normal Int?
+12:21:53 <Marvin--> Vulpyne: you can only get out the Int while inside another IO-function
+12:22:16 <Vulpyne> Ah, thanks.
+12:22:37 <Vulpyne> And I can only return an IO thing from an IO function?
+12:22:37 <Marvin--> for example:  x <- return 2  binds x to the value 2 (this is rather silly as you might as well say  let x = 2  instead)
+12:22:37 * ayrnieu hums.
+12:25:51 <Vulpyne> How can an IO function interact with a non-IO function?
+12:26:34 <Marvin--> an IO-function can use a non-IO function, but not the other way around
+12:27:11 <Marvin--> if  f :: a -> b  and  g :: a -> IO b  you can for example write  g x = return (f x)
+12:28:16 <Vulpyne> Hmm.
+12:28:22 <Vulpyne> I'm not sure I understood that example.
+12:28:50 <Marvin--> okay, more concrete. You can let f :: Int -> Int with f x = 2*x, right?
+12:29:18 <Marvin--> and you can let g x = putStrLn (show (f x))
+12:29:53 * Vulpyne nods.
+12:30:02 <Vulpyne> It was just an example to back up the first thing you said?
+12:30:34 <Marvin--> which was the first thing I said? "yes"? :)
+12:30:50 <Vulpyne> "an IO-function can use a non-IO function, but not the other way around"
+12:31:24 <Marvin--> ah, yes
+12:31:56 <ayrnieu> A non-IO function can't use an IO function *by definition*, because such use would make it an IO-function.
+12:36:11 * Vulpyne nods.
+13:08:33 <Vulpyne> May I paste 3 lines?
+13:11:03 <ayrnieu> Sure.
+13:11:20 <Vulpyne> makePassword :: [a] -> IO Int
+13:11:20 <Vulpyne> makePassword a = do 
+13:11:21 <Vulpyne>   let q = ["012345679" !! myrand | myrand <- [randomRIO(1,  9)]]
+13:11:23 <Vulpyne> Am I insane?
+13:11:36 <Vulpyne> I'm trying to generate a string of random digits based on the list I was passed.
+13:12:11 <ayrnieu> That function certainly seems insane.
+13:12:13 <Vulpyne> That doesn't work, of course. If I do rand <- randomRIO(1,9) and then just use rand rather than myrand in t he list comprehension, it works, except (obviously) it uses the same random number every time.
+13:12:35 <Vulpyne> It would make sense if myrand was a random number each time. :)
+13:12:35 <ayrnieu> What is the argument 'a' used for?
+13:12:44 <Vulpyne> It's a list.
+13:12:52 <Vulpyne> For example, I want to do: makePassword "abc"
+13:12:55 <Vulpyne> And get "547" back.
+13:12:57 <Vulpyne> Or something like that.
+13:13:06 <Vulpyne> Or makePassword [1..20] and get 20 random digits back.
+13:13:12 <ayrnieu> What is the relationship between "abc" and "547" ?
+13:13:38 <Vulpyne> Only the length of the first list matters.
+13:13:56 <ayrnieu> um, OK.
+13:14:04 <Vulpyne> Are you trying to make a point based on my approach, or do you not understand the logic I used to attack the problem that way? :)
+13:14:06 <ayrnieu> Why don't you just send the length, then? =)
+13:14:28 <ayrnieu> There are many parts of your function I find confusing.
+13:14:34 <Vulpyne> And then generate the list to use inside the function?
+13:14:36 <Vulpyne> Or do it a different way.
+13:14:39 <ayrnieu> makePassword :: Int -> IO [Char]
+13:15:13 <Vulpyne> Don't spoil it for me, please. I want to figure it out. :)
+13:15:19 <ayrnieu> OK.
+13:15:23 <Vulpyne> (Not sure if you were typing in your own solution.)
+13:15:31 <ayrnieu> I was, sorry.
+13:15:44 <Vulpyne> Hey, no reason to apologize for trying to help someone.
+13:15:51 <Vulpyne> And I appreciate the effort.
+13:16:23 <Vulpyne> Assuming I wanted to solve it the weird way I am now, how would I g et a new random number for each item in the list comprehension?
+13:16:27 <Vulpyne> Or is that not even possible?
+13:17:03 <dark> You could make a function that generates a list of random numbers, and use that list :-)
+13:18:12 <Vulpyne> Hmm, yes.
+13:18:24 <Vulpyne> But it's not possible to generate a new random number for each step in t he comprehension?
+13:18:41 <dark> Comprehensions don't have steps, that's why they're called comprehensions :-)
+13:19:06 <dark> You could use a function like "sequence", though, to run an IO computation multiple times.
+13:19:08 <ayrnieu> Vulpyne - yes, it's possible.
+13:19:50 <ayrnieu> Vulpyne - it might be easier to involve (repeat (randomRIO (1,n) :: IO Int))
+13:20:56 <Vulpyne> Hmm, how do you mean?
+13:21:11 <ayrnieu> Vulpyne - could you spell out, in English, what makePassword is supposed to do?
+13:21:48 <Vulpyne> How it's supposed to work, or the end result?
+13:22:19 <ayrnieu> The end results.
+13:22:42 <Vulpyne> It should take a list, and then return another list (string) of the same length, composed of random digits.
+13:23:08 <Vulpyne> Do you know Python?
+13:23:29 <ayrnieu> makePasswordOfLength n = makePassword $ take n $ repeat 0
+13:23:32 <ayrnieu> Vulpyne - yes.
+13:23:42 <Vulpyne> print string.join(map(lambda l: "abcdefghijklmnopqrstuvwxyz0123456789"[int(random.random() * 36)], range(0,8)), "")
+13:23:51 <ayrnieu> Vulpyne - what does the argument have to do with the return?
+13:24:04 <Vulpyne> I was trying to do something along the same lines as that. (Thinking of the comprehension as like map.)
+13:24:12 <Vulpyne> The return type didn't matter yet.
+13:24:22 <Vulpyne> I was just trying to generate the result I wanted. :)
+13:24:35 <ayrnieu> Vulpyne - (...)  Yes.  What does the argument to your function have to do with the result than you wanted?
+13:24:40 <ayrnieu> that you.
+13:25:01 <Vulpyne> makePassword [1..8]
+13:25:12 <Vulpyne> Something like: map(..., range(1,8))
+13:25:37 <Vulpyne> Make sense?
+13:26:09 <ayrnieu> Vulpyne - Why don't you just make the argument to your function the length of the list that you want the function to return?
+13:26:29 <Vulpyne> And then generate the list to map inside the function?
+13:26:36 <Vulpyne> (Like in the Python example.)
+13:27:13 <ayrnieu> The list you generate has absolutely nothing in common with the list you get, except for the length, which you don't need the list-you-get for.
+13:27:31 <Vulpyne> Right.
+13:27:41 <Vulpyne> I can make a list to map to from the function, and there's no reason not to do it that way.
+13:27:44 <ayrnieu> So why don't you just take a length?
+13:28:18 <Vulpyne> def makePassword(mylen):
+13:28:18 <Vulpyne>  print string.join(map(lambda l: "abcdefghijklmnopqrstuvwxyz0123456789"[int(rand
+13:28:18 <Vulpyne> om.random() * 36)], range(0,mylen)), "")
+13:28:22 <Vulpyne> would be like that then.
+13:28:40 <ayrnieu> That might make slightly more sense.
+13:28:42 <Vulpyne> As apposed to: def makePassword(mylist):
+13:28:48 <Vulpyne> And then passing mylist to map instead of range.
+13:29:02 <Vulpyne> Er, opposed.
+13:29:13 <Vulpyne> Anyway, it seems almost the same to me. :)
+13:29:18 <Vulpyne> The concept is the same for the actual code.
+13:29:45 <Vulpyne> It's still mapping each item in a list to an item that's a random character.
+13:30:08 <ayrnieu> (This Python idiom is obviously based off of optimization.)
+13:30:24 * Vulpyne nods.
+13:30:44 <Vulpyne> I like it better than an explicit loop also, though.
+13:30:56 <dark> Ah, I found my "last" problem :)
+13:31:22 <dark> Apparently I was following the auditing procedure of: "Hmm, this function uses last and it's fine.  Hmm, this next function uses last and is very similar to the previous one, so it's also fine."
+13:31:44 <ayrnieu> dark - ah, innocence-by-association
+13:31:45 <dark> Where of course I miss the little detail that the second function doesn't start with a line for a [] pattern.
+13:33:09 <ayrnieu> randomList 0 = return []; randomList (n+1) = do x <- randomRIO (1,100); l <- randomList n; return x : l
+13:33:26 <ayrnieu> randomList :: Int -> IO [Int]
+13:33:44 <ayrnieu> randomRIO ('a','z') would probably also serve.
+13:34:26 <Vulpyne> And then use the comprehension on the random list, using the values in that list for selecting from the list of password characters?
+13:34:58 <ayrnieu> eh?  No.  You'd implement makePassword the same way, except that you'd have different arguments to randomRIO.  There's probably a higher-order-function to be gained out of this.
+13:35:14 * ayrnieu would look at the Monad module documentation, except that he needs to leave.
+13:35:25 <Vulpyne> Now I'm confused. IT seems like the function you showed me made a list of random numbers.
+13:35:39 <ayrnieu> Yes, it does.  Here's a function that returns a list of random characters.
+13:36:07 <ayrnieu> randomString 0 = return []; randomString (n+1) = do x <- randomRIO ('a','z'); l <- randomString n; return x : l
+13:36:11 <ayrnieu> randomString :: Int -> IO String
+13:36:35 <dark> If you're looking for the higher-order function... there's "randoms" in System.Random which returns a lazy list.
+13:36:43 <Vulpyne> That's not the same way I was doing it. :)
+13:37:12 <dark> Vulpyne: For the way you want to do it, I suggest you look at mapM in Control.Monad :)
+13:37:32 <ayrnieu> Vulpyne - the way you're doing it is only excusable *in Python*, and only because map() is more efficient than recursion or iterative list-building.
+13:37:49 <ayrnieu> Yeah, mapM.
+13:37:51 <Vulpyne> Okay, thanks.
+13:38:21 <ayrnieu> mapM f [1..10] where f _ = randomRIO ('a','z')
+13:39:06 <dark> ayrnieu: Now you spoilered him :)
+13:39:25 <Vulpyne> Except I'm stubborn enough not to want to do it that way. :)
+13:39:59 <Vulpyne> That randomList function doesn't seem to work, though.
+13:40:25 <ayrnieu> yeah, 'return x : l' should be 'return $ x : l'
+13:40:48 <Vulpyne> Ah ha.
+13:56:25 <bronaugh> ok.
+13:56:35 <bronaugh> I want to return a boolean.
+13:56:40 <bronaugh> How would I do that?
+13:57:35 <bronaugh> I can't seem to actually make a bool to return.
+13:58:27 <hdaume> f x = if x == "Hello" then True else False
+13:58:36 <bronaugh> ah.
+13:58:39 <bronaugh> capital T true.
+13:58:41 <hdaume> the type is "Bool"
+13:58:46 <hdaume> yes, it's a datatype
+13:58:46 * Igloo looks at hdaume
+13:58:50 <hdaume> data Bool = True | False
+13:58:54 <hdaume> Igloo: yeah, i know
+13:58:56 <Igloo> :-)
+13:59:03 <dark> If you can't find True and False, you could always use 0 == 0 and 0 /= 0 :-)
+13:59:17 <hdaume> (and just hope it doesn't default to Double) :)
+13:59:44 <dark> Right, () == () and () /= ()
+13:59:52 <Heffalump> () /= () ??
+13:59:53 <dark> You get prettier ascii art that way too.
+14:00:33 <dark> Heffalump: I'm fairly sure there's an Eq () instance.
+14:01:06 <Heffalump> right...
+14:01:10 <Heffalump> OIC
+14:01:20 <Heffalump> you were trying to synthesise False, not claiming that it was true :-)
+14:01:33 <hdaume> :)
+14:01:46 <dark> Of course, the Eq () instance cheats and uses True and False anyway :)
+14:03:05 <dark> Hmm, conversation on #debian-devel reminds me that the Network modules don't seem to be IPv6 aware.
+14:05:55 <dark> The IPv6 socket functions seem to be underdocumented, though :)
+14:06:22 <Igloo> The C ones?
+14:06:29 <dark> Yeah.
+14:06:34 <dark> Are there Haskell ones?
+14:07:02 <dark> Ah wait, the docs are probably hidden in the info pages.
+14:07:12 <Igloo> No idea
+14:07:34 <Igloo> I can't even remember if there is any network stuff at all in H 98
+14:07:43 <dark> IPv6 support is on the todo list for my program, so I might end up sending in a patch :)
+14:07:57 <dark> Igloo: I don't think there is, but it's in hslibs :)
+14:08:52 <Igloo> I think IPv6 can afford to be reasonably far down on the list for a source control system. Say after commit at least  :-)
+14:09:57 <hdaume> anyone want to fill me in on what IPv6 is? ;)
+14:10:39 <Igloo> (if (this is) lisp) then:this:is:IP:v6::
+14:10:42 <Vulpyne> The next generation IP protocol. We're currently mainly using IPv4 on the internet.
+14:11:45 <dark> The main feature of IPv6 is larger addressing space, and addresses that are better optimized for routing over the backbone.  The main misfeature of IPv6 is that everyone's favourite extensions are in it.
+14:12:17 <hdaume> ok
+14:12:33 <dark> Oh, the other misfeature is that the colon-separated address bytes don't work in urls :)  Someone really fucked up there.
+14:12:47 <hdaume> :)
+14:12:56 <Marvin--> yeah that's reeeaally stupid
+14:13:28 <dark> They wanted something else than '.' to minimize confusion between IPv4 and IPv6 addresses... as if the length wasn't a clue, and as if looking like an ethernet address isn't just as bad.
+14:13:51 <Igloo> What, you mean : isn't a valid character in a URL?
+14:14:03 <dark> Igloo: It's the separator between hostname and port :)
+14:14:17 <Igloo> Oh, 'course  :-)
+14:14:29 <dark> You could put it into the host specification, but then you'd have to escape it as %3A.
+14:14:52 <dark> And yes, you can put escapes into the hostname of a url, even though lynx disagrees :-)
+14:16:04 <dark> It's probably all part of the ICANN power grab.
+14:23:08 <Heffalump> it's valid in the query part, isn't it?
+14:34:56 <dark> According to rfc2396, ':' is also reserved in the query part, but whether that's significant depends on the server.
+14:36:00 <dark> "reserved" doesn't mean you can't use it, just that escaping it can change the meaning of the query :)
+14:37:08 <Heffalump> hmm, right
+14:44:06 <Vulpyne> Woo, got it working.
+14:45:18 <bronaugh> *whew*
+14:45:25 * bronaugh just finished that Haskell code.
+14:45:28 <bronaugh> it's LONG damn it.
+14:45:33 <bronaugh> and probably really badly written.
+14:45:37 <bronaugh> but it functions.
+14:45:53 <Vulpyne> What does it do?
+14:46:25 <bronaugh> not much.
+14:46:36 <bronaugh> it works out the shortest path between two points.
+14:47:01 * Vulpyne nods.
+14:47:16 <bronaugh> the only twist being that the input isn't really very pleasant, and that if there's an edge weight of more than 10 it must be avoided, but if it's unavoidable then the program shouldn't care whether there's other hills.
+14:47:32 <Vulpyne> Interesting.
+14:47:42 <bronaugh> hills == edge weights over 10
+14:48:03 <bronaugh> it's almost 300 lines of code.
+14:48:09 <bronaugh> it should be a _LOT_ shorter IMO.
+14:59:42 <stepcut> I wonder if FreeBSD runs under plex86
+15:01:30 <Igloo> Last I heard "Hello world" in assembly barely ran  :-)
+15:02:02 <stepcut> so running ghc under freebsd via plex86 is probably not going to happen..
+15:06:52 <dark> Interesting that it takes wget 2 seconds to download a page while it takes my tool 0.7 seconds to download and parse it.  I wonder what wget is doing wrong.
+15:09:18 <dark> Ah, I wasn't playing fair :)  I already had an index.html file locally, so wget tried a HEAD request first.
+15:14:08 <bronaugh> Igloo: plex86? hmmm, I booted something under that... and it was really slow.
+15:14:34 * Igloo hasn't been following it at all closely
+15:15:32 <Pseudonym> I wrote a simple proto-OS and tried to get it to run under plex86.  No dice.
+15:15:56 <Pseudonym> Most of the problem was getting GRUB to boot.
+15:23:46 <dark> Cool, it works over http now :)
+15:24:17 <dark> Fortunately this allowed me to test it on more archives, which promptly exposed another bug.  So I don't have to be bored yet.
+15:25:40 <Igloo> When you have the perfect source control system with the perfect text and graphical user interfaces you are allowed to be bored
+15:26:17 <Marvin--> ... and when everybody have agreed on which editor is best
+15:26:41 <Igloo> You mean when we've killed all the emacs users?  :-)
+15:26:48 <Marvin--> yep
+15:28:25 <Heffalump> OI!
+15:28:41 * hdaume grumbles
+15:28:44 <Pseudonym> Yet another reason not to use emacs.
+15:29:04 <Heffalump> being killed by Igloo and Marvin--?
+15:29:12 <Pseudonym>  Ah, haven't had a good editor flamewar in years.
+15:29:43 <dark> Igloo: "graphical" user interface?  You're talking to someone who only starts X if there's a specific reason :)
+15:31:20 <Marvin--> yeah, down with X, gtkfb does what you want anyway :D
+15:31:50 <Pseudonym> Only if you want to use the horribly broken gtk interface.
+15:32:05 <Pseudonym> GTK almost never does what I want.
+15:33:05 <Marvin--> heh, I like gtk
+15:35:20 <Pseudonym> I like Qt.
+15:35:31 <Marvin--> I don't :)
+15:35:39 <Marvin--> but let's not get into that war either :)
+15:35:51 <Pseudonym> I wrote my first MFC program after I learned Qt, too.  I soon learned to like Qt even better.
+15:39:18 <Igloo> Why, Pseud?
+15:40:05 <Igloo> (IM how is it better than Gtk, not MFC)
+15:40:29 <engstad> Qt is really good because it was made by Norwegians. ;-)
+15:40:56 * Igloo is seriously interested in serious reasons
+15:41:18 <Pseudonym> First, I like the signal/slot mechanism.
+15:41:23 <engstad> Seriously though, qt is a really good c++ library.
+15:41:36 <Pseudonym> I think it's a very clean way to model GUI component communication.
+15:41:48 <Pseudonym> But really, in the end, I don't like GTK for the same reason I don't like Motif.
+15:42:00 <Igloo> Namely?
+15:42:01 <Pseudonym> Trying to do OO in C is a pain.
+15:42:39 <Pseudonym> In C++, you can just do it.  In C, you need to simulate it with more code than should be necessary.
+15:42:39 <engstad> Well, you can really mess up with oo design, and the trolls seemms to have avoided it, which is quite a feat.
+15:43:00 <Pseudonym> That's true, but Qt has done it for you.
+15:43:07 <Pseudonym> OO is a natural fit for GUIs.
+15:43:24 <Pseudonym> It doesn't apply in many other situations, but in GUIs, it seems to be precisely the Right Thing(tm).
+15:43:27 <engstad> Well, if you also add signals/slots. ;-)
+15:43:38 <dark> Isn't this how OO started?
+15:44:08 <Pseudonym> That depends how you define "OO".
+15:44:32 <Pseudonym> There's a continuum between "not OO" and "OO".
+15:44:53 <Pseudonym> But yes, the first fully OO language was probably Smalltalk, and was designed along with the GUI.
+15:45:11 <Pseudonym> But it was based on techniques designed for simulation.
+15:46:39 <stepcut> I wonder if there are any useful GUI toolkits that 'require' 3D accelaration hardware
+15:46:55 <Pseudonym> There's one which is based on OpenGL.
+15:47:07 <Pseudonym> I don't think it "requires" 3D accelleration, only OpenGL.
+15:47:15 <stepcut> any idea what its called?
+15:47:40 <stepcut> GLUT?
+15:47:44 <dark> Aha, it wasn't so much a bug in my tool, as a lack of robustness.  There was an error in the repository it accessed.
+15:48:42 <Pseudonym> GLUT isn't really a GUI toolkit.
+15:48:59 <stepcut> agreed
+15:49:33 <Pseudonym> http://glow.sourceforge.net/
+15:49:35 <Pseudonym> There's one.
+15:49:44 <Pseudonym> It implements native widgets on top of OpenGL.
+15:49:50 <stepcut> I looking at that page as we speak
+15:50:03 <Pseudonym> I think I was thinking of GLUI, though:
+15:50:04 <Pseudonym> http://www.cs.unc.edu/~rademach/glui/
+15:52:59 <stepcut> I wonder if it would be better to try to write something like GLUI in Haskell (on top of HOpenGL), or to try to add Haskell bindings for GLUI
+15:53:10 <Pseudonym> Eek.
+15:53:22 <Pseudonym> I'm not sure that this sort of thing is to be encouraged. :-)
+15:53:41 <Pseudonym> It'd be an interesting exercise, admittedly
+15:53:54 <stepcut> seems like doing something like GLUI in Haskell would allow for easier extension than doing bindings
+15:54:00 <Pseudonym> Implement ObjectIO on top of HOpenGL.
+15:55:11 <dark> Hmm, I'm sure a uniq function can be done in less than four lines.
+15:55:37 <dark> Currently I write out the recursion:
+15:55:41 <dark> uniq [] = []
+15:55:41 <dark> uniq [x] = [x]
+15:55:41 <dark> uniq (x : y : xs) | x == y = uniq (y : xs)
+15:55:41 <dark> uniq (x : y : xs) = x : uniq (y : xs)
+15:56:35 <Igloo> uniq (x : y : xs) = if x == y then uniq (y : xs) else x : uniq (y : xs)
+15:56:40 <Igloo> uniq xs = xs
+15:57:15 <dark> Well, yeah :)  The if then else is sort of cheating, it doesn't actuall simplify.
+15:57:22 <dark> But moving the simpler cases down does look better.
+15:57:51 <dark> I wonder if something evil could be done with zipWith xs (tail xs)
+15:58:02 * Igloo was just looking at that
+15:58:07 <Pseudonym> uniq xs@(_:_:_) = [ x | (x,y) <- zip2 xs (tail xs), x /= y ]
+15:58:09 <Pseudonym> uniq xs = xs
+15:58:13 <Igloo> I suspect not though as you lose one instance of each list
+15:58:14 <dark> I've run into this pattern before, you see, having to go through a list by pairs.
+15:58:40 <Pseudonym> Is that short enough?
+15:58:55 <dark> Pseudonym: It looks cool :)
+15:59:02 <dark> Hmm, zip2, is that just zip?
+15:59:03 <Igloo> uniq [1,2,3] will be wrong, though
+15:59:08 <Pseudonym> Sorry, yes.
+15:59:29 <Pseudonym> I never use zip, so I occasionally use the Miranda-ism zip2.
+15:59:43 <Pseudonym> Igloo: Ah, yes.  The last element isn't there.
+15:59:47 <Pseudonym> Damn.
+15:59:56 <stepcut> In 'Q' you can do it in three:
+16:00:01 <stepcut> uniq []        = [];
+16:00:04 <stepcut> uniq [X,X|Xs]  = uniq [X|Xs];
+16:00:06 <Igloo> Just adding the first element might fix it, though
+16:00:07 <stepcut> uniq [X|Xs]    = [X|uniq Xs] otherwise;
+16:00:20 <Pseudonym> That'd do it.
+16:00:34 <Pseudonym> uniq xs@(x:_:_) = x : [ y | (x,y) <- zip2 xs (tail xs), x /= y ]
+16:00:44 <Pseudonym> I think that'll work.
+16:00:46 <dark> stepcut: It does multiple bindings on the left side?
+16:01:00 <Pseudonym> Sorry, zip.
+16:01:22 <Pseudonym> Actually, was zip2 a Miranda-ism or a Gofer-ism?
+16:01:34 <Pseudonym> Now that I think about it, I think it was from Gofer.
+16:01:39 <stepcut> dark: Something like that.. it allows a few things on the left that Haskell doesn't
+16:01:48 <Igloo> Yeah, except use x1 so you don't get name shadowing  :-)
+16:02:06 <Pseudonym> Or x'
+16:02:19 <Pseudonym> Looks more mathematical.
+16:02:26 <Pseudonym> OK, final version:
+16:02:35 <Pseudonym> uniq xs@(x':_:_) = x' : [ y | (x,y) <- zip xs (tail xs), x /= y ]
+16:02:37 <Pseudonym> uniq xs = xs
+16:03:06 <Pseudonym> You can do it in one line if you use a case, of course.
+16:03:09 <Pseudonym> But it's a long line.
+16:03:15 <dark> Yeah, that wouldn't count.
+16:03:31 <Pseudonym> uniq xs = xase xs of { @(x':_:_) => x' : [ y | (x,y) <- zip xs (tail xs), x /= y ] ; _ => xs }
+16:03:40 <stepcut> dark: you can also do stuff like ([X|Xs] = []) = false;
+16:03:40 <Pseudonym> s/xase/case/
+16:03:51 <Pseudonym> stepcut: It looks very Prolog.
+16:04:00 <Igloo> YM ->   Anyone would think you'd been off programming in lesser languages or something  :-)
+16:04:02 <stepcut> or eq X X = true; eq _ _ = false;
+16:04:24 * stepcut has not learned prolog yet
+16:04:54 <Pseudonym> You can always tell a Prolog derivative if it uses capital letters for variables and pipe notation for lists.
+16:05:04 <dark> Pseudonym: I think that in line count reduction contests, the layout rule needs to be enforced :)
+16:05:09 <Pseudonym> Does Q support nondeterminism?
+16:05:31 <Pseudonym> Eek.  Repeated variable pattern matching.
+16:05:39 * Pseudonym is SO glad Haskell doesn't support it
+16:05:56 <Heffalump> why?
+16:06:11 <Heffalump> it compiles to pattern matching with guards fairly straightforwardly
+16:06:42 <Pseudonym> Heffalump: Because == can be overloaded, it can cause an arbitrary amount of extra computation exactly where you least expect it.
+16:06:57 <Pseudonym> Especially because most repeated variable patterns are put there accidentally.
+16:06:57 <stepcut> Pseudonym: not that I know of
+16:07:08 <Pseudonym> stepcut: So it's more like Erlang, then.
+16:07:13 <Heffalump> I guess
+16:07:41 <Pseudonym> Let me put it this way: Accidentally introducing repeated variables was a significant source of errors in my Miranda code.
+16:07:44 <Heffalump> an accidental repeated variable pattern would generally cause a non-exhaustive guards/patterns warning, though
+16:07:56 <stepcut> dunno, I have not learned Erlang either :) http://www.musikwissenschaft.uni-mainz.de/~ag/q/
+16:08:12 <Pseudonym> Heffalump: I put then in the same category as n+k patterns.
+16:08:29 <Heffalump> n+k patterns a nasty but convenient hack
+16:08:46 <Heffalump> whereas IMO non-linear patterns are a convenient bit of syntax
+16:09:09 <Pseudonym> Maybe.  I want pattern guards instead, personally.
+16:09:29 <Pseudonym> I want to compute any Bool I want and make that fail a pattern.
+16:09:39 <Heffalump> maybe Modules should be able to define which syntactic sugar they use :-)
+16:09:41 <dark> musikwissenschaft?
+16:09:46 <Heffalump> well, pattern guards are definitely needed too
+16:10:02 <Pseudonym> Heffalump: In Template Haskell they might just be able to do that. :-)
+16:10:50 <dark> I don't think I've ever used an n+k pattern.
+16:10:58 <Igloo> What sort of thing would a pattern guard enable you to do?
+16:11:05 * Igloo likes n+k patterns
+16:11:17 <Pseudonym> stepcut: Interesting.  The syntax is an odd mix of Clean, ML and Erlang, with a strict Clean-like semantics.
+16:11:44 <Pseudonym> Very quirky little language.
+16:12:03 <dark> Igloo: http://research.microsoft.com/Users/simonpj/Haskell/guards.html
+16:12:11 <dark> Igloo: That contains a long rant about them :)
+16:12:39 <stepcut> Here is another interesting clip:
+16:12:45 <stepcut> true and then X = X;
+16:12:49 <stepcut> false and then X = false;
+16:12:52 <stepcut> (X <> 0) and then (foo (1/X) > 0)
+16:12:53 <Igloo> Ah, right
+16:13:16 <Pseudonym> stepcut: Most languages have shortcutting and.
+16:13:21 <Igloo> So it's so you can say things like | Just x = maybe_foo?
+16:13:40 <Pseudonym> Even Perl has: $x != 0 && foo(1/$x) > 0
+16:13:56 <dark> Igloo: Exactly.
+16:14:06 <Pseudonym> stepcut: In Haskell, it's:
+16:14:10 <Pseudonym> True && x = x
+16:14:12 <Pseudonym> False && x = False
+16:14:19 <Pseudonym> Lazy evaluation does the rest.
+16:14:58 <Pseudonym> Or in Prolog:
+16:15:22 <Pseudonym> p(X) :- not (X = 0), Y is foo(1/X), Y > 0.
+16:15:49 <stepcut> Pseudonym: so 'True && x = x' is valid haskell code?
+16:15:55 <Pseudonym> Yes.
+16:16:00 <Pseudonym> It's in the Prelude, even.
+16:16:32 <stepcut> interesting, I guess I have just not seen any code like that in haskell yet
+16:16:43 <Pseudonym> stepcut: http://haskell.org/onlinereport/standard-prelude.html#$v$A$A
+16:17:31 <stepcut> excellent
+16:17:53 <stepcut> I still have much to learn about Haskell :)
+16:18:12 <dark> stepcut: I don't think that ever stops :)
+16:18:37 * stepcut finally realized that he need to use >>= the otherday
+16:18:44 <stepcut> needed
+16:18:45 <Igloo> step: It's the same as "(&&) True x = x"
+16:20:03 <stepcut> That's how I would have written it
+16:20:56 <dark> Today I managed to use >>= in a new (for me) way :)
+16:20:58 <dark> case (parseURI loc) >>= (`relativeTo` uri) of
+16:21:23 <Pseudonym> Woohoo.
+16:21:24 <dark> And then Nothing and Just newuri cases
+16:22:04 <stepcut> dark: are you the person working on a 'replacement' for WASH/CGI?
+16:22:15 <dark> stepcut: Nope.
+16:22:23 <dark> Never heard of WASH :)
+16:22:43 <stepcut> what is that code for ?
+16:23:04 <dark> It's from the HTTP client module of a version control tool.
+16:23:19 <dark> The bit that follows redirections :)
+16:23:32 <stepcut> ah
+16:23:54 <dark> I considered using a client library like cURL, but a) wrapping it would have been hundreds of lines, b) it wasn't written in Haskell, and c) it wasn't written by me. 
+16:24:18 <stepcut> WASH/CGI is haskell library for writing CGI scripts
+16:24:35 <dark> Hmm, I think shapr was using something called HSP.
+16:25:05 <stepcut> there's 2 or 3 toolkits for doing CGI stuff in haskell I think
+16:25:59 <stepcut> but I can't seem to find a good MySQL interface. HaskellDB looks like a good interface, but it currently only have ODBC bindings: http://haskell.cs.yale.edu/haskellDB/example.html
+16:26:25 <dark> Isn't there a MySQL ODBC backend?
+16:26:32 <dark> Or frontend, or whatever it is with ODBC :)
+16:26:49 <stepcut> dunno, I don't know much about databases
+16:27:21 <stepcut> I have only used ODBC with Visual Basic and MS Access, I thought it was a Windows only thing, and I need to do it on FreeBSD
+16:29:56 <Heffalump> I meant "foo x | boolean condition = ..." by pattern guard
+16:30:00 <Heffalump> was I being confused?
+16:30:27 <dark> Yeah, that's an ordinary guard.  "pattern guards" are a proposed extension.
+16:30:44 <Heffalump> ah.
+16:30:49 <dark> It might be that those used to be called pattern guards too, before the extension came along and claimed that part of the namespace :)
+16:30:57 <Heffalump> I always think of them as guarding a particular pattern
+16:32:20 <Heffalump> ah, I see
+16:32:54 <Pseudonym> I think of pattern guards as an inverted identity monad comprehension.
+16:33:09 <Pseudonym> Compare [ E | P <- Q, B ]
+16:33:18 <Pseudonym> with: f ... | P <- Q, B = E
+17:14:33 <v7c> hi
+17:14:39 <Heffalump> hi
+17:15:59 <Pseudonym> G'day.
+17:16:09 <v7c> prelude doesn;t have an isPrime function does it?
+17:16:29 <Igloo> No
+17:16:43 <Pseudonym> No.
+17:16:46 <v7c> thought so
+17:16:48 <Pseudonym> There's a good reason for that, too.
+17:16:59 <v7c> yea ...
+17:17:14 <Pseudonym> a) Few people need primes, b) Those who do generally need an implementation tailored for their needs.
+17:17:33 <v7c> oh ok
+17:18:03 <dark> And most are happy enough with an isProbablyPrime function :-)
+17:18:18 <v7c> is that in prelude?
+17:18:38 <v7c> no its not 
+17:19:06 <v7c> hmmm so are u implying that an isPrime function can take a while
+17:20:02 <dark> Well, it depends on how large its argument is.
+17:20:45 <v7c> wat about just an Int -> Bool
+17:20:55 <Pseudonym> v7c: Best algorithm is not even polynomial in the number.
+17:21:04 <Pseudonym> It's something like O(N^(log(log N)))
+17:21:53 <v7c> yes, but i just need one for small numbers
+17:22:01 <v7c> so it doesn;t really matter
+17:22:13 <Pseudonym> How small?
+17:22:58 <v7c> hmmm lets say up to 50
+17:23:24 <dark> In that case it's probably easiest to just list them, and do `elem`
+17:23:40 <Pseudonym> But it's faster to list them and binary search.
+17:23:41 <v7c> i could do that
+17:24:08 <Pseudonym> Then for primes up to 50*50, you just do a mod with the primes up to 50.
+17:24:43 <dark> Hmm, or use a straight Array Int Bool
+17:25:11 <v7c> yes, but i'm sure there is a better way
+17:25:19 <dark> I don't think there are any standard modules that help with binary search.
+17:25:30 <v7c> do u knoe Lohman's algorithm
+17:25:31 <Pseudonym> SO build a balanced tree. :-)
+17:26:30 <Pseudonym> Not offhand.
+17:26:47 <Pseudonym> Seriously, though, most numbers that you want to test for primality fail a small primes test.
+17:26:54 <dark> It should at least be possible to arrange it so that each isPrime value is calculated only once.  This is Haskell :)
+17:27:20 <Pseudonym> dark: Yes it is.  I worked out a very neat way to do it, too.
+17:27:39 <dark> Pseudonym: The array thing you showed me? :)
+17:27:53 <Pseudonym> No, even better than that, because it works over infinite domains.
+17:28:05 <Pseudonym> It's O(log I) time to lookup element I.
+17:28:07 <dark> Cool.  That's what I was worrying about in this case.
+17:28:26 <Pseudonym> In principle, you have a list of perfectly balanced binary trees.
+17:28:52 <Pseudonym> Each element of the list is one level deeper than the one before it.
+17:29:21 <Pseudonym> That's O(log I) time.
+17:29:41 <v7c> are the prime numbers in the trees??
+17:29:52 <Pseudonym> v7c: We're talking about memoing.
+17:30:04 <Pseudonym> Basically, remembering previous values of isPrime.
+17:30:09 <v7c> oh ok
+17:30:21 <Pseudonym> This is ignoring the problem of actually doing prime testing.
+17:30:33 <dark> Pseudonym: So first you walk to the right tree, then you descend in it?
+17:30:45 <Pseudonym> Right.
+17:31:02 <Igloo> And it gets memoised by virtue of being a CAF?
+17:31:08 <Pseudonym> Yes.
+17:31:21 <Pseudonym> And thanks to lazy evaluation, you only evaluate as much of the data structure as you use.
+17:31:45 <Pseudonym> It probably pays to optimise the first few elements as a memoising array, though.
+17:31:53 <Igloo> So in this case you'd have all numbers in the trees rather than just primes presumably
+17:31:58 <Pseudonym> where "few" might be several tens of thousand.
+17:32:04 <Pseudonym> Right.
+17:32:12 <Igloo> Otherwise you'd have to evaluate isPrime for everything in your chosen tree
+17:32:21 <Pseudonym> Exactly.
+17:32:59 <Pseudonym> And, of course, it only pays to optimise functions where the cost of computing is greater than O(log n).
+17:33:13 <Pseudonym> So, for example, you wouldn't optimise Fibonacci numbers this way. :-)
+17:33:14 <dark> Hmm, but it can end up evaluating isPrime more than once, right?
+17:33:27 <Pseudonym> Not on the same number.
+17:33:34 <dark> Because an argument can occur in more than one tree.
+17:33:49 <Pseudonym> Er... I don't understand.
+17:34:08 <Igloo> No, the nth tree has the numbers from 2^n to 2^(n+1) (give or take a bit)
+17:34:13 <Pseudonym> Right.
+17:34:32 <dark> Oh, right.  I thought each tree just added one more layer :)
+17:34:40 <Pseudonym> No. :-)
+17:35:13 <dark> Igloo: I've never seen "give or take a bit" used so literally before :)
+17:35:21 <Pseudonym> Lunch time for me.
+17:35:41 <v7c> yea i'm starving
+17:35:48 * Igloo enables a trace in GHC's parser and discovers the reason I am getting nowhere is that I don't have a clue what is going on
+17:36:00 <v7c> cya all
+17:36:10 <Igloo> lol dark
+17:36:42 * Igloo likes the quote along the lines of "Don't tell me there's not a bit of difference between NUL and space, because that's *exactly* how much difference there is!"
+17:36:52 <Heffalump> :-)
+17:36:55 <dark> Only in ASCII though :)
+17:37:15 <Heffalump> isn't null 0x0 and space 0x20 in almost anything?
+17:37:29 <Heffalump> Unicode surely embeds ASCII in the lower 128 characters, for example
+17:37:35 <dark> Maybe not in EBCDIC...
+17:38:08 <Heffalump> I thought that was ASCII in the lower 128 characters too
+17:38:09 <dark> But yeah, "only" was an overstatement :)
+17:38:15 <Heffalump> oh, no.
+17:38:39 <Heffalump> ah, but it's 0x40 in EBCDIC :-)
+17:38:45 <dark> Ooh :)
+17:39:05 <Igloo> In all versions of it?
+17:39:16 <Heffalump> how many versions are there?
+17:39:26 <Igloo> "It exists in at least six mutually incompatible versions"
+17:39:37 <Heffalump> ah.
+17:40:01 <dark> "exists" might be stretching it :)
+17:40:26 <dark> Though I suppose some computers that use it have been up since the 60s.
+17:40:27 <Igloo> Aaargghhh!
+17:41:01 * Igloo discovers I've spent the last hour or so putting code in the [| |] bit rather than the [d| |] bit
+17:41:54 <dark> That doesn't look like Haskell to me.
+17:42:17 <Igloo> It's Template Haskell
+17:42:17 <dark> Unless it's a weird form of list comprehension :)
+17:43:12 <Igloo> [| foo |] :: Q Exp, [d| foo |] :: Q [Dec]   where Exp and Dec are ASTs respresenting expressions and declarations respectively
+17:54:30 <Igloo> Right, that's better. Now it tells me what I wanted to know and just doesn't work.
+18:09:37 <dark> If things just worked, what would we do?
+18:10:46 <dark> http://www.xs4all.nl/~dark/harc-0.1pre10.tar.gz
+18:11:00 <Igloo> I'd start by e-mailing a small list of people to tell them my funky TH program can actually be run now  :-)
+18:11:20 <Igloo> Cool - does that mean you have finished get support?
+18:11:36 <dark> Well, to the extent that it can check out its own archive :)
+18:12:29 <dark> It doesn't have a generic "update" or "dopatch" yet.
+18:13:40 <Igloo> You know a tarball is hott off the press when clock skew is sufficient to make tar complain
+18:13:46 <dark> Heh.
+18:15:10 <Igloo> How complete is arch, BTW?
+18:15:12 <dark> I'll be happy with any comments, especially ones that point out better ways to code things :)  (like "why did you spend 200 lines on duplicating this standard module?")
+18:15:40 <dark> Igloo: Pretty much complete, especially Walter Landry's version.
+18:15:56 <Heffalump> what can it actually do?
+18:16:46 <Igloo> You could say things like "command_word_count = length . name", but that's really a matter of style
+18:17:43 <dark> Heffalump: landry's arch?  It has various kinds of patching and merging, support for "distribution" definitions that combine pieces of various archives, changes-notifier, building of html trees to browse repositories... probably stuff I forgot, too.  And Landry's version has access methods for FTP, HTTP with DAV, and scp.
+18:18:09 <Heffalump> hmm
+18:18:13 <dark> Heffalump: arch's only problem is that it doesn't scale up to projects like linux-kernel :)
+18:18:21 <Heffalump> performance-wise?
+18:18:31 <dark> Igloo: How would you write it?
+18:18:42 <Igloo> As above
+18:18:44 <dark> Heffalump: Yeah, and maybe repository layout.
+18:18:54 <Igloo> (You've done "command_word_count cmd = length (name cmd)")
+18:20:13 <dark> Igloo: Yeah... I haven't figured out when to use which form :)
+18:20:27 <dark> Igloo: Is it only stylistic, or does it have other effects?
+18:20:44 <Igloo> I'd probably say    usage_info cmd = zip (usages cmd) (desc cmd:repeat "")    too
+18:20:47 <Heffalump> only stylistic
+18:20:56 <Heffalump> length $ name cmd
+18:20:59 <Heffalump> is another alternative
+18:23:05 <dark> Igloo: Interesting, that completely gets rid of the case.
+18:25:13 <Igloo> And a pair of nested irrefutable patterns for args in run_subcommand
+18:25:32 <Igloo> args@~(arg1:~(arg2:_)) I think
+18:26:03 <dark> To stop the heading and tailing?
+18:26:16 <Igloo> (sorry, I got stuck with GHC so I started reading your code  :-)  )
+18:26:18 <Igloo> Yeah
+18:26:42 <Igloo> Does this compile?
+18:27:01 <Igloo> You aren't allowed to break strings across lines like you do in H98
+18:28:03 <dark> It compiles and runs just fine :)  But ghc tends to get confused about line numbering.
+18:29:14 <dark> How should long strings be done in Haskell98?  Lots of ++ ?
+18:29:37 <Igloo> foo = "Foo\
+18:29:42 <Igloo> \Bar\
+18:29:45 <Igloo> \Baz"
+18:29:50 <dark> Aha
+18:29:58 <Igloo> Oh, probably \n\ at the ends of the lines
+18:30:00 <dark> \n\ to get the same effect, I guess.
+18:30:02 <dark> Yeah :)
+18:30:28 <dark> Though it might be nicer if I did wrapping separately.
+18:30:42 <dark> And checked the terminal's number of columns.
+18:31:52 <dark> Hmm, now that I look at this code again, I figure that the "usage" field should just be a list.
+18:31:54 <Igloo> You know {- ... -} Can be used to make multi-line comments?
+18:32:05 <dark> Every code that uses "usage" does "lines" on it :)
+18:32:45 <dark> Igloo: Yeah, but somehow I don't like it.  Might be my nvi usage :)  I'm line-oriented.
+18:34:25 <dark> Commands is one of the older modules :)
+18:35:02 <Igloo> all is missing from .PHONY
+18:35:16 <dark> Thanks :)
+18:35:52 <dark> Hmm, the "make test" stuff is for a different program, I don't use it in this one :)
+18:36:07 <Igloo> lol
+18:37:03 <Igloo> Do you make sure foo//bar can't happen?
+18:37:09 <Igloo> (i.e. doubled /)
+18:37:29 <dark> In what context?
+18:38:58 <Igloo> Well, you're doing, for example, show aname ++ "/" ++ show name. I don't know what these things are but if they're like UNIX paths then aname would be "/" for the root and would otherwise not end in a /, so you would get //foo if it was something off the root
+18:39:57 <dark> Ah, I use safe_add_path (Util.Path) when I'm worried about that :)
+18:40:24 <dark> But I should probably figure a safer way to keep track of which strings have and don't have slashes at the end.
+18:40:42 <Igloo> Cool
+18:41:01 <dark> It's the kind of thing that goes wrong once somewhere and then bites you :)  (
+18:41:13 <dark> (Today I also ran into an unguarded "last", took me ages to find)
+18:43:19 <Igloo> double_dash = any ("--" `isPrefixOf`) . tails
+18:44:05 <dark> Cool :)  I've never used tails before.
+18:45:03 * Igloo recommdns against giving instances of Show - deriving it is vastly more useful for debugging
+18:45:18 <Igloo> I'd write show_KnownOption or something
+18:46:06 <dark> Yeah, I've been wondering about that.
+18:46:07 <Igloo> And I'd probably infixify has_opt too  :-)
+18:46:10 <dark> I use show in lots of places.
+18:46:31 <dark> Maybe I should make a Stringify class :)
+18:47:02 <dark> But "show" is only 4 letters, that's important sometimes :)  (Lots of uses of show are mixed with really-long user output)
+18:47:33 <dark> Hmm I already use it infixly :)
+18:47:39 <dark> Do you mean giving it a precedence?
+18:48:16 <dark> Oh, the definition?
+18:48:47 <Igloo> No, there were some guards where you didn't
+18:51:16 <dark> Ah, I see them.
+18:51:38 <dark> I wonder what to do about parse_options.  With luck I'll never have to touch it again, though :)
+18:51:54 * Igloo assumes you know that x /= [] in collides
+18:52:28 * Pseudonym agrees with Igloo on the deriving Show thing
+18:52:36 <Pseudonym> If you want a different kind of show, make a PrettyPrint class.
+18:53:14 <Pseudonym> Wow.
+18:53:28 * Pseudonym has just worked out how much better complex fractals look when you filter them properly
+18:53:53 <Igloo> tagify probably wants to check for \t too?
+18:54:05 <Igloo> How do you mean, Pseud?
+18:54:27 <Igloo> format_string has been defined twice which seems bad
+18:54:39 <dark> I think \t isn't isPrint
+18:55:04 <Igloo> Ah, OK
+18:55:17 <Pseudonym> A pixel is a point sample.
+18:55:29 <Pseudonym> For correct reconstruction, you need to filter out high frequencies before sampling.
+18:55:32 <Igloo> In classify_by_name you could use elem on a String rather than [Char], but I guess all it saves is the typing you've already done  :-)
+18:56:21 <Pseudonym> http://andrew.bromage.org/mand.jpg
+18:56:23 <Pseudonym> For example
+18:56:25 <Igloo> You are proposing something like antialiasing?
+18:56:44 <Pseudonym> Antialiasing covers a number of things.
+18:56:48 * Igloo hopes so because I might be able to use TH to add that to Fraskell really easily  :-)
+18:56:52 <Pseudonym> But yes, I mean reducing visible aliasing.
+18:57:29 * Igloo wonders if that's derived from my code
+18:57:37 <Pseudonym> The parameters are.
+18:57:43 <Pseudonym> No, I wrote it in C++.
+18:57:44 <Igloo> Well, I mean supersampling really I guess
+18:58:01 <Igloo> Ah, OK  :-)
+18:58:02 <Pseudonym> Supersampling does not remove aliasing.
+18:58:10 <Pseudonym> It just pushes the problem up a few octaves.
+18:58:18 <Igloo> (Damn, nearly had a user then!)
+18:58:22 <dark> Igloo: Well, it does look prettier as a string :)  That's always worthwhile.
+18:58:23 <Pseudonym> :-0
+18:58:33 <Igloo> So what do you mean then?
+18:58:47 <Pseudonym> That uses stratified Monte Carlo sampling and a reconstruction filter.
+18:59:05 <Pseudonym> It's also gamma corrected before quantisation.
+18:59:12 <Igloo> Oh, so you are taking the point values and essentially smoothing them after the event?
+18:59:15 * Pseudonym used to work in visual effects
+18:59:21 <Pseudonym> Yes and no.
+18:59:29 <Pseudonym> I am sort of supersampling, but...
+18:59:48 <Pseudonym> Trying to think of how to explain this.
+18:59:58 <Pseudonym> You know that a pixel is a point sample.
+18:59:59 <Igloo> Is MC sampling like what povray calls jitter?
+19:00:02 <Pseudonym> It's not a little square.
+19:00:26 <Pseudonym> Jitter is one method of MC sampling.
+19:01:05 <Pseudonym> How much do you know about digital signal processing?
+19:01:14 <Igloo> Hmmm, OK - so you actually look at a random point inside the square?
+19:01:20 <Igloo> Extremely little
+19:01:30 <Pseudonym> No, a pixel isn't a square!
+19:01:38 <Pseudonym> :-)
+19:01:57 <Pseudonym> A pixel is a point.
+19:02:02 <dark> Igloo: I've been checking up on the collides function.  Empty filenames _shouldn't_ occur, but parse_index isn't careful enough and might let them in :)
+19:02:51 <Pseudonym> What you want to record at that point is the integral of a filter kernel function times the underlying "image".
+19:02:52 <Igloo> I didn't say the pixel was a square, but the area of space represented by a pixel is a square
+19:03:03 <Pseudonym> No it isn't.
+19:03:13 <Igloo> Where space is the plane the fractal is in
+19:03:38 <Pseudonym> No more than a sample in a sound file represents air pressure during a time interval.
+19:03:48 <dark> Pseudonym: If pixels were points we wouldn't be able to see them :)
+19:04:28 <Pseudonym> dark: Yes we would.
+19:04:36 <Pseudonym> But we wouldn't view them directly.
+19:04:48 <Pseudonym> A sample is a multiple of the Dirac delta function.
+19:05:13 <Pseudonym> You don't view samples, you reconstruct an image from the samples.
+19:05:33 <Pseudonym> Anyway.
+19:05:50 <Pseudonym> Igloo: Effectively, you do take each sample value from an area around the pixel point.
+19:06:03 <Pseudonym> However, for proper reconstruction, that area is larger than the "square".
+19:06:11 <Igloo> Hmmm, OK
+19:06:36 <Pseudonym> In fact, I used 2 "pixel widths" around each pixel.
+19:06:51 <Pseudonym> Ideally, you should use the entire domain.
+19:07:01 <Pseudonym> But that's computationally expensive. :-)
+19:07:17 <Pseudonym> What you're actually trying to sample is the convolution of your filter kernel with the underlying image.
+19:07:23 <Pseudonym> I used a gaussian kernel.
+19:10:57 <Pseudonym> This may help: http://alvyray.com/Memos/MemosMicrosoft.htm#PixelIsNotSquare
+19:11:16 <Pseudonym> Direct link: ftp://ftp.alvyray.com/Acrobat/6_Pixel.pdf
+19:11:34 * Igloo pushes onto reading list
+19:13:15 <Pseudonym> Oh, the other thing I did was gamma correct before quantising.
+19:13:42 <Pseudonym> I converted the number of iterations to a float, then gamma corrected, then quantised.
+19:14:04 <dark> Igloo: Thanks for the tips :)  I'll go to bed now.
+19:14:06 <Pseudonym> Using random dithering to capture the in-between levels.
+19:14:12 <Igloo> :-)
+19:14:16 <Pseudonym> :-)
+19:14:34 <Pseudonym> I'm trying it with a Catmull-Rom filter now.
+19:17:52 * Igloo might have a play once I've got a working compiler to play with
+19:18:21 <Pseudonym> :-)
+19:18:26 <Pseudonym> TH doesn't look fun.
+19:19:05 <Igloo> How do you mean?
+19:19:19 <Pseudonym> All the problems you're having.
+19:19:42 <Igloo> Ah, that's just because it's not finished and I'm new to GHC internals
+20:59:20 <Igloo> Woohoo!
+21:00:01 <Igloo> Right. Bed.
+21:00:49 <Pseudonym> Bed.
+21:00:51 <Pseudonym> Night,.

@@ -1,0 +1,368 @@
+01:01:34 <maerwald> Guest24897: when does it happen
+01:02:38 <maerwald> oops, wrong guest
+02:59:02 * hackage ghc-tags-plugin 0.1.6.0 - A compiler plugin which generates tags file from GHC parsed syntax tree.  https://hackage.haskell.org/package/ghc-tags-plugin-0.1.6.0 (coot)
+03:00:02 * hackage ghc-tags-core 0.1.0.0 - a library to work with tags created from Haskell parsed tree  https://hackage.haskell.org/package/ghc-tags-core-0.1.0.0 (coot)
+03:16:32 * hackage drone 1.1.0 -   https://hackage.haskell.org/package/drone-1.1.0 (matsubara0507)
+03:39:52 <turion> I have a problem with ApplicativeDo. This won't compile:
+03:39:52 <turion> foreverA :: Applicative f => f a -> f ()
+03:39:52 <turion> foreverA fa = do
+03:39:52 <turion>   _a <- fa
+03:39:52 <turion>   foreverA fa
+03:40:20 <turion> It asks me for Monad f, but Applicative f should be enough. (https://hackage.haskell.org/package/base-4.12.0.0/docs/src/Control.Monad.html#forever)
+03:40:47 <turion> This seems to be a desugaring error somehow. Is this a known limitation?
+03:47:45 <int-e> turion: that looks like a type error to me
+03:47:51 <int-e> mm
+03:47:57 <int-e> no, sorry.
+03:51:04 <maerwald> turion: add 'pure ()' to the end of the do block
+03:51:25 <maerwald> I think it cannot infer that applicative is enough, because you're not using anything applicative-only
+03:51:54 <turion> maerwald: pure () helped!
+03:52:05 <maerwald> Probably, if you specialize the 'f' to some type that doesn't have Monad, it might work too
+03:52:59 <maerwald> Type inference comes before desugaring, I guess
+03:53:28 <maerwald> Or does it? I don't know
+03:54:37 <turion> maerwald: I have a more involved example that doesn't work: https://gist.github.com/turion/2b3ea7adbd4612ddf837c65ef140252c
+04:01:14 <ocramz> hullo!
+04:04:05 <int-e> turion: This seems to be a pattern matching problem... it compiles if you make the pairs irrefutable (lazy).
+04:04:54 <int-e> timinh.
+04:04:56 <int-e> g
+04:06:06 <int-e> (Arguably now that we have a concept of non-failing patterns for MonadFail shenenigans that could also be used for ApplicativeDo...)
+04:06:27 <ocramz> I'm trying out megaparsec and would like to parse a timestamp in YYYYMMDDHHMMSS form (no spaces or punctuation between fields). The `decimal` combinator in Text.Megaparsec.Char.Lexer would parse the whole string as one number. What combinators are there for tokenizing at the right lengths first and parsing accordingly?
+04:07:04 <ocramz> (without running `parse` on the single fields I mean; I'd want to return in ParsecT)
+04:07:51 <phadej> ocramz: https://hackage.haskell.org/package/parser-combinators-1.2.1/docs/Control-Applicative-Combinators.html#v:count
+04:10:11 <maerwald> int-e: huh, that is weird
+04:10:35 <maerwald> So it triggers the MonadFail instance?
+04:11:24 <int-e> maerwald: No, it does not trigger MonadFail, because it's treated as a non-failing pattern.
+04:11:48 <maerwald> Yes, but why does something typecheck based on laziness?!
+04:11:57 <maerwald> That sounds like fundamentally wrong
+04:12:16 <int-e> maerwald: Well, it kind of makes sense.
+04:12:45 <maerwald> int-e: it breaks purity, I'd argue
+04:13:43 <int-e> maerwald: The point is, something like  do (a,b) <- return undefined; (b,c) <- nukeEarth; pure 42 ... would ordinarily, with monadic do, never nuke Earth.
+04:14:04 <int-e> because even though the pattern is "non-failing" it still forces the result to be evaluated.
+04:15:02 * hackage datafix 0.0.1.0 - Fixing data-flow problems  https://hackage.haskell.org/package/datafix-0.0.1.0 (sgraf812)
+04:15:03 <int-e> but in an Applicative setting you cannot have such dependent evaluation.
+04:17:37 <int-e> And in that light, with the attitude that applicative do should behave exactly like the corresponding monadic do for monads, requiring a lazy pattern to allow the computation to proceed beyond the first statement makes real sense.
+04:18:24 <int-e> Evenm though it's only about the treatment of bottoms, which we don't care about 99% of the time.
+04:27:34 <maerwald> int-e: do { x <- m 'a'; y <- m 'b'; return (x || y) }
+04:27:46 <maerwald> why does this typecheck then?
+04:30:22 <int-e> with Applicative?!
+04:30:24 <maerwald> Yes
+04:30:33 <maerwald> That's in the GHC docs for ApplicativeDo
+04:30:48 <int-e> Really? With 'return' instead of 'pure'?
+04:31:02 <maerwald> https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/glasgow_exts.html#extension-ApplicativeDo
+04:31:35 <maerwald> "Note that if the expression can’t be translated into uses of <$>, <*> only, then it will incur a Monad constraint as usual. This happens when there is a dependency on a value produced by an earlier statement in the do-block"
+04:31:41 <maerwald> Seems that's what we were talkin about
+04:31:57 <int-e> Hrm. So GHC treats 'return' magically. That's sad. :-(
+04:32:39 <maerwald> I find there should be a better compiler error though
+04:32:45 <int-e> But anyway, the key difference to the previous examples with  (bar,baz) <- foo  is that there's no possible effect from pattern matching for variable patterns (which are irrefutable)>
+04:32:54 <maerwald> "Cannot translate to ApplicativeDo due to data dependency" or something
+04:33:27 <int-e> And I believe that's the right way to think about this... pattern matching bottoms is an *effect*.
+04:34:01 <int-e> (refutable pattern matching, that is, so the kind that has to evaluate a value)
+04:37:30 <int-e> The situation is subtly different from the one for MonadFail; the latter is about the absense of pattern match failures on evaluated values, not about possible failures during evaluation.
+04:38:02 * hackage tldr 0.6.3 - Haskell tldr client  https://hackage.haskell.org/package/tldr-0.6.3 (psibi)
+04:41:16 <int-e> Oh, I guess the magic for 'return' makes sense if you think of all this as an optimization (for law-abiding Monad/Applicative instances) rather than a variant of 'do' for Applicative.
+04:41:40 <ocramz> phadej : I don't understand how to implement chunking in terms of 'count' without running 'parse'. As in, how to daisy-chain parsers? I'm sure I'm missing something about backtracking behaviour here
+04:42:22 <maerwald> int-e: yeah, it automatically transforms things to ApplicativeDo that can be translated afaiu
+04:42:23 <ocramz> i.e. 'count 2 digitChar *> decimal' does the opposite of what I want
+04:42:29 <maerwald> even if the constraints are Monad
+04:44:27 <int-e> At least the documentation explains why you needed the 'pure ()' for the initial question.
+04:46:14 <int-e> maerwald: Oh and the documentation also lists the requirement that all patterns must be variable patterns or lazy (aka irrefutable) patterns. But it would be nice if it included a rationale for that as well; thinking of pattern matches as effects is not all that natural.
+04:47:40 <Ariakenom> maerwald, it doesnt transform everything that can be ranslated. its not even that smart with the smarter flag
+04:48:32 <maerwald> sad
+04:48:51 <int-e> maerwald: Oh wait, I missed the discussion in the next subsubsubsection... which is about strict patterns. Reading is hard.
+04:51:44 <Uniaika> maerwald: I have been bitten by ApplicativeDo in the past… I think one of the things that confused me the most was the impossibility to use `let foo =`
+04:52:13 <Uniaika> So I had to do `pure $ let foo = … ; blah = stuff ; in Foobar{..}`
+04:52:49 <int-e> I have not been bitten by ApplicativeDo... I just haven't used it :P
+04:53:00 <maerwald> Uniaika: weird, let works here
+04:53:08 <maerwald> If I don't use the value
+04:53:40 <int-e> But it does looks a bit awkward.
+04:54:28 <maerwald> Even if I use the value it works
+04:55:58 <int-e> maerwald: even if you do it immediately before the final 'pure'?
+04:56:40 <Uniaika> maerwald: I came to understand that it was because I needed a value previously generated by an above `blah <- doStuff`
+04:56:49 <int-e> (I'm guessing that it fails the syntactic check for the return/pure patterns)
+04:57:09 <maerwald> then it doesn't
+04:57:11 <maerwald> xD
+04:57:19 <maerwald> Ok, I'm never gonna use this extension.
+04:59:22 <int-e> Uniaika: pure $ do let foo = bar; result
+04:59:26 <int-e> (eww)
+05:00:07 <Ariakenom> re applicativedo https://gitlab.haskell.org/ghc/ghc/issues/15100
+05:00:09 <int-e> maerwald: I've basically come to the same conclusion ;)
+05:00:15 <Uniaika> int-e: yeah, I have to go through code reviews afterwards, let's no make my life any more complicated than that :P
+05:01:42 <int-e> Nonetheless, this was instructive.
+05:05:45 <Uniaika> I uh… I'm not sure I want that kind of knowledge :P
+05:07:38 <maerwald> I think it's a good example of what's wrong with a lot of GHC extensions
+05:08:42 <maerwald> And now prepare for local-do...
+05:10:09 <Ariakenom> edwardk said the same about applicativedo when he tried commutative monads iirc
+05:12:55 <int-e> Uniaika: The trick is to love a programming language despite its numerous flaws ;)
+05:13:25 <Ariakenom> i feel it sticks out as a particularly non-reusable extension
+05:13:59 <maerwald> int-e: I think it's better to not love anything. It's a road to bias.
+05:14:04 <int-e> maerwald: Is it like X11? One extension for every PL phd in Glasgow?
+05:14:24 <int-e> (and probably masters as well)
+05:14:34 <Ariakenom> i find the usuallu are general and play nice
+05:15:40 <int-e> Ariakenom: but there's a whole forest of extensions... somebody should take an axe and trim them down to the useful ones ;-)
+05:16:12 <int-e> (the smiley is for the term "useful")
+05:18:02 <[exa]> is there an existing name for `iso show read`? (please ignore how ugly and partial it is)
+05:18:17 <[exa]> (or perhaps a work-alike Prism)
+05:21:40 <Ariakenom> but that one is commercial no? made in facebook
+05:33:11 <phadej> ocramz: i'd write mk <$> count 4 digit <*> count 2 digit <*> ... where mk yyyy mm dd hh mm' ss = ...
+05:33:56 <phadej> i.e. not use decimal at all
+05:35:37 <int-e> perhaps define decimalWidth n = read <$> count n digit
+05:38:19 <phadej> yes, whatever makes it cleaner at the end
+05:39:36 <phadej> decimal in megaparsec uses  foldl' step 0 digits where step a c = a * 10 + fromIntegral (Char.digitToInt c)
+05:39:43 <phadej> which I'd also use rather than `read`
+06:40:33 <gentauro> phadej: don't you loose precision?
+06:40:51 <gentauro> I mean, shouldn't decimals be parsed to `Rational` numbers?
+06:41:12 <gentauro> (might be difficult to guess the fraction thouhg)
+06:42:16 <gentauro> phadej: this seems to work `0.1234 :: Rational`
+06:42:31 <gentauro> giving the following reusult -> `617 % 5000`
+06:42:52 <gentauro> while this -> `0.123345125432532532452352353254325 :: Double`
+06:43:08 <gentauro> is limited to -> `0.12334512543253254`
+06:44:35 <frdg> `ignore this` 
+06:51:39 <phadej> gentauro: what you are talking about?
+06:52:34 <phadej> decimal in megaparsec: Parse an integer in decimal representation according to the format of integer literals described in the Haskell report.
+06:53:00 <gentauro> phadej: oh, then it's fair enough
+06:53:02 <gentauro> my bad
+06:53:35 <phadej> i.e. it's integral, not rational number
+06:54:07 <phadej> decimal is overloaded. cf. hexadecimal number
+06:54:46 <phadej> I don't remember the syntax for hexadecimal rationals, there is though. (was it merijn who implemented it?)
+06:55:19 <kiwi_10> nick Gort
+07:38:02 * hackage jira-wiki-markup 1.2.0 - Handle Jira wiki markup  https://hackage.haskell.org/package/jira-wiki-markup-1.2.0 (tarleb)
+08:05:02 * hackage extended-reals 0.2.4.0 - Extension of real numbers with positive/negative infinities  https://hackage.haskell.org/package/extended-reals-0.2.4.0 (MasahiroSakai)
+08:36:36 <__monty__> Ditto on the signal processing, no idea if your goal is going to have the desired effect. But I do think you're thinking about this algorithm too imperatively, go with an existing solver.
+08:37:01 <__monty__> Apologies, that was for -offtopic.
+08:37:55 <__monty__> phadej: Do you mean hexadecimal floating point notation?
+09:00:48 <gentauro> anybody have used `ANSI.EscapeCodes`? I got them to work, but the result from my terminal differ from the GHCi
+09:01:28 <gentauro> for example, I can get high contrast colours to work in GHCi (range 90 - 107 for fg and bg)
+09:01:41 <gentauro> https://en.wikipedia.org/wiki/ANSI_escape_code#SGR_parameters
+09:04:30 <gentauro> s/I can get high/I can't get high/
+09:05:11 <c_wraith> ghci does a lot to the terminal to enable all the line-editing stuff
+09:05:25 <c_wraith> It doesn't surprise me that it breaks ansi escape codes in the process
+09:07:54 <un1cycle> I'm now teaching my sociology class online. The bosses want me to do mindless Zoom meetings. Do you-all think this old-school IRC might be a better choice?
+09:08:26 <urinal666> use telegram? irc can be too hard core for teenagers nowadays
+09:08:32 <urinal666> and other computer illiterate people
+09:08:56 <glguy> Related to that, I'm use to using C-y to paste in emacs key bindings, but with ghci that suspends ghci. Where does that behavior come from?
+09:09:19 <mekeor> un1cycle: this seems quite offtopic tbh
+09:09:27 <glguy> un1cycle: this is #haskell
+09:10:19 <c_wraith> glguy: I'm not seeing that.  I'm seeing C-y paste.
+09:10:19 <un1cycle> Sorry the off-topic. I haven't been in this world for like 30 years. Covid-19 stuff has me teaching online now and I'm sorta lost.
+09:10:45 <yushyin> un1cycle: there is #haskell-offtopic
+09:10:55 <glguy> c_wraith: ok, maybe it's specific to Mac or terminal.app
+09:11:13 <glguy> yushyin: that channel isn't a garbage bin for stuff that doesn't belong here
+09:11:16 <c_wraith> Hmm.  let me go check on a mac.
+09:13:33 <c_wraith> yep, definitely happens on a mac.  I'm betting it's something to do with Terminal.app
+09:13:57 <glguy> Yeah, Terminal.app is doing it and not iTerm2
+09:14:12 <gentauro> urinal666: forget Zoom. Go the https://meet.jit.si/ way ;)
+09:14:28 <gentauro> ups un1cycle 
+09:15:31 <mekeor> do you write `fromString (show someInteger)` or is there a better way for this?
+09:15:56 <gentauro> mekeor: what are you trying to achieve?
+09:16:06 <gentauro> and integer to string and then back to an integer?
+09:16:55 <maerwald> mekeor: https://github.com/haskell/text/issues/218
+09:17:07 <mekeor> gentauro: i'm trying to get "the number is: 1" from theNumberIs::Text and one::Integer
+09:18:33 <gentauro> mekeor: of the Text package. I'm not familiar with that sry :(
+09:19:06 <glguy> c_wraith: iterm2 does it too
+09:19:12 <glguy> You just have to type some, first
+09:19:16 <glguy> https://unix.stackexchange.com/questions/303605/what-is-the-purpose-of-delayed-suspend-ctrl-y-in-bash
+09:19:49 <glguy> It's a ^Z suspend that waits until the next read for input
+09:20:32 <gentauro> glguy: did you write you can't do: ctrl-y (yank) in GHCi while inside Emcas?
+09:20:35 <gentauro> it works for me
+09:20:41 <glguy> I did not write that
+09:20:49 <c_wraith> hmm.  mac os has a special file for setting up terminal input handling.  I wonder if that file can override that behavior.
+09:21:51 <c_wraith> ah, it's .inputrc  
+09:22:03 <c_wraith> Still not sure if it can override that, but it'd be the place to look
+09:22:09 <glguy> thanks!
+09:24:44 <mekeor> maerwald: thank you
+09:26:34 <glguy> c_wraith: stty dsusp undef
+09:27:41 <glguy> Tossed that in my .zshrc and I'm back to pasting like a champ
+09:33:58 <xe4> is there a way to go to definitions from libraries that are imported into your project? I've tried hasktags, but I can't jump to the definition of anything brought in by Aeson or Int64
+09:34:40 <xe4> sorry, I mean Data.Int :)
+09:35:31 <xe4> nor can I jump to "set" from Control.Lens
+09:43:26 <tommd> ghci
+09:46:02 * hackage dobutokO2 0.20.0.0 - A program and a library to create experimental music from a mono audio and a Ukrainian text  https://hackage.haskell.org/package/dobutokO2-0.20.0.0 (OleksandrZhabenko)
+09:47:08 <c_wraith> xe4: well, libraries don't keep source around after installation by default
+09:47:55 <xe4> c_wraith: is there a way to change that?
+09:50:05 <c_wraith> *shrug*.  Not something I've ever investigated.
+09:50:53 <c_wraith> haddock's hyperlinked sources are all I've ever needed.
+09:53:42 <xe4> c_wraith: can you generate haddocks for all the libraries within your project?
+11:28:37 <pyBlob> I have a Data.HashMap.Lazy from unordered-containers. Is there a way to alter a value at a key and get the updated hashmap, as well as the modified value? Or should I just do the alter followed by lookup?
+11:31:28 <pyBlob> or even just lookup and then insert, so I don't have to deal with the Maybe after having calculated the modified value ...
+11:32:13 <edmundnoble> pyBlob: alterF
+11:32:30 <solonarv> that's not actually in unordered-containers AFAICT
+11:33:03 <edmundnoble> alterF is according to hoogle
+11:33:35 <pyBlob> Yep, there is an alterF, however I don't know how I can use it, to achieve that goal.
+11:33:41 <solonarv> huh, I must've been looking at an old version
+11:33:44 <solonarv> yeah I was
+11:33:55 <edmundnoble> The functor is going to be `(Maybe v,)`
+11:34:01 <solonarv> alterF is actually a Lens (as in the lens library)
+11:34:40 <solonarv> well, actually the argument order is wrong, grumble grumble
+11:35:08 <edmundnoble> So the function will have type `Maybe v -> (Maybe v, Maybe v)`, the first of which you will set to the function's input, the second is the value you want to update the key to point to
+11:35:19 <solonarv> modifyAt k f = alterF (\v -> let v' = f v in (v', v')) k
+11:35:23 <edmundnoble> The output of the entire alterF call will be a `(Maybe v,HMap k v)`
+11:35:30 <edmundnoble> You'll know what to do with that
+11:35:33 <solonarv> (or (v, v') if you want to get out the old value)
+11:37:01 <solonarv> if you want to dip into lens, then you can instead use: myMap & at key <%~ f
+11:38:21 <pyBlob> Ah ok, now I see, so when returning a tuple in the alterF function, I can control both values (return value + modified value)
+11:40:08 <solonarv> yup
+11:46:17 <pyBlob> That means that "(a, b, c, d)" is a "Functor d". Is this defined somewhere?
+11:48:22 <edmundnoble> `(a,)` is a functor
+11:48:31 <edmundnoble> There is a `Functor (a,)`
+11:49:02 <edmundnoble> Meaning `fmap` is `(b -> c) -> (a,b) -> (a,c)`
+11:52:01 <pyBlob> Nice, thanks for the help. Learned something again =)
+11:57:57 <solonarv> > fmap (+1) ("a", True, 4)
+11:58:00 <lambdabot>  error:
+11:58:00 <lambdabot>      • Could not deduce (Functor ((,,) [Char] Bool))
+11:58:00 <lambdabot>          arising from a use of ‘fmap’
+11:58:26 <solonarv> actually those instances for tuples larger than 2 are mysteriously missing
+11:59:01 <solonarv> but they are simple, they all look like this: fmap func (a, b, ..., z) = (a, b, ..., func z)
+12:00:05 <maerwald> I think it makes sense they don't exist
+12:00:48 <maerwald> you can think of (1,2) as key-value pair. fmap maps over the value. (1,2,3) ...behavior is not clear imo
+12:01:12 <maerwald> should it map over 2 and 3 or just 3?
+12:02:06 <urinal666> is map reduce algorithm good for a newbie?
+12:02:34 <hyperisco> yup go for it
+12:07:02 * hackage ghc-lib-parser-ex 8.10.0.1 - Algorithms on GHC parse trees  https://hackage.haskell.org/package/ghc-lib-parser-ex-8.10.0.1 (shayne_fletcher)
+12:14:06 <solonarv> yeah maerwald , but now if I want those instances anyway they just don't exist
+12:14:26 <solonarv> and it's not like people don't already get confused by the instances for (,) w
+12:15:00 <maerwald> > (id ***) (+1) (1,2)
+12:15:02 <lambdabot>  (1,3)
+12:15:04 <maerwald> I agree, arrows are better
+12:15:53 <maerwald> And no one knows what they are for, so you'll look smart
+12:15:56 <maerwald> xD
+12:50:02 * hackage aeson-schemas 1.1.0 - Easily consume JSON data on-demand with type-safety  https://hackage.haskell.org/package/aeson-schemas-1.1.0 (leapyear)
+12:59:32 * hackage generic-data 0.8.2.0 - Deriving instances with GHC.Generics and related utilities  https://hackage.haskell.org/package/generic-data-0.8.2.0 (lyxia)
+13:29:29 <gentauro> maerwald: xD
+14:02:54 <oats> don't know that I've found a useful place for arrows yet
+14:03:03 <oats> what kinds of problems are they good for solving
+14:03:14 <maerwald> The only real world use I know is this XML library
+14:03:49 <maerwald> And I've seen them in a paper doing MAC/IFC
+14:05:18 <maerwald> https://www.cis.upenn.edu/~stevez/papers/LZ06a.pdf
+14:05:28 <maerwald> But then ppl did the same with Monads
+14:06:26 <oats> are arrows a superset of monads
+14:06:31 <oats> er, subset
+14:07:53 <urinal666> are monads goo for a newbie?
+14:07:59 <urinal666> good for a newbie i mean!
+14:08:28 <oats> urinal666: “newbies” usually have a little difficulty understanding them, but yes I'd say they're useful!
+14:09:07 <maerwald> It's the only thing that allows us to make effects dependent on values, so yeah
+14:09:25 <oats> it's just an abstraction of a bunch of different operations that all have the same underlying pattern, flattening nested structures
+14:10:27 --- mode: ChanServ set +o glguy
+14:10:28 --- mode: glguy set +q *!*@2001:999:61:aaf9::/64
+14:44:37 <mekeor> using the "webdriver" package, is it possible to create a new tab (window?) ?
+14:46:01 <[exa]> is there some recommendable package for symmetric ciphers and related padding?
+14:46:33 <[exa]> (for implementing stuff like sign-on cookies and various onetime tokens)
+15:19:33 <jakov> Hi ! I would like to optimize some Code for real Time Plotting with the "Chart" library and the "Chart-Cairo" backend. I already figured out, that it's helpful to simply add inline pragmas to some parts that get called often, but just lift into a monad and call the cairo C-Code. Now my time and memory consumer hotspot (using standard profiled builds) takes 50% of time and is "runBackend" in the library
+15:19:33 <jakov> https://hackage.haskell.org/package/Chart-cairo-1.9.3/src/Graphics/Rendering/Chart/Backend/Cairo.hs     .   I don't know how to measure it further, but my first guess would be that, because of the recursive nature of the function call "runBackend'", Haskell first builds up a huge thunk, and then slowly evaluates it. How would i go about optimizing this call ? And if it's soluble with strictness annotations, where in the code -- which i
+15:19:33 <jakov> all monadically composed -- would i go about adding strictness annotations ? 
+15:19:55 <jakov> is fmap seq a possible solution ?
+15:26:51 <jakov> Hi, it's my first time usage of an emacs erc client. Do my messages come through ?
+15:27:23 <maerwald> Yes, very sharp
+15:27:37 <jakov> Thx :)
+15:34:32 * hackage summoner 2.0.0.0 - Tool for scaffolding fully configured batteries-included production-level Haskell projects.  https://hackage.haskell.org/package/summoner-2.0.0.0 (shersh)
+15:35:32 * hackage summoner-tui 2.0.0.0 - Tool for scaffolding fully configured batteries-included production-level Haskell projects using TUI.  https://hackage.haskell.org/package/summoner-tui-2.0.0.0 (shersh)
+16:07:20 <MarcelineVQ> I'm trying to give an html <img> a base64 src right from a ByteString, so I've loaded the image, encoded it to base64 and now​ I need to stick it into the html. conceptually: <img src="data:;base64,myencodedbytestring">  The lib assembling the img tag accepts String for the src attribute. How do I put a ByteString into a String form? is it as direct as using unpack from ByteString.Char8 on the base64 encoded ByteString? That seems to work but wa
+16:07:20 <MarcelineVQ> s still wondering
+16:08:36 <MarcelineVQ> what I have which does work  dataSrc :: ByteString -> String; dataSrc bs = "data:;base64," ++ BS8.unpack (BS64.encode bs)
+16:08:40 <dsal> I'd do that, so I assume it's  a bad idea.
+16:10:38 <jakov> Hi, sorry for reasking the same question, but in joined People know the answer:  I have just written a real time plotter -- with the libraries "Chart" and "Cairo" , and want to optimize it, as the rendering of the image is quite slow. Using the standard profiling tools i have figured out that the function "runBackend" in the  https://github.com/timbod7/haskell-chart/blob/master/chart-cairo/Graphics/Rendering/Chart/Backend/Cairo.hs  fil
+16:10:38 <jakov> is the slowest. The function is very much at the top of the file. How would i go about optimizing such a function? It's recursive, and my guess is that builds up a huge thunk. How can I check on that, and furthermore, how would i optimize it ?
+16:13:15 <maerwald> jakov: I'd start with adding Strict and StrictData to default-extensions in your .cabal file. If that doesn't have any impact, then you need to modify the library
+16:13:33 <maerwald> *might*
+16:14:09 <maerwald> note that Strict can break your code, e.g. if you defined monadic combinators yourself
+16:14:48 <jakov> thanks maerwald, i'll try it :)
+16:20:17 <edmundnoble> MarcelineVQ: your bytes do *mean* an ASCII string, so it's same to code them as such
+16:23:08 <MarcelineVQ> edmundnoble: thank you, I couldn't see another way to approach it so I'm glad to have confirmation
+16:23:17 <dsal> Anyone have a favorite time-based cache?
+16:24:42 <dsal> @package cache
+16:24:42 <lambdabot> http://hackage.haskell.org/package/cache
+16:24:44 <dsal> I guess.
+16:29:51 <mpickering> jakov: you should perhaps do a heap profile to see what is being allocated as well
+16:31:12 <mpickering> It looks like it is using a free monad though so you're probably out of luck because you will always pay the tax of interpretation at runtime
+16:31:19 <mpickering> Time to rewrite the library!
+16:32:56 <jakov> mpickering, Thanks for looking into it. I am ready to learn and i guess it's time for me to figure out what a free monad is :)
+16:36:13 <mpickering> Perhaps that doesn't matter too much but the point is it builds an AST and then interprets it
+16:36:21 <mpickering> Which is going to be quite slow
+16:36:28 <jakov> Oh, i see. it's Lenses. 
+16:36:37 <mpickering> But perhaps it could still be optimised somehow
+16:42:34 <jakov> I see that the "view" and "viewT" calls are pretty "heavy" in terms of time and allocation.
+16:43:20 <dsal> Should I feel bad using UndecidableInstances ?
+16:46:10 <maerwald> It's a sin
+16:46:25 <dsal> So I should feel good about it?
+16:46:33 <maerwald> :P
+16:49:15 <dsal> I should probably split this stuff out of Main.  It's like, 500 lines of code and does a bunch of different things.  but the first ~90 lines are imports.
+16:51:58 <Cale> UndecidableInstances are fine
+16:52:11 <Cale> It's OverlappingInstances where things start to go bad
+16:52:35 <Cale> The only downside of UndecidableInstances is that it's theoretically possible for compilation to get stuck
+16:53:30 <hyperisco> that and the rabbit holes you can find yourself lost down
+16:53:50 <dsal> Program appears to work at least. heh
+16:53:51 <Cale> But (a) you'll find out, there's a stack limit on the instance resolution mechanism, and (b) most of the time, there's not really a risk there
+16:54:50 <dsal> This feels pretty simple.  I haven't put any brainpower into understanding what it even means here.
+16:54:51 <Cale> So long as your program is compiling, there's no downside to having used UndecidableInstances
+16:55:08 <dsal> I figure doubly so in Main
+16:56:06 <Cale> (it can't result in confusing runtime behaviour)
+16:56:44 <dsal> Good to know at least.
+17:29:02 * hackage gopro-plus 0.2.0.0 - GoPro Plus Client API.  https://hackage.haskell.org/package/gopro-plus-0.2.0.0 (dustin)
+17:36:04 <koz_> Cale: Yeah, 'UndecidableInstances' sounds scarier than it is.
+18:06:16 <d34df00d> I want to generate arbitrary ASTs for quickcheck'ing a language translator.
+18:06:43 <d34df00d> So I almost want QC's Arbitrary class, but stateful one, so that, for instance, subsequent nodes of the AST only use the variables declared earlier in the (generated) AST.
+18:06:47 <d34df00d> How can I achieve that?
+18:07:00 <Rembane> d34df00d: That's hard. Check out GenT and Pałka's paper. 
+18:07:12 <d34df00d> Rembane: thanks!
+18:08:09 <Rembane> d34df00d: No worries! 
+18:08:31 <d34df00d> Although I just figured that I'm probably a dummy (no big news there) and I could just stick some State into the function that's wrapped in Gen that's returned by Arbitrary.arbitrary.
+18:08:44 <d34df00d> With runState that is.
+18:08:50 <d34df00d> Or evalState or whatever is the right one.
+18:09:23 <MarcelineVQ> there's also smallcheck which rather than random things checks all the things, up to a point
+18:10:24 <d34df00d> Haven't heard about that one, cool!
+18:11:38 <Rembane> d34df00d: There's a paper about smallcheck where they generate programs and test something
+18:12:00 <d34df00d> Rembane: btw what's the Palka's paper title? I wasn't able to quickly google up something relevant.
+18:13:19 <Rembane> d34df00d: I believe this is the one: https://dl.acm.org/doi/abs/10.1145/1982595.1982615?casa_token=AGz-WmbTrQQAAAAA:nQ56UO_GDHiYwYlisVneg8R2OUbvB8tzUxdi1GWTeeaJ9c3ckCDdI4JWtkNmwLClzsDbXckkZxLzHw
+18:15:56 <d34df00d> Cool, thanks!
+18:16:06 <d34df00d> That's almost exactly what I'm trying to do here.
+18:28:46 <dojacathaskeller> `asum [pure @IO True, pure @IO False]` returns `True` and that's kind of confusing to me. Is there something that would return False there I might be thinking of? I originally I searched for `allM` if that helps understand my intent.
+18:32:19 <d34df00d> dojacathaskeller: I think you want https://hackage.haskell.org/package/monad-loops-0.4.3/docs/Control-Monad-Loops.html#v:andM
+18:32:37 <dojacathaskeller> d34df00d: Oh cool, thanks
+18:40:03 <solonarv> dojacathaskeller: asum [x, y, z] = x <|> y <|> z, and mx <|> my = mx `catch` \_ -> my
+18:40:19 <solonarv> and of course 'pure _' doesn't throw an exception
+18:56:29 <tabemann> hey guys
+18:56:38 <solonarv> hello!
+19:02:11 <tabemann> I don't recognize you from here - you new?
+19:03:04 <pounce> how do y'all do DP? Is the "memorazation monad" a good way? or do you like to build up thunks and evaluate them with lazyness
+19:04:52 <d34df00d> TIL monad-memo
+19:05:37 <tabemann> oh I'm in a different channel
+19:05:59 <pounce> lol
+19:07:02 * hackage turtle 1.5.18 - Shell programming, Haskell-style  https://hackage.haskell.org/package/turtle-1.5.18 (GabrielGonzalez)
+19:08:54 <dojacathaskeller> thanks for the detailed explanation solonarv :)
+19:11:01 <monochrom> memoization monad uses lazy evaluation too.
+19:34:02 * hackage directory 1.3.6.1 - Platform-agnostic library for filesystem operations  https://hackage.haskell.org/package/directory-1.3.6.1 (Rufflewind)
+19:44:02 * hackage greskell-core 0.1.3.2 - Haskell binding for Gremlin graph query language - core data types and tools  https://hackage.haskell.org/package/greskell-core-0.1.3.2 (debugito)
+19:47:14 <koz_> How do you combine (if possible) StandaloneDeriving with DerivingVia?
+19:49:02 * hackage staversion 0.2.3.4 - What version is the package X in stackage lts-Y.ZZ?  https://hackage.haskell.org/package/staversion-0.2.3.4 (debugito)
+19:51:30 <koz_> Well, certainly not what I expected: https://stackoverflow.com/a/53404233/2629787
+19:53:20 <benjwadams> Is using `scanl` considered idiomatic when writing a simple accumulator function?  Is it faster than manually writing out the recursion steps?
+19:55:40 <dsal> benjwadams: best to not ask humans what code of yours is faster.
+21:08:33 <sm[m]> yes, it's usually preferred to use such generic functions if they'll do the job
+21:08:42 <sm[m]> less custom code to get wrong
+21:26:50 <heatsink> I'm trying to use lsp
+21:27:32 <heatsink> My project builds fine, but lsp running in emacs reports the error "unable to load package `ghc-prim-0.5.3'"
+21:28:05 <heatsink> Is there a way to find out what lsp is doing?
+21:29:17 <heatsink> That's lsp-haskell with hie
+21:57:50 <xe4> foo :: (SomeConstraint a) => Foo -> Bar -> Baz   <- is this possible to have a constraint where the type variable isn't used in the signature?
+21:58:35 <heatsink> it's not possible
+21:59:33 <heatsink> Do you have a reason to want that?
+21:59:51 <heatsink> The constraint is irrelevant to the data, no?
+22:01:22 <koz_> Yeah, what exactly are you trying to do that needs that?
+22:03:05 <xe4> just wanted to know if it was possible
+22:07:02 * hackage dhall-lsp-server 1.0.6 - Language Server Protocol (LSP) server for Dhall  https://hackage.haskell.org/package/dhall-lsp-server-1.0.6 (GabrielGonzalez)
+22:16:32 * hackage dhall-json 1.6.3 - Convert between Dhall and JSON or YAML  https://hackage.haskell.org/package/dhall-json-1.6.3 (GabrielGonzalez)
+22:18:32 * hackage dhall-yaml 1.0.3 - Convert between Dhall and YAML  https://hackage.haskell.org/package/dhall-yaml-1.0.3 (GabrielGonzalez)
+22:19:32 * hackage dhall-bash 1.0.29 - Compile Dhall to Bash  https://hackage.haskell.org/package/dhall-bash-1.0.29 (GabrielGonzalez)
+22:28:32 * hackage dhall-nix 1.1.13 - Dhall to Nix compiler  https://hackage.haskell.org/package/dhall-nix-1.1.13 (GabrielGonzalez)
+22:29:32 * hackage dhall 1.31.0 - A configuration language guaranteed to terminate  https://hackage.haskell.org/package/dhall-1.31.0 (GabrielGonzalez)
+22:58:54 <routine_9> @help
+22:58:54 <lambdabot> help <command>. Ask for help for <command>. Try 'list' for all commands
+22:59:16 <routine_9> @help list
+22:59:16 <lambdabot> list [module|command]. Show commands for [module] or the module providing [command].
+22:59:40 <routine_9> @list
+22:59:40 <lambdabot> What module?  Try @listmodules for some ideas.
+22:59:47 <routine_9> @listmodules
+22:59:47 <lambdabot> activity base bf check compose dice dict djinn dummy elite eval filter free fresh haddock help hoogle instances irc karma localtime metar more oeis offlineRC pl pointful poll pretty quote search
+22:59:47 <lambdabot> slap source spell system tell ticker todo topic type undo unlambda unmtl version where
+23:03:46 <d34df00d> xe4: you can sorta simulate that via SomeConstrant a => proxy a -> ...
+23:04:36 <d34df00d> heatsink: the constraint might be relevant if it's just the method of that class that's used.
+23:05:14 <d34df00d> I've written some code that almost had this structure (although I still used the type variable on the rhs of =>, but it was more coincidental than not).
+23:14:23 <koz_> d34df00d: Does inline-asm support GHC 8.10 yet? :P

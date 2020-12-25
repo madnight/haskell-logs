@@ -1,0 +1,707 @@
+00:16:51 <dminuoso> % setr (each . _Left) 1 [Left 'c', Left 'd', Right "foo"] -- ski 
+00:16:52 <yahb> dminuoso: ([1,1],[Left 1,Left 1,Right "foo"])
+00:16:58 <dminuoso> % setr :: Traversal s t a b -> b -> s -> ([b], t); setr l b = runRemember #. l (\_ -> Remember ([b], b))
+00:16:59 <yahb> dminuoso: 
+00:17:10 <dminuoso> % newtype Remember b t = Remember ([b], t) deriving (Eq, Ord, Functor)
+00:17:11 <yahb> dminuoso: 
+00:17:21 <dminuoso> % instance Applicative (Remember b) where pure a = Remember ([], a); Remember (fs, f) <*> Remember (gs, g) = Remember ((fs <> gs), f g)
+00:17:21 <yahb> dminuoso: 
+00:18:13 <dminuoso> Also for you, unclechu, ^-
+00:19:33 <dminuoso> It also occured to me, that you can just use (a,) instead of Remember.
+00:21:11 <dminuoso> % setr :: Traversal s t a b -> b -> s -> ([b], t); setr l b = l (\_ -> ([b], b))
+00:21:11 <yahb> dminuoso: 
+00:21:15 <dminuoso> Oh yeah, that's much much simpler. :)
+00:22:44 <Squarism> dminuoso, was that for me?
+00:23:45 <dminuoso> No
+00:45:01 <siraben> If Foo is a newtype constructor, is map Foo a no-op?
+00:46:32 <dminuoso> % newtype Foo a = Foo a
+00:46:33 <yahb> dminuoso: 
+00:47:02 <dminuoso> siraben: I dont think so.
+00:47:12 <dminuoso> But you can use coerce if you want it to be free.
+00:47:12 <siraben> dminuoso:  I would need to use coerce right?
+00:47:14 <dminuoso> Right
+00:47:45 <tomsmeding> which begs the question: why _isn't_ it a no-op?
+00:47:45 <siraben> Ok
+00:48:08 <siraben> tomsmeding:  looks like it's in the paper https://www.microsoft.com/en-us/research/uploads/prod/2018/05/coercible-JFP.pdf
+00:48:21 <siraben> The optimiser in the Glasgow Haskell Compiler (GHC) is powerless to fix the problem because it
+00:48:21 <siraben> works over a typed intermediate language; the MkHTML constructor changes the type of its operand, and hence cannot be optimised away.
+00:48:56 <tomsmeding> I see
+00:49:07 <tomsmeding> that's unfortunate
+00:51:41 <tomsmeding> still, that claim is untrue
+00:51:49 <tomsmeding> the map could be replaced with a coerce!
+00:51:53 <tomsmeding> and the result would still typecheck
+00:52:28 <tomsmeding> that's quite a specific optimisation, but "cannot be optimised away" is too strong I think
+00:52:41 <siraben> can it be optimized away without coerce
+00:53:24 <dminuoso> tomsmeding: Given the 4 authors of the paper, Im quite convinced they do know what they're talking about. :p
+00:53:32 <tomsmeding> dminuoso: fair point :p
+00:53:51 <tomsmeding> perhaps they meant that it could not be optimised without coerce, as siraben said
+00:53:56 <tomsmeding> but then now we have coerce...? :p
+00:54:02 <tomsmeding> anyhow
+00:54:20 <dminuoso> Well, coerce is the *result* of that paper.
+00:54:21 <siraben> tomsmeding:  the paper is about implementing coerce...
+00:54:26 <tomsmeding> I know!
+00:54:43 <tomsmeding> I'm asking about now, 4 years after that paper :p
+00:54:54 <siraben> I think claim is still true then? Seems like you would have to insert coerce manually
+00:54:55 <tomsmeding> why map Foo is apparently not a no-op
+00:54:57 <siraben> Would have to check GHC Core to be sure.
+00:55:15 <tomsmeding> so my core (heh) question is, why doesn't ghc insert a coerce as an optimisation
+00:56:10 <siraben> fmap Foo is a no-op because of the functor law, right?
+00:56:17 <siraben> fmap id = idF
+00:56:33 <dminuoso> 09:55:48       siraben | fmap Foo is a no-op because of the functor law, right?
+00:56:40 <dminuoso> GHC does not use these laws.
+00:56:48 <dminuoso> It cant because it doesn't know whether they are even satisfied.
+00:57:27 <dminuoso> (This is why things like Co/Yoneda are so useful, because they help GHC fuse without knowing about functor laws)
+00:58:12 <siraben> Ah I have not used the yoneda library
+00:58:28 <dminuoso> So it'd have to reconstruct that knowledge from the definition of map (if its inlined at all!)
+00:58:43 <dminuoso> And I dont know whether GHC can do that at all.
+00:59:05 <dminuoso> So, for all GHC knows, `map Foo` could change the length of a list for example.
+00:59:57 <dminuoso> In some trivial cases GHC can figure this out for sure. But once you get into recursive definitions, I think it starts to get slippery.
+01:00:31 <dminuoso> So perhaps `fmap Foo` might be a no-op for Identity
+01:00:49 <dminuoso> (Again, if the definition of fmap is inlined at all)
+01:01:14 <tomsmeding> > `map Foo` could change the length for example  |  indeed, this is quite an involved optimisation that would have to inspect the definition of 'map'
+01:01:17 <lambdabot>  <hint>:1:1: error: <hint>:1:1: error: parse error on input ‘`’
+01:01:21 <tomsmeding> that's a fair point
+01:02:02 <tomsmeding> for the trivial program: newtype Foo a = Foo a deriving (Show) ; main = getContents >>= print . map Foo . lines
+01:02:11 <tomsmeding> ghc -ddump-simpl does seem to introduce a `cast`
+01:03:10 <tomsmeding> https://paste.tomsmeding.com/fzcokv87
+01:03:58 <tomsmeding> (that's the only definition in the -ddump-simpl output that contains a call to 'lines', to sort-of justify exclusion of all the rest)
+01:04:34 <dminuoso> Well you cant trust GHC to do this in all the places. So if you really need this to be free, just coerce.
+01:04:50 <dminuoso> I'd be interested in how GHC knows that cast is appropriate here.
+01:04:56 <dminuoso> Perhaps it's special cased for map?
+01:05:22 <dminuoso> Since GHC can know that map at least satisfies functor laws.
+01:05:36 <tomsmeding> perhaps
+01:05:43 <dminuoso> What happens if you use fmap instead of map?
+01:05:55 <dminuoso> Oh well, that might not be helpfujl
+01:06:10 <dminuoso> https://hackage.haskell.org/package/base-4.14.0.0/docs/src/GHC.Base.html#line-1115
+01:06:16 <dminuoso> Yeah no that wont help, it'll just get inlined
+01:06:35 <tomsmeding> same output :p
+01:06:50 <dminuoso> What if you had `IO [Something]` and `fmap . fmap` with that?
+01:08:10 <tomsmeding> I re-implemented map as map2 and called that instead, and now I _think_ the cast is gone?
+01:08:18 <tomsmeding> like, there still is a cast, but it also explicitly calls map2
+01:08:43 <tomsmeding> https://paste.tomsmeding.com/gdJrKr2U
+01:09:52 <tomsmeding> dminuoso: for 'main = fmap (fmap Foo) (fmap lines getContents) >>= print', same output as the original case, so map is elided
+01:13:14 <dminuoso> Well, it's good to know that for the `IO [A]` case it gets optimized away. That's nice to hear, since getting a coerce in can create some additional undesirable noise.
+01:13:51 <dminuoso> I frequently have that problem when working with postgresql-simple, say for some (query ...) :: IO [Only Int]
+01:14:06 <dminuoso> Never bothered to analyze core because it was just an annoyance, not a performance issue.
+01:21:31 <dminuoso> maerwald: https://gist.github.com/dminuoso/daa633ce513a71b5df3bfef0c0b41e5c
+01:21:40 <dminuoso> I feel being lied to.
+01:22:20 <maerwald> dminuoso: ghcup set ghc 8.6.5
+01:22:39 <dminuoso> Ah. :>
+01:22:42 <maerwald> both commands shouldn't even parse
+01:22:47 <dminuoso> They do!
+01:22:54 <dminuoso> The install even worked that wa
+01:23:00 <maerwald> that's because the version parser is too lax
+01:23:03 <dminuoso> heh
+01:23:13 <dminuoso> [ Error ] NotInstalled GHC "8.6.5"
+01:23:24 <dminuoso> The diagnostic suggested that `ghc set ghc-8.6.5` was parsed properly
+01:23:37 <maerwald> read the second line of the output :)
+01:23:45 <dminuoso> Sure, but that reads more like a deprecation notice
+01:24:07 <dminuoso> But anyhow, cheers.
+01:24:31 <maerwald> I'm not even sure why the first one succeeds
+01:29:19 <maerwald> dminuoso: I think you just made ghcup believe that is a cross-compiler :)
+01:30:14 <maerwald> ghcup install bar-8.6.3 # works as well
+01:31:02 <maerwald> the pre-version part is assumed to be a triple like armv7-unknown-linux-gnueabihf
+01:33:40 <dminuoso> GHC is a pretty obscure architecture
+01:33:51 <dminuoso> :P
+01:34:06 <dminuoso> Btw, that triple has 4 parts to it!
+01:45:55 <tomsmeding> 2020, the year in which triples have four elements
+01:52:37 <maerwald> dminuoso: 3
+01:52:53 <maerwald> "unknown-linux" is one :p
+01:52:59 <kuribas> > length (1, 2, (3, 4))
+01:53:01 <lambdabot>  error:
+01:53:01 <lambdabot>      • No instance for (Foldable ((,,) Integer Integer))
+01:53:01 <lambdabot>          arising from a use of ‘length’
+01:53:09 <kuribas> > length (1, (2, (3, 4)))
+01:53:11 <lambdabot>  1
+01:57:06 <dminuoso> maerwald: Oh I know. ;)
+01:58:33 <dminuoso> kuribas: There's a debatable `instance Foldable ((,) a)`
+01:58:41 <dminuoso> But it doesn't exist for longer tuples
+01:59:15 <kuribas> :t length
+01:59:16 <lambdabot> Foldable t => t a -> Int
+01:59:54 <dminuoso> The idea is that `(a,)` is a Foldable if we think of it as a 1-element container with some extra baggage. :p
+02:03:20 <kuribas> > (1, 2, (3, 4)) ..^ (folded . to length)
+02:03:22 <lambdabot>  error:
+02:03:22 <lambdabot>      • Variable not in scope:
+02:03:22 <lambdabot>          (..^)
+02:03:34 <kuribas> > (1, 2, (3, 4)) ^.. (folded . to length)
+02:03:37 <lambdabot>  error:
+02:03:37 <lambdabot>      • No instance for (Foldable ((,,) Integer Integer))
+02:03:37 <lambdabot>          arising from a use of ‘folded’
+02:04:08 <kuribas> dminuoso: the type system prevents any other instance for tuple.
+02:04:50 <dminuoso> Huh?
+02:05:04 <dminuoso> We can write `instance Foldable ((,,) a b) where ...` just fine
+02:07:10 <kuribas> I mean for 2 tuple
+02:08:24 <dminuoso> kuribas: Just because it's possible to write an instance, it doesn't make it good.
+02:08:39 <dminuoso> I think the `Foldable ((,) a)` instance shouldn't exist at all
+02:09:06 <dminuoso> It will just type check for the odd `foldMap f g` and very likely do something unexpected.
+02:09:13 <kuribas> it doesn't look that useful.
+02:09:53 <dminuoso> I mean if I did `sum (10,20)` I'd naively expect that to yield 30 or not type check.
+02:09:58 <dminuoso> Instead I get `20`
+02:10:09 <dminuoso> Principle of maximum surprise. :)
+02:10:18 <kuribas> dminuoso: but that sum is more polymorphic
+02:10:39 <dminuoso> So?
+02:11:08 <ptrcmd> > sum (10, 20)
+02:11:11 <lambdabot>  20
+02:11:16 <ptrcmd> lol
+02:11:24 <kuribas> how do you sum ("10", 20)?
+02:12:48 <dminuoso> It's sort of how `lens` allows you to view through a Traversal.
+02:12:59 <dminuoso> I mean yeah, there's a sensible implementation, but it likely doesn't do what you think it does.
+02:13:41 <dminuoso> % [Product 10, Product 20, Product 30] ^. each
+02:13:41 <yahb> dminuoso: Product {getProduct = 6000}
+02:14:52 <dminuoso> Sometimes leaving out an obvious implementation helps avoid people trip into bugs because the code type checks and does something very unexpected.
+02:15:55 <kuribas> % (Sum 10, Sum 20) ^. each
+02:15:55 <yahb> kuribas: Sum {getSum = 30}
+02:16:15 <dminuoso> If you consider something less obvious like
+02:16:38 <dminuoso> % [Left 'f', Right 1, Left 'o', Right 2, Left 'o'] ^. each._Left
+02:16:38 <yahb> dminuoso: ; <interactive>:71:53: error:; * No instance for (Monoid Char) arising from a use of `each'; * In the first argument of `(.)', namely `each'; In the second argument of `(^.)', namely `each . _Left'; In the expression: [Left 'f', Right 1, Left 'o', Right 2, ....] ^. each . _Left
+02:16:39 <kuribas> :t each
+02:16:41 <lambdabot> (Each s t a b, Applicative f) => (a -> f b) -> s -> f t
+02:16:59 <dminuoso> But then do something like
+02:17:12 <dminuoso> % [Left "f", Right 1, Left "o", Right 2, Left "o"] ^. (each._Left)
+02:17:12 <yahb> dminuoso: "foo"
+02:17:35 <dminuoso> It's not very obvious what's happening. Especially because  `(^.)` doesnt make that obvious
+02:17:55 <dminuoso> (^.) :: s -> Getting a s a -> a
+02:17:59 <dminuoso> type Getting r s a = (a -> Const r a) -> s -> Const r s 
+02:18:10 <dminuoso> And then, if you stare at the above Applicative constraint
+02:18:12 <dminuoso> you get
+02:18:22 <dminuoso> instance Monoid m => Applicative (Const m :: Type -> Type)
+02:18:43 <dminuoso> So yeah. Everything works out somehow
+02:19:45 <kuribas> lenses leaky abstractions
+02:19:49 <dminuoso> Which is one of the reasons I like optics more
+02:19:55 <dminuoso> optics just flat out fails with a type error on that one
+02:20:02 <dminuoso> And forces you to use a fold explicitly if you wanted that
+02:25:19 <tomjaguarpaw> I've been bitten by (^.) doing mconcat on the targets. I wish they hadn't supported that (but instead provided a different combinator that does do that. "mconcatOf" would have been fine).
+03:09:49 * hackage hsinspect 0.0.15 - Inspect Haskell source files.  https://hackage.haskell.org/package/hsinspect-0.0.15 (tseenshe)
+03:27:26 <Echosolace> Whoa... this looks like the place.
+03:28:06 <boxscape> hmm I wonder if there could be a way to add a default signature requiring Monad to one of the Applicative methods (so you don't have to write liftA2 = liftM2 explicitly) without compromising the existing mutual definitions of liftA2 and <*>
+03:29:03 <dminuoso> I dont see why you couldn't.
+03:29:26 <boxscape> Oh, I guess I haven't tried adding two separate default definitions, my intuition was that it wouldn't work
+03:30:48 <boxscape> aand it does say conflicting definitions if I try that
+03:31:04 <boxscape> i.e. if I just add a default definition to the existing one
+03:31:41 <Echosolace> Hey all, pretty new to Haskell, and have been looking over the http://learnyouahaskell.com/syntax-in-functions page, and I can't figure out how why in the first part of the guide how they end up with lucky :: (Integral a) => a -> String. Is this because they are :t lucky and don't bother mentioning the defined function... or?
+03:33:00 <boxscape> Echosolace you're looking at the definition of lucky, they're declaring its type to be that
+03:33:24 <Echosolace> Ok thanks.
+03:42:20 <Echosolace> I'm still having trouble with type definitions then... I went back a lesson and tried to declare a type definition, a la
+03:42:22 <Echosolace> addThree :: Int -> Int -> Int -> Int
+03:42:30 <Echosolace> But this just gives me
+03:42:39 <Echosolace> Variable not in scope: addThree :: Int -> Int -> Int -> Int
+03:42:58 <kuribas> dminuoso: I created a DSL to transform the Aeson Value before parseJSON or toJSON.  So now my datatype isn't tied to the external representation :)
+03:43:19 <kuribas> dminuoso: I mean genericParseJSON and genericToJSON
+03:43:51 <Echosolace> Any idea as to how I can declare the type?
+03:43:58 <dminuoso> kuribas: What does that look like?
+03:44:13 <kuribas> Echosolace: you cannot just have a type, you need a function as well.
+03:44:31 <kuribas> Echosolace: you don't need to declare external types like in C.
+03:44:32 <Echosolace> So define the function first, then declare the type, right?
+03:44:51 <kuribas> Echosolace: normally you declare the type, then the function
+03:44:58 <Echosolace> O dear.
+03:45:18 <Echosolace> So why does addThree :: Int -> Int -> Int -> Int fail in ghci?
+03:45:56 <kuribas> dminuoso: fromField (Proxy @"nested_field") ["nested"] "field" <> fromFieldMaybe (Proxy @"nested_field2") ["nested"] "field2"
+03:46:46 <kuribas> dminuoso: it will turn data MyData = MyData { nested_field :: Int, nested_field2 :: Maybe Int } => { "nested": { "field": 2, "field2": 3}}
+03:46:52 <kuribas> dminuoso: but field2 can be ommitted
+03:47:23 <dminuoso> Im not sure what that means
+03:47:26 <kuribas> Echosolace: because ghci doesn't know a function will follow
+03:47:28 <dminuoso> can you share some larger code snippet perhaps?
+03:47:56 <kuribas> dminuoso: fromField takes the (haskell) fieldname, a path, and the destination field in the JSON
+03:48:49 * hackage hsinspect 0.0.16 - Inspect Haskell source files.  https://hackage.haskell.org/package/hsinspect-0.0.16 (tseenshe)
+03:50:33 <kuribas> dminuoso: https://gist.github.com/kuribas/9826b1fb9f2907a5c40baff1d7bbcb83
+03:50:46 <yushyin> Echosolace: in ghci you can either declare the type and the function on the same line with a semicolon between them or use :{ and :} to span a definition over multiple lines
+03:50:48 <Echosolace> @kuribas Ok ok I see where you're going... How can I jump to the next line to enter in the function definition? 
+03:50:48 <lambdabot> Unknown command, try @list
+03:50:56 <Echosolace> Oooohh snap
+03:50:59 <Echosolace> That was it, thank you so much!
+03:51:09 <kuribas> Echosolace: you can seperate it with semicolon (;)
+03:51:09 <yushyin> Echosolace: or just write a haskell source file and load that in ghci
+03:51:18 <Echosolace> Cool.
+03:51:24 <Echosolace> Thanks for the help
+03:51:50 <dminuoso> kuribas: I see. 
+03:52:03 <kuribas> Echosolace: myFun :: Int -> Int; myFun x = x * 2
+03:52:13 <dminuoso> kuribas: Im thinking of cooking up a TH based solution stead. 
+03:52:34 <kuribas> dminuoso: why TH?
+03:52:59 <yushyin> Echosolace: https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/ghci.html#ghci-cmd-:{
+03:53:10 <Echosolace> Thanks
+03:54:18 <boxscape> Echosolace in practice while :{ can be useful for small tests writing it into a .hs file and loading it is much less painful
+03:55:07 <boxscape> (pretend I put a comma between tests and writing)
+03:55:07 <kuribas> dminuoso: I can reuse this for other typeclasses.
+03:56:15 <kuribas> dminuoso: here is the implementation: https://gist.github.com/kuribas/5c617ecf025ccb37467a23556cbe963e
+03:56:26 <dminuoso> kuribas: I want to carve out matching toJSON/fromJSON instances by just saying `$(makeJsonInsts ''Foo [("someField", "fSomeFIeld")]`
+03:56:38 <Echosolace> Thanks for the help. Hey, so besides getting into a deeper understanding of Cardano, I'm here also in part because I threw a not insignificant amount of time and money in getting a shit ton of vertical planters... How practical would it be to tie sensors and motors to water a garden that runs on Haskell?
+03:57:03 <dminuoso> Echosolace: Depends on what hardware you intend to run it on.
+03:57:11 <dminuoso> Haskell does not lend itself well for embedded tasks.
+03:57:15 <kuribas> dminuoso: the toJSON and fromJSON match in my implementation
+03:57:32 <kuribas> Echosolace: you could run it on a raspberry pi...
+03:57:39 <Echosolace> Cool, got that...
+03:58:02 <dminuoso> In fact, the current implementations essentially force you into running it on a general purpose computer.
+03:58:10 <kuribas> Echosolace: however it is probably simpler to just use python ...  One of the few cases where I would recommend python :-)
+03:58:26 <dminuoso> Echosolace: But beyond that, if running it on a pi is feasible, then Haskell can work just fine.
+03:58:31 <Echosolace> Yessss
+03:58:49 * hackage uniqueness-periods-vector-filters 0.3.0.0 - A library allows to change the structure of the 'RealFrac' function output.  https://hackage.haskell.org/package/uniqueness-periods-vector-filters-0.3.0.0 (OleksandrZhabenko)
+03:59:07 <kuribas> Echosolace: compiling will be slow on the pi, but it's feasible.
+03:59:58 <Echosolace> Well, lots to learn, got to practice. Thanks for all the help, bookmarking the stuff. Probably be back soon. Bye!
+04:03:29 <kuribas> dminuoso: well, I haven't tested my implemented, but the idea is that parseJSON (toJSON a) = pure a
+04:07:20 * hackage stack2cabal 1.0.11 - Convert stack projects to cabal.project + cabal.project.freeze  https://hackage.haskell.org/package/stack2cabal-1.0.11 (maerwald)
+04:53:50 * hackage update-nix-fetchgit 0.1.2.0 - A program to update fetchgit values in Nix expressions  https://hackage.haskell.org/package/update-nix-fetchgit-0.1.2.0 (srk)
+05:27:23 <cpressey> Is it possible to use a plain ADT rather than a GADT when defining a monad using the `operational` package?
+05:36:15 <dminuoso> cpressey: https://themonadreader.files.wordpress.com/2010/01/issue15.pdf
+05:41:16 <dminuoso> You need the existentials
+05:42:20 <dminuoso> Unless you restrict yourself to have uniform monadic results
+05:44:51 <kuribas> is there a threeway Maybe type for Aeson, that gives a different result for: - null - not present, and present and not null?
+05:48:20 * hackage postie 0.6.0.2 - SMTP server library to receive emails from within Haskell programs.  https://hackage.haskell.org/package/postie-0.6.0.2 (malvo)
+05:54:07 <cpressey> dminuoso: OK. Thank you. I expect the same is the case for the `MonadPrompt` package, which is quite similar.
+05:54:28 <sim590> kuribas: there's a 3-possibilities type called These which has constructors (These a b), (This a) and (That a). I don,t know if that helps your precise case?
+05:55:00 <kuribas> sim590: not really
+05:55:17 <kuribas> I want more like, Null | Missing | Val a
+05:55:21 <sim590> Yeah. I'm not really familiar with what Aeson is.
+05:55:30 <kuribas> Aeson is a json parser
+05:58:01 <frdg> what are inline pragmas? Do they call code from somewhere else? Here an example: https://dpaste.org/2pxy
+05:59:54 <hpc> it means when you use notMember, instead of doing a bunch of function call stuff, the compiler can decide to just paste the code where it's being called instead
+06:01:13 <frdg> so it is all about optimization? 
+06:01:33 <hpc> yeah
+06:01:45 <kuribas> frdg: it's a hint for GHC to try harder to inline it.
+06:01:53 <dminuoso> inline pragmas are a mostly used to annoy haskell users by exploding compilation times. 
+06:02:07 <kuribas> ghc already inlines short functions, but with a pragma it will inline larger functions as well.
+06:02:11 <dminuoso> You know, like when you try and use megaparsec, write 15 lines of code and end up with 60 second compilation time (true story!)
+06:02:24 <kuribas> dminuoso: at least you get efficient code!
+06:02:42 <frdg> ok I understand
+06:03:14 <dminuoso> Generally, unless you understand what GHC does, you shouldnt use INLINE.
+06:03:18 <Uniaika> kuribas: I may be interested in building a tool that tells you which functions have been inlined
+06:03:26 <dminuoso> INLINABLE otoh is very useful :)
+06:03:43 <Uniaika> dminuoso: why so? :)
+06:04:30 <dminuoso> INLINABLE does not make GHC inline more aggressively, but at least enable it for when GHC. Especially for specialization this can be useful.
+06:04:34 <kuribas> INLINABLE includes the function body in the interface file.
+06:06:46 <dminuoso> GHC could still include it without INLINABLE but only if its small
+06:07:28 <dminuoso> Also, INLINABLE allows for shared specialization across modules
+06:10:20 * hackage contracheck-applicative 0.2.0 - Validation types/typeclass based on the contravariance.  https://hackage.haskell.org/package/contracheck-applicative-0.2.0 (Birkmann)
+06:11:52 * hackage uniqueness-periods-vector-general 0.4.6.0 - Some kind of the optimization approach to data inner structure.  https://hackage.haskell.org/package/uniqueness-periods-vector-general-0.4.6.0 (OleksandrZhabenko)
+06:14:48 <kuribas> INLINABLE turns haskell into a whole program compiler :)
+06:15:04 <maerwald> only until it OOMs
+06:15:16 <maerwald> there we go
+06:25:33 <sm[m]> G'day all
+06:25:36 <sm[m]> dminuoso: I'd like to see that 15 lone program (I bet ghc devs would too)
+06:27:42 <dminuoso> sm[m]: https://gitlab.haskell.org/ghc/ghc/-/issues/17370
+06:29:07 <dminuoso> Admittedly, it's slightly longer than that.
+06:31:29 <sm[m]> thx!
+06:35:45 <sm[m]> nice report, I have subscribed
+06:36:08 <Geraldus> Hi friends!  Struggling with VSCode and ghcide.  Is there a good article how to make it work?
+06:39:11 <sm[m]> Geraldus: probably not an up to date one. But for most people, installing the Haskell extension is the only action needed
+06:49:19 <tomjaguarpaw> Does anyone know a list of best practices for writing parsers with Parsec? I'm getting stuck with the non-backtracking property.
+06:50:22 <tomjaguarpaw> I'm not quite sure when I should be using "try"
+06:50:53 <srk> when you need to rollback or like when the tried parser can fail
+06:51:49 <srk> attoparsec always backtracks on failure
+06:55:49 <sm[m]> tomjaguarpaw: one rule of thumb: when you are parsing alternatives that share a common prefix
+06:56:29 <sm[m]> maybe that's the only time it's needed, not sure
+06:56:54 <amf> is there a name for types that fill the role of versioning data? a sibling of session types if you will
+07:27:31 <Geraldus> sm[m] should I `stack install` ghcide itself?
+07:51:32 <sm[m]> Geraldus: no just install the Haskell extension, it installs the rest
+07:53:49 * hackage Shpadoinkle 0.2.0.0 - A programming model for declarative, high performance user interface.  https://hackage.haskell.org/package/Shpadoinkle-0.2.0.0 (fresheyeball)
+08:00:50 * hackage Shpadoinkle-html 0.2.0.0 - A typed, template generated Html DSL, and helpers.  https://hackage.haskell.org/package/Shpadoinkle-html-0.2.0.0 (fresheyeball)
+08:06:00 <tomsmeding> interesting package name
+08:19:33 <{abby}> i wonder if it's supposed to be onomatopoeia for something
+08:19:53 <Uniaika> clearly haha
+08:23:47 <sm[m]> I feel irrationally annoyed every time it appears
+08:24:26 <c_wraith> I like to imagine it will become the next big UI sensation and everyone will have to act like it's a totally normal thing to say
+08:25:20 * hackage Shpadoinkle-console 0.0.1.0 - Support for the native browser console  https://hackage.haskell.org/package/Shpadoinkle-console-0.0.1.0 (fresheyeball)
+08:31:19 * hackage morley 1.7.1 - Developer tools for the Michelson Language  https://hackage.haskell.org/package/morley-1.7.1 (gromak)
+08:45:19 * hackage uniqueness-periods-vector-examples 0.10.0.0 - Usage examples for the uniqueness-periods-vector series of packages  https://hackage.haskell.org/package/uniqueness-periods-vector-examples-0.10.0.0 (OleksandrZhabenko)
+08:46:19 * hackage Shpadoinkle-html 0.2.0.1 - A typed, template generated Html DSL, and helpers.  https://hackage.haskell.org/package/Shpadoinkle-html-0.2.0.1 (fresheyeball)
+08:49:23 <siraben> To what extent does Haskell perform deforestation?
+08:51:41 <monochrom> When a data structure library comes with rewrite rules for that. For example Data.List has them for lists, vector has them for vectors.
+08:52:26 <dminuoso> siraben: Haskell itself, not so much. It requires manual participation of the programmer by writing RULEs.
+08:53:45 <siraben> Ah I see. What's a good way to learn how to write GHC rewrite rules, and is it abusive to do so?
+08:53:49 * hackage Shpadoinkle-backend-static 0.1.0.2 - A backend for rendering Shpadoinkle as Text.  https://hackage.haskell.org/package/Shpadoinkle-backend-static-0.1.0.2 (fresheyeball)
+08:54:54 <monochrom> Compiler cannot check rule correctness, if that's what you mean by abusive.
+08:55:49 <monochrom> GHC user's guide for the syntax and requirements, all of those fusion papers for how people came up with actually effective rules.
+08:56:22 <monochrom> and Data.List and vector for further front-line comments
+08:59:50 * hackage Shpadoinkle-backend-pardiff 0.2.0.0 - A Virtual Dom in pure Haskell, based on Html as an Alignable Functor.  https://hackage.haskell.org/package/Shpadoinkle-backend-pardiff-0.2.0.0 (fresheyeball)
+09:01:20 * hackage Shpadoinkle-backend-snabbdom 0.2.0.0 - Use the high-performance Snabbdom virtual dom library written in JavaScript.  https://hackage.haskell.org/package/Shpadoinkle-backend-snabbdom-0.2.0.0 (fresheyeball)
+09:03:42 <carbolymer> is there a way to fix this code or do I have to use type variable? https://repl.it/repls/CooperativeOrnateBrowsers#main.hs
+09:07:20 * hackage polysemy-resume 0.1.0.0 - Polysemy error tracking  https://hackage.haskell.org/package/polysemy-resume-0.1.0.0 (tek)
+09:07:39 <dsal> carbolymer: Are you saying you want to have a type constraint on a field, but you don't want to express it?
+09:07:49 <siraben> carbolymer:  looks like you're using https://wiki.haskell.org/Existential_type
+09:08:04 <monochrom> pure (Foo print)
+09:08:42 <carbolymer> siraben, yes, that's existential type
+09:08:56 <carbolymer> dsal, `Show a` isn't enough?
+09:09:01 <monochrom> https://repl.it/repls/MixedWealthyGraphs
+09:09:28 <siraben> carbolymer:  I would caution against naming your constructor `mkFoo`, btw
+09:09:46 <carbolymer> monochrom, wow thanks, I don't get it why brackets make difference
+09:09:50 * hackage indigo 0.3.0 - Convenient imperative eDSL over Lorentz.  https://hackage.haskell.org/package/indigo-0.3.0 (gromak)
+09:10:01 <carbolymer> siraben, that's minimal example from my real problem ;)
+09:10:02 <siraben> nevermind, I saw that you have an IO action inside Foo, here
+09:10:02 <siraben> heh*
+09:10:14 <monochrom> Something about predicativity.
+09:13:32 <monochrom> that (.) monomorphizes, apposition (application as juxtaposition) preserves polymorphism, and you want polymorphism preserved in this case.
+09:14:22 <monochrom> (.) monomorphizes its operands
+09:15:16 <dsal> Oh that's weird.  I didn't even notice the failure because I changed it to `pure $ Foo print` in my example when I was trying to run it because it was too much punctuation.
+09:15:20 * hackage Shpadoinkle-router 0.2.0.0 - A single page application rounter for Shpadoinkle based on Servant.  https://hackage.haskell.org/package/Shpadoinkle-router-0.2.0.0 (fresheyeball)
+09:18:14 <monochrom> A future GHC version will probably be happy with "(pure . Foo) print".  Someone has figured out how to support impredicativity for the 3rd time.
+09:19:13 <siraben> monochrom:  What's difficult about impredicativity? I'm not familiar with the issue
+09:24:54 <ixlun> Hi all, I was just wondering if there was a language extension that allowed trivially extractable typeclasses to be extracted in pattern matching.  Suppose a :: Maybe A then: case a of      Maybe -> lift . print 
+09:25:22 <ixlun> That way you can omit the variable name and tacking it on to the end of the pattern match
+09:28:55 <phadej> the answer is traverse(_)
+09:29:17 <phadej> :t traverse_ print :: Maybe a -> IO ()
+09:29:19 <lambdabot> error:
+09:29:19 <lambdabot>     • No instance for (Show a1) arising from a use of ‘print’
+09:29:19 <lambdabot>       Possible fix:
+09:29:22 <phadej> :t traverse_ print :: Show a => Maybe a -> IO ()
+09:29:24 <lambdabot> Show a => Maybe a -> IO ()
+09:29:33 <phadej> :t traverse_ print :: Show a => Either b a -> IO ()
+09:29:35 <lambdabot> Show a => Either b a -> IO ()
+09:30:19 * hackage Shpadoinkle-widgets 0.1.0.0 - A collection of common reusable types and components.  https://hackage.haskell.org/package/Shpadoinkle-widgets-0.1.0.0 (fresheyeball)
+09:30:28 <ixlun> :t traverse_
+09:30:29 <lambdabot> (Foldable t, Applicative f) => (a -> f b) -> t a -> f ()
+09:31:10 <ixlun> Ahh, nice
+09:33:04 <phadej> :t Data.Foldable.for_
+09:33:06 <lambdabot> (Foldable t, Applicative f) => t a -> (a -> f b) -> f ()
+09:33:12 <phadej> is nice too
+09:33:20 <phadej> (it's just flipped traverse_)
+09:36:23 <koz_> phadej: The answer to everything.
+09:37:19 * hackage Shpadoinkle-examples 0.0.0.2 - Example usages of Shpadoinkle  https://hackage.haskell.org/package/Shpadoinkle-examples-0.0.0.2 (fresheyeball)
+09:44:29 <frdg> what is an example of a reflexive relation being used in haskell?
+09:45:26 <siraben> frdg: type level equality
+09:45:45 <siraben> https://hackage.haskell.org/package/base-4.9.1.0/docs/Data-Type-Equality.html
+09:46:05 <zincy_> First class IO means you can pass IO values around like any other value right? In which cases doesn't any language that has promises/futures have first class IO?
+09:46:44 <frdg> siraben: thanks I am looking at this
+09:51:27 <monochrom> Even more relaxedly, every language that has higher-order functions.
+09:51:43 <monochrom> or rather, higher-order procedures.
+09:53:14 <monochrom> But that's too easy.
+09:53:20 <ixlun> Does anyone know how I call a StateT S IO() monad?
+09:54:13 <ixlun> I've tried: main = runState uciMain newGame
+09:54:56 <monochrom> That looks right.
+09:55:08 <monochrom> err, runStateT instead
+09:56:08 <ixlun> Ahh, didn't know there were transformer variations!
+09:58:40 <monochrom> siraben: Impredicativity makes type inference more difficult. I also heard that the GHC devs couldn't fit it into the particular way GHC does type inference. (And that particular way is not to be thrown away lightly, it has been successful for basically everything else.)
+09:59:15 <monochrom> But there is a recent paper that looks promising.
+10:00:41 <monochrom> https://github.com/ghc-proposals/ghc-proposals/pull/274
+10:01:47 <monochrom> This requires a compromise in existing type inference, i.e., breaks backward compatibility. The compromise will appear in 9.0, is already in the release candidate.
+10:02:19 <monochrom> Then the impredicativity itself will be added later.
+10:02:52 <zincy_> monochrom: What do you mean by too easy?
+10:03:15 <monochrom> Having first-class I/O actions.
+10:04:09 <monochrom> If you have first-class procedures then you have first-class I/O actions as a special case.
+10:05:08 <monochrom> The way Haskell ups the game is not merely having first-class I/O actions, that's too easy. The way Haskell ups the game is that even the sequential composition connectives >>= and <*> are first class.
+10:05:52 <monochrom> Dumbing down to mainstream speak, Haskell has first-class and programmable semicolon, other languages don't.
+10:07:20 <zincy_> monochrom: Ah thanks
+10:07:35 <monochrom> For example look at how even Rust has only managed to allow semicolon for two effect types, normal I/O and exception-throwing I/O. You can't make semicolon also work for your own homemade effect type. Well Haskell can.
+10:08:50 * hackage silkscreen 0.0.0.2 - Prettyprinting transformers.  https://hackage.haskell.org/package/silkscreen-0.0.0.2 (robrix)
+10:11:00 <zincy_> monochrom: What is a useful definition of the term "computational effect"
+10:11:14 <zincy_> Just an environment modification in a computation?
+10:11:42 <monochrom> I don't think you should aim for a mathematically checkable definition. Rather, expect a social definition.
+10:12:10 <monochrom> But you can always just say "monad" :)
+10:12:36 <zincy_> It is odd that so many things in programming languages rely on social definitions
+10:12:56 <zincy_> so   monad <==> computational effect
+10:13:07 <monochrom> Ahem, programming is a social construct. >:)
+10:13:44 <monochrom> I have settled with http://www.cs.utoronto.ca/~trebla/CSCC24-2020-Summer/06-fam.html#effect 
+10:14:19 <monochrom> e.g., "things a mathematical function cannot do"
+10:14:49 * hackage sequence-formats 1.5.1.4 - A package with basic parsing utilities for several Bioinformatic data formats.  https://hackage.haskell.org/package/sequence-formats-1.5.1.4 (stephan_schiffels)
+10:15:12 <zincy_> Is Maybe not a deterministic effect?
+10:16:15 <monochrom> It is very much like how "computation" itself doesn't have a mathematical definition either, only a social one. We socially use the Church-Turing thesis, and this means we anticipate that it is possible that one day we may find and change to something even better.
+10:17:08 <monochrom> But X->Y cannot do what X -> Maybe Y does
+10:17:27 <zincy_> yeah that always bothers me about the fact we cannot agree what computation means
+10:17:33 <monochrom> Declaring failure is considered to be effectful.
+10:17:52 <monochrom> Computing is a social construct. Change my mind. >:)
+10:18:05 <geekosaur> "failure" is a social construct, tbh
+10:18:10 <monochrom> haha
+10:18:13 <zincy_> So deterministic in a narrow sense
+10:18:22 <monochrom> I love this "social construct" meme :)
+10:18:26 <zincy_> As in 2 + 2 never relies on context
+10:18:39 <koz_> Being deterministic and being context-free are not equivalent.
+10:19:18 <zincy_> koz_: Right depends on the context
+10:20:20 <zincy_> monochrom: What is a social construct
+10:20:58 <monochrom> "artificial" on steroid
+10:21:04 <zincy_> What about biological computation at the level of proteins
+10:21:18 <zincy_> Or should i say "computation"
+10:21:53 <zincy_> If humans weren't around these cellular computations would still occur in other animals
+10:22:08 <zincy_> This begs the question
+10:22:46 <geekosaur> anything not captured by mathematical laws is a construct over them. social construct is because we define what programming means, so it's our construct. yours is a biological construct
+10:23:20 * hackage Shpadoinkle-lens 0.0.0.1 -   https://hackage.haskell.org/package/Shpadoinkle-lens-0.0.0.1 (fresheyeball)
+10:23:39 <zincy_> Right but biological construct isn't in the same class as social constructs
+10:24:17 <geekosaur> that depends on your definitions :)
+10:24:17 <zincy_> If you take a photo of a paint splatter and it happens to be a valid perl program, is it a program?
+10:24:41 <zincy_> I would say no according to any conceptually useful definition of program
+10:24:42 <monochrom> I think I don't care.
+10:24:59 <zincy_> How can you not care about definitions
+10:25:04 <geekosaur> it is a program. it may not be a _useful_ program, but that's where the "social" part comes in
+10:25:25 <zincy_> If someone asked you to do a job as a programmer and then handed you a paintbrush would you care then?
+10:25:37 <monochrom> I care about definitions. It's why I use different definitions for different purposes.
+10:26:10 <zincy_> Does that work
+10:27:49 * hackage Shpadoinkle-lens 0.0.0.2 - Lens combinators for Shpadoinkle applications.  https://hackage.haskell.org/package/Shpadoinkle-lens-0.0.0.2 (fresheyeball)
+10:28:29 <monochrom> A student handing in a paint splatter that happens to be a valid perl program that fulfills my assignment requirements, I'll accept as a submission that fulfills my assignment requirements.
+10:29:09 <monochrom> This is independent of that I won't take a programmer job that gives me a paintbrush, not a keyboard and monitor, as the tool they make me use for the job.
+10:29:52 <monochrom> And that is yet independent of that I'm fine if some other programmer takes that job.
+10:30:18 <zincy_> this is far too nuanced
+10:30:27 <geekosaur> why?
+10:30:39 <monochrom> Compared to what?
+10:30:40 <zincy_> sarcasm
+10:31:14 <zincy_> I guess definitions should be useful and usefulness changes depending on circumstance
+10:31:30 <monochrom> It has always been that way.
+10:31:50 <zincy_> When you hit 20 there should be a list of things like this that everyone can read
+10:31:51 <geekosaur> "definitions should be useful" will itself get you into odd corner cases
+10:31:55 <monochrom> Just look at how the mathematicians have two definitions for the natural numbers, three definitions for exponentiation.
+10:32:19 <monochrom> two for rings, too
+10:32:19 <zincy_> geekosaur: how so?
+10:32:30 <monochrom> actually, maybe four for rings.
+10:33:34 <geekosaur> (1) useful for whom? (2) if the universe of discourse is at all complex, you will have definitions that at least seem uninteresting
+10:41:32 <tomsmeding> what's the smallest uninteresting natural number?
+10:42:04 <ghoulguy> 0, natural numbers are uninteresting
+10:42:12 <monochrom> \∩/
+10:42:14 <geekosaur> "seem" is also operative there (and has my first question lurking behind it)
+10:42:22 <tomsmeding> https://en.wikipedia.org/wiki/Number_theory
+10:42:49 <tomsmeding> geekosaur: indeed
+10:43:18 <ghoulguy> tomsmeding: We'll have to propose that page for removal as "not notable"
+10:43:45 <tomsmeding> 🤔
+10:44:11 <zincy_> Isnt term social construct a bit nebulous
+10:44:26 <zincy_> Since it can be sort of self referential
+10:44:39 <geekosaur> we're a bit nebulous too
+10:44:40 <monochrom> Are you OK?
+10:45:01 <zincy_> Not really I have a javascript interview tomorrow
+10:45:57 <tomsmeding> F
+10:46:33 <zincy_> So I am going to be interrogated on my knowledge of how "types" work in javascript 
+10:46:48 <tomsmeding> well it has a type system for sure
+10:47:00 <tomsmeding> it's just that the number of distinct types is not too large
+10:47:15 <zincy_> Can't everything be undefined though
+10:47:17 <frdg> why is the default behavior of liftA2 to apply the function `cartesianally?` instead of zipping? Is this more than an arbitrary decision?
+10:47:18 <zincy_> or null
+10:47:46 <solonarv> frdg: I assume you're talking specifically about its behavior on [] ?
+10:48:11 <monochrom> It agrees with >>=
+10:48:21 <solonarv> there is a reason: the cartesian-product behavior is compatible with the  Monad []  instance, but the zippy behavior isn't
+10:48:42 <solonarv> (and in fact there isn't a Monad instance that would agree with the zippy behavior)
+10:48:58 <frdg> yes this is what I meant
+10:49:08 <monochrom> You can use the ZipList newtype wrapper to get zipping liftA2
+10:49:38 <tomsmeding> zincy_: indeed; from some perspective, I think one could argue that JS has only one type
+10:49:52 <frdg> monochrom: And this type comes with an applicative instance that behaves with zipping?
+10:49:59 <solonarv> frdg: yup
+10:49:59 <monochrom> Yes.
+10:50:06 <frdg> ok thanks
+10:50:16 <tomsmeding> unless you accept that (almost) all functions work on all types somehow magically
+10:50:23 <monochrom> I think lambdabot has it, let me try.
+10:50:28 <solonarv> > (+) <$> ZipList [1,2,3] <*> ZipList [4,5,6]
+10:50:31 <lambdabot>  ZipList {getZipList = [5,7,9]}
+10:50:36 <monochrom> Yeah, that.
+11:21:19 * hackage git-annex 8.20201007 - manage files with git, without checking their contents into git  https://hackage.haskell.org/package/git-annex-8.20201007 (JoeyHess)
+12:06:56 <hololeap> % :t these
+12:06:57 <yahb> hololeap: ; <interactive>:1:1: error: Variable not in scope: these
+12:07:14 <hololeap> % :m + Data.Semialign
+12:07:14 <yahb> hololeap: ; <no location info>: error:; Could not find module `Data.Semialign'; It is not a module in the current program, or in any known package.
+12:23:19 * hackage bidirectional 0.1.0.0 - Simple bidirectional serialization and deserialization  https://hackage.haskell.org/package/bidirectional-0.1.0.0 (MasseR)
+12:50:14 <koz_> Is Cont r a co, contra, or invariant in r?
+12:51:10 <monochrom> Invariant. Consider the special case Cont r () = (() -> r) -> r = r -> r
+12:51:33 <koz_> monochrom: Fair.
+12:52:02 <koz_> I had a suspicion it was that, but good to have proof.
+13:36:20 * hackage Shpadoinkle-console 0.0.1.1 - Support for the native browser console  https://hackage.haskell.org/package/Shpadoinkle-console-0.0.1.1 (fresheyeball)
+14:07:50 <koz_> Cont is truly the reason we can't have nice things.
+14:09:04 <dminuoso> What do you mean by that?
+14:09:35 <koz_> dminuoso: Basically, unlike everything else mtl re-exports, it has no instances of Monad* for basically any *.
+14:09:44 <koz_> I get _why_ this is, but it's still sads.
+14:10:26 <monochrom> I have the opposite opinion. Cont is why we have nice things. :)
+14:10:38 <monochrom> http://www.vex.net/~trebla/haskell/cont.xhtml
+14:10:40 <dminuoso> Sure, but how is Cont the reason you can't have nice things?
+14:11:02 <dminuoso> What things does the existence of Cont prevent us from writing?
+14:11:30 <koz_> dminuoso: It's a bit hard to explain. I'm just generally lamenting my situation I think.
+14:11:40 <koz_> I need to think about it some more.
+14:11:45 <monochrom> On prime-numbered days, I am a bit saddened that Cont is not a MonadFix. But prime-numbered days are getting less and less frequent. :)
+14:11:51 <dminuoso> Or is your point just that ContT can't have all the cool instances?
+14:11:56 <dminuoso> Those are very different points.
+14:12:11 <koz_> dminuoso: Mostly that. And yes, I agree with you, now that you put it that way.
+14:12:34 <koz_> Again, pay me no mind in this instance. I don't have anything constructive to add, so I'll just stop fogging.
+14:12:46 <Christo> hi
+14:12:49 <monochrom> There is a conjecture that, infinitely often, I will be saddened by this for two 1-removed-consecutive days. >:)
+14:13:11 <dminuoso> monochrom: What's your position on mersenne prime days?
+14:13:18 <tomsmeding> koz_: is that a new verb
+14:13:43 <koz_> tomsmeding: IT IS NOW
+14:13:51 <Christo> does anyone else use vs code plugin with haskell (haskell live server)? i'm new to haskell and using it with cabal project
+14:13:52 <monochrom> I feel one step away from being very empowered by 2. :)
+14:14:04 <dminuoso> koz_: Well your rant was short and coherent. I dont see the verb befitting. 
+14:14:31 <koz_> dminuoso: Lol, I guess I chose that verb due to substance, not style.
+14:14:34 * tomsmeding agrees with dminuoso
+14:14:44 <koz_> But I guess 'fogging' could be argued to be a matter of _both_ style and substance?
+14:15:04 <monochrom> Basically this is one of those half-empty, half-full glass of water thing.
+14:15:17 <monochrom> You are sad that it is not completely full.
+14:15:35 <koz_> Yeah, even though I fully get the reasons why that is.
+14:15:36 <monochrom> I am happy that it is not completely empty. Except on prime-numbered days.
+14:16:02 <hpc> did you know that every sum of two primes can be expressed as an integer greater than 2?
+14:16:14 <monochrom> hahaha
+14:16:23 <koz_> hpc: Someone proved Goldbach while I wasn't looking?
+14:16:24 <hpc> https://www.smbc-comics.com/comic/number-hunt
+14:16:33 <monochrom> Are you trying to identify and kill math nerds? Because I'm so dead. :)
+14:17:06 <monochrom> koz_, someone proved the converse of Goldbach, heh.
+14:17:15 <koz_> monochrom: Wait what?
+14:17:18 <Christo> anyone else use haskell language server with VS code? 
+14:17:20 <koz_> I missed this news?
+14:17:22 <monochrom> See the comic linkd.
+14:17:30 <monochrom> It's just a joke :)
+14:17:38 <koz_> ROFL
+14:17:49 <monochrom> Also, the converse is too easy.
+14:17:51 <koz_> You'll get a fair number of computer scientists that way too.
+14:18:08 <monochrom> Well they count as math nerds so it's OK.
+14:18:25 <tomsmeding> Christo: are you having trouble, or are you seeking like-minded souls? :)
+14:18:32 <koz_> ....... I _just_ got it.
+14:18:36 <koz_> I really am slow today.
+14:18:56 <hpc> somehow that only makes it funnier
+14:19:08 <Christo> tomsmeding ye having some trouble!
+14:19:09 <koz_> hpc: Well, I never claimed to be particularly smart.
+14:19:28 <hpc> i mean, part of it is "i am finally not the dumb one" to be sure
+14:19:52 <Christo> tomsmeding i'm new to haskell, and am trying to set up a good dev environment/ide type setup before i really start learning and writing the code heavily
+14:20:05 <Christo> it seems like i have the vs code working with stack
+14:20:15 <Christo> extension*
+14:20:24 <Christo> but not 100% with cabal
+14:21:28 <tomsmeding> Christo: is there an error message you're getting, or is something not working?
+14:21:33 <Christo> tomsmeding: something called cradle is giving me an error msg
+14:21:38 <tomsmeding> ah
+14:21:45 <tomsmeding> what's it?
+14:21:50 <koz_> hpc: I can assure you, this channel witnesses but 1% of my slowness.
+14:22:11 <Christo> tomsmeding Failed to parse result of calling cabalcabal: Unknown target '/Users/chris/Documents/cabal-example-2/exe/Main.hs'.The package cabal-example2 has no file target 'exe/Main.hs'.
+14:22:49 <Christo> because i'm new to haskell , i'm finding the tooling a little fiddily and complicated
+14:22:53 <tomsmeding> Christo: did you execute a command in the terminal to get that, or the vscode haskell plugin just throw that at you?
+14:23:00 <tomsmeding> also trust me, the tooling is fiddly
+14:23:06 <tomsmeding> even to experienced haskeller
+14:23:06 <tomsmeding> s
+14:23:24 <Christo> tomsmeding: the vscode haskell plugin gave me that msg
+14:23:41 <Christo> which i assume is something to do with haskell language server
+14:23:57 <tomsmeding> can you build your project, ignoring the language server integration for a moment?
+14:24:02 <tomsmeding> i.e. `cabal build`
+14:24:05 <Christo> i can build it ye
+14:24:08 <Christo> i'll do it now
+14:24:17 <monochrom> I avoided this fiddlyness by avoiding the IDE mindset altogether.
+14:24:33 <maerwald> wait, why are you using cabal now when you started with stack?
+14:26:44 <Christo> actually it's not building at the mo
+14:28:30 <Christo> ok
+14:28:37 <Christo> it works with new-build
+14:28:44 <Christo> but not build
+14:28:55 <koz_> Christo: Cabal version?
+14:29:26 <Christo> 2.4.1.0
+14:29:36 <Christo> so it's working with new-build
+14:29:41 <Christo> new-run
+14:29:58 <koz_> Christo: Update cabal to something less crufty.
+14:30:02 <koz_> This should fix your issues.
+14:30:14 <koz_> 2.4 is old-af.
+14:30:17 <monochrom> or say "new-build" all the time
+14:30:20 <Christo> but is the haskell-language-server (vs code haskell plugin) using the old "cabal build" command or something? 
+14:30:24 <maerwald> Christo: are you using stack or cabal?
+14:30:28 <Christo> cabal
+14:30:30 <koz_> monochrom: Or rather, configure your IDE to somehow do it.
+14:30:33 <koz_> Assuming you can.
+14:30:44 <maerwald> Christo: what platform?
+14:30:48 <koz_> Christo: 'cabal build' became new-build by default recently.
+14:31:00 <monochrom> Rather, hls assumes you use cabal >= 3 so it's just "build".
+14:31:14 <Christo> so maybe that's the issue? 
+14:31:19 <koz_> OK, am I totally off-base here, or is it the case that Cont () a and a are somehow similar?
+14:31:19 * hackage heidi 0.0.0 - Tidy data in Haskell  https://hackage.haskell.org/package/heidi-0.0.0 (ocramz)
+14:31:26 <koz_> Christo: Likely.
+14:31:42 <monochrom> Cont () a = (a -> ()) -> () = a really boring type
+14:32:01 <Christo> thx guys, i'll try all what u said
+14:32:06 <Christo> just to clarify
+14:32:15 <Christo> i can build and run my project using new- prefix cmds
+14:32:25 <Christo> but haskell plugin vs code gives me this error msg
+14:32:28 <Christo> Failed to parse result of calling cabalcabal: Unknown target '/Users/chris/Documents/cabal-example-2/exe/Main.hs'.The package cabal-example2 has no file target 'exe/Main.hs'.
+14:32:36 <koz_> monochrom: How do you demonstrate that last equality? I guess it's an isomorphism.
+14:32:55 <koz_> Christo: Yeah, upgrade to a newer cabal, try again. If you still get this error, we know there's another issue.
+14:33:04 <Christo> how do i upgrade cabal? 
+14:33:07 <Christo> lol
+14:33:14 <koz_> Christo: How did you install it in the first place?
+14:33:17 <maerwald> what platform
+14:33:20 <monochrom> If I give you a function f :: X -> (), what good does it do for you? Many different ways of getting ()?
+14:33:33 <koz_> monochrom: Only one - const essentially?
+14:33:38 <monochrom> Yeah
+14:33:39 <Christo> i think i may have downloaded it directly like a month ago
+14:33:45 <ghoulguy> monochrom: There's a whole library for making functions like that
+14:33:53 <Christo> i don't have ghcup to my knowledge
+14:33:53 <koz_> Christo: Specify the exact meaning of 'downloaded it directly'.
+14:33:56 <Christo> or never did use it
+14:33:58 <koz_> Also, what platform?
+14:34:02 <maerwald> lol
+14:34:14 <maerwald> we never gonna know
+14:34:19 <Christo> platform? does that mean ghc version? 
+14:34:24 <koz_> Christo: No, OS.
+14:34:30 <Christo> oh macos
+14:34:31 <Christo> newest
+14:34:36 <Christo> mac OS
+14:34:37 <koz_> Christo: Use ghcup.
+14:34:42 <koz_> For all Haskell things.
+14:34:46 <koz_> No seriously just do it.
+14:34:53 <koz_> It means you never have issues of this form ever again.
+14:34:55 <Christo> sure
+14:35:24 <frdg> I have been running ghcid like so for a while with `ghcid -c 'stack exec -- ghci -isrc -iapp ~/path`. I am not finding documentation that explains what the `isrc` and `iapp` settings do. Does anyone know?
+14:35:50 <koz_> monochrom: But how does that fact show me that (a -> ()) -> () ~ a?
+14:35:57 <yushyin> I hope for you that you know how to modify PATH and how to open a file, though :P
+14:36:04 <koz_> Like, how do I go from one to the other?
+14:36:24 <monochrom> No, it is false.
+14:36:46 <monochrom> Only "(forall r. (a -> r) -> r) ~ a" is true.
+14:36:53 <hpc> koz_: you're misreading "a really boring type" ;)
+14:37:00 <koz_> .... Yes, I was.
+14:37:18 <koz_> Thank you, I think I am less confused now.
+14:38:20 <Christo> @koz 
+14:38:21 <lambdabot> Maybe you meant: yow do
+14:39:03 <koz_> hpc: Something something syntax something something variable capture something something Koz needs more coffee.
+14:39:26 <Christo> koz_ installing ghcup: will it mess with my current installation's of GHC and cabal (that already installed)? 
+14:39:33 <koz_> Christo: No.
+14:39:51 <koz_> (or rather, ghcup itself won't)
+14:40:07 <no-n> is ghcup something new?
+14:40:13 <koz_> You need to modify PATH to aim at your ghcup-installed tooling, but that will not go in the same place your current tooling.
+14:40:18 <koz_> no-n: Not that new.
+14:40:40 <koz_> Also maerwald: I tested the -T argument to xz in make bindist and it worked.
+14:40:59 <frdg> Christo: when I switched to ghcup I just deleted all my other ghc stuff.
+14:41:11 <Christo> ok koz_ thx
+14:41:27 <koz_> Christo: No worries - as someone here said, this stuff is fiddly.
+14:41:29 <Christo> i'll install ghcup and get cabal version which is 3 or higher? 
+14:41:40 <koz_> Christo: Current recommended is 3.2 IIRC.
+14:41:46 <Christo> ok cool 
+14:41:56 <koz_> 'ghcup list' will tell you.
+14:41:58 <Christo> i need to play among us right now, but will do those steps in 2hrs
+14:42:15 <Christo> will u be around later koz_ ?
+14:42:20 <monochrom> "ghcup tui" is very nice.
+14:42:35 <koz_> Christo: Should be. If not, someone else here can also assist.
+14:42:46 <koz_> monochrom: I didn't know about 'ghcup tui'.
+14:42:59 <Christo> u a regular here? is there a discord chat oir something? how do people stay in touch
+14:43:13 <Christo> i'm using irc from a web page
+14:44:49 * hackage blanks 0.4.2 - Fill-in-the-blanks - A library factoring out substitution from ASTs  https://hackage.haskell.org/package/blanks-0.4.2 (ejconlon)
+14:45:04 <koz_> Christo: I am a regular here. I have a bouncer which means I'm around here all the time.
+14:45:12 <koz_> This is how folks stay in touch.
+14:45:23 <koz_> ('this' meaning 'this IRC channel right here')
+14:45:57 <Christo> ok cool, well i'll give those steps a try in an hr or 2 thx
+14:47:22 <koz_> Good luck!
+15:02:43 <sm[m]> frdg: -i is a ghc/ghci option adding source directories
+15:37:28 <frdg> sm[m]: oh. Is this is why I need to put my modules in the app directory?
+15:38:40 <sm[m]> ghc looks for them in the current directory and any additional ones specified with -i
+15:39:03 <frdg> ok thanks
+16:21:19 * hackage capnp 0.6.0.1 - Cap'n Proto for Haskell  https://hackage.haskell.org/package/capnp-0.6.0.1 (isd)
+16:38:28 <L29Ah> have anyone performed the weak pointer-based memory leak detection feat on recent ghc? it seems to me that performGC isn't enough to get rid of garbage these days, or otherwise my weak pointer target somehow survives it even though it's never ever used in the code except in the weak pointer creation, as seen in dyepack example
+16:38:36 * L29Ah nudges lukelau_
+16:52:07 <Axman6> L29Ah: I don't know what you're talking about but would love to know more
+16:55:23 <L29Ah> Axman6: https://lukelau.me/haskell/posts/leak/
+16:56:24 * L29Ah nudges mpickering
+16:58:24 <Axman6> Thanks
+17:41:20 * hackage reanimate-svg 0.12.2.1 - SVG file loader and serializer  https://hackage.haskell.org/package/reanimate-svg-0.12.2.1 (DavidHimmelstrup)
+20:25:56 <Tario> Hello
+20:26:13 <lemmih> Hello there.
+20:28:01 <Tario> timed out
+20:37:13 <Axman6> Hello Tario
+20:37:40 <Tario> Hello hello!
+20:38:42 <Axman6> lemmih also said hello :) How can we help?
+20:55:44 <Tario> I got disc for a moment there, poor connection from my end
+20:57:13 <Tario> I was going to ask mainly for some help with a Yesod project I've been working on
+20:57:59 <Tario> Mostly documentation or examples on how to implement Json web tokens into a mini-REST API
+20:58:42 <Tario> And how to perform authentication with JWT + Yesod in this API
+20:58:50 <sm[m]> Tario: tried the yesod book and the examples in the repo/wiki ?
+20:59:12 <Tario> Im trying the Yesod book yes
+20:59:42 <Tario> I haven't checked the wiki/repo, though
+21:00:26 <Tario> Also I've found some interesting blogs on how to create rest API's with Yesod. They've been of great help too!
+21:05:44 <Tario> Is this the repo you were mentioning?
+21:05:44 <Tario> https://github.com/yesodweb/yesod
+21:14:58 <sm[m]> Tario: yes, in that repo's wiki there's a cookbook that might have something
+21:34:58 <yxe_tim> Hello, (hopefully a quick question), I have installed haskell on wsl2 using ghcup (8.10.2) and then built ghcide, but vscode keeps displaying an error that ghcide was compiled against 8.10.1, does anyone have any experience setting up this toolchain? (WSL2, VSCode, Haskell Extension)
+21:35:33 <yxe_tim> (WSL2 ubuntu 20.04)
+21:36:45 <Axman6> what does ghcide version say its GHC version is, and is VS Code pointing to the same ghcide executable as the one you're checking?
+21:37:06 <Axman6> uh, ghcide --version
+21:37:19 <Axman6> (though the former works... but then gives an error
+21:37:20 <Axman6> )
+21:43:06 <yxe_tim> In terminal it says "ghcide version: 0.4.0 (GHC: 8.10) (PATH: ~/.cabal/store/ghc-8.10.2/ghcide-0.4.0-13cf00411000e3d4a0caf0088b938e894a101bcba94c7f863c33d2e1fab1f877/bin/ghcide)", which is what I expect. Is there a way to ask the Haskell language server what version of ghcide it is using? using `find` I don't see an obvious alternate copy
+21:44:58 <Axman6> if you open the VS code console with ctrl-` and then go to putput, select "Haskell (haskell-server)" and scrol to the top it should it should print out something like: ghcide version: 0.1.0.0 (GHC: 8.8.3) (PATH: /Users/REDACTED/.local/bin/haskell-language-server-wrapper) (GIT hash: d2654185eef1b0d703cebc694e85438e20600e37)
+21:47:19 <yxe_tim> `haskell-language-server version: 0.5.0.0 (GHC: 8.10.1)` somehow I have an older one, okay well there's my answer I guess :)
+21:47:33 <Axman6> does it show the path too?
+21:48:12 <yxe_tim> yes `(PATH: ~/.ghcup/bin/haskell-language-server-8.10.1~0.5.0)` which is I think the default install location for `ghcup`
+21:49:35 <Axman6> the Haskell VS Code plugin will also install the appropriate hls for your project IIRC
+21:49:58 <Axman6> I'm not sure therte's much need to do it via ghcup if you're using VS code, but I could be mistaken
+21:52:26 <yxe_tim> I removed it with `ghcup` and then reinstalled and now there is no error. 🤷🏻‍♂️
+21:53:02 <yxe_tim> appreciate your help, thanks Axman
+21:56:55 <Axman6> All good :)
+21:57:31 <Axman6> that's probably the first time I've ever been able to help with a haskell on windows problem... WSL is truly a game changer in supporting the platform =)
+22:48:02 <Dungdv> hello everyone
+22:53:21 <yushyin> hello Dungdv

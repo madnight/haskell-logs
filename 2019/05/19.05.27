@@ -1,0 +1,959 @@
+00:01:42 <jle`> simg: hm, what are the types of the functions you are using there?
+00:02:01 <jle`> like withArchive, getEntrySource, etc.
+00:08:01 <simg> jle`: just amended the gist with the imports. but withArchive is: MonadIO m => FilePath -> ZipArchive a -> m a
+00:09:00 <simg> jle`: getEntrySource is (PrimMonad m, MonadThrow m, MonadResource m) => EntrySelector -> ZipArchive (ConduitT () ByteString m () )
+00:09:33 <simg> jle`: actually, types defined here: http://hackage.haskell.org/package/zip-1.2.0/docs/Codec-Archive-Zip.html#g:7
+00:09:48 <jle`> ah okay, it looks like every other line is 'okay', since every line has to be in ZipMonad
+00:09:54 <jle`> the only thing here that isn't is 'print'
+00:10:03 <jle`> try (liftIO . print) instead
+00:11:18 <jle`> :t liftIO . print
+00:11:20 <lambdabot> (Show a, MonadIO m) => a -> m ()
+00:11:45 <simg> that gives me the same set of errors that liftIO $ runConduit does. 
+00:12:00 <simg> like:     • No instance for (Control.Monad.Fail.MonadFail                          Codec.Archive.Zip.ZipArchive)         arising from a do statement         with the failable pattern ‘name : _’
+00:12:19 <simg> and:     • No instance for (primitive-0.6.4.0:Control.Monad.Primitive.PrimMonad                          Codec.Archive.Zip.ZipArchive)         arising from a use of ‘getEntrySource’
+00:15:30 <jle`> hm, one issue here is that _ : _ is a pattern match that might fail
+00:15:38 <simg> that said, if i remove the mapM_C (liftIO . print) I get an error that I do understand! which is great :)
+00:15:47 <jle`> and ZipArchive doesn't have any mechanism for failure on pattern matches
+00:16:10 <jle`> one thing you can do is move the pattern match out of the _ <-, and manually case match
+00:18:20 <jle`> also one issue you will have here is that IO does not have a MonadResource instance
+00:18:21 <simg> ok, that's interesting. although I copied the name:_ <-  line out of one of the zip examples.
+00:18:36 <jle`> simg: right, that's actually a breaking change that happened a couple of ghc releases ago
+00:18:50 <jle`> so they might not have updated their examples unfortunately
+00:19:24 <jle`> simg: okay, so it looks like getEntrySource returns a Conduit that runs in 'm'
+00:19:34 <jle`> so you can't actually run that Conduit within ZipArchive
+00:22:05 <jle`> simg: i added a comment to how i think i would run the conduit
+00:24:38 <simg> jle': great, thx. much appreciated, will play with that for a bit!
+00:29:15 <jle`> no problem :)
+00:29:19 <jle`> of course, in real life, don't use head, heh
+00:30:06 <simg> jle`: yeah, that bit I understand :) runConduitRes on the other hand ...
+00:35:46 <jle`> runConduitRes is just a wrapper over runConduit and runResourceT
+00:35:54 <jle`> runConduitRes = runResourceT . runConduit
+00:36:19 <jle`> simg: the main idea is that 'source' is a conduit that has to be run in some sort of Monad that is PrimMonad, MonadThrow, and MonadResource
+00:36:29 <jle`> the monad it runs in must have those capabilities
+00:36:46 <jle`> IO does not have resource-tracking capabilities natively -- it doesn't have a MonadResource instance
+00:37:24 <jle`> so what runResourceT does is it interprets 'source' as `ConduitT () ByteString (ResourceT IO) () ()`
+00:37:31 <jle`> er what runConduitRes is, I mean
+00:37:55 <jle`> so it'll "run" it in `ResourceT IO`, a monad that has resource managing capabilities
+00:38:15 <jle`> and then it'll execute that `ResourceT IO` within IO
+00:38:37 <jle`> on a high level, runConduitRes lets you run MonadResource m-constrained conduits within IO
+00:41:20 * hackage hasbolt-extras 0.0.0.18 - Extras for hasbolt library  https://hackage.haskell.org/package/hasbolt-extras-0.0.0.18 (ozzzzz)
+00:43:10 <simg> jle`: ok, that makes sense, kind of. 
+00:43:46 <jle`> simg: yeah, in practice it's just "if you see MonadResource m => ... Conduit ... m .., use runConduitRes instead of runConduit"
+00:43:59 <jle`> but i was just explaining the low level mechanisms of what's actually happening heh
+00:45:17 <simg> jle`: the only thing is though. *why* does it need MonadResource? my original code seemed fairly self-contained. it's got a conduit source from zip and pipes it through a simple conduit. why does that end up being so (to me) complicated?
+00:50:20 * hackage conduit-merge 0.1.3.0 - Merge multiple sorted conduits  https://hackage.haskell.org/package/conduit-merge-0.1.3.0 (cblp)
+00:52:21 <bahamas> alp: are you by any chance around? unfortunately, I haven't managed to completely solve the problem with making my Haskell record type available in Java land, although your suggestions were a step forward
+00:52:56 <bahamas> I think one problem is that I need to decode the JSON to my type and that returns `Maybe Session`. so I assume I need to define a representation for `Maybe`
+00:53:15 <merijn> simg: MonadResource takes care of resource cleanup (i.e. closing/flushing file handles)
+00:53:36 <merijn> simg: So if you stream from/to a file, you need MonadResource to avoid leaking handles
+00:57:15 <jle`> simg: conduit does streaming IO, meaning that as you fetch lines from the bytestring, it'll do more IO to read the zip file
+00:57:39 <phadej> bahamas: Java's Nothing is `null` :)
+00:57:41 <dminuoso> bahamas: Ah so upcast allows you to get back into JObject.
+00:57:52 <jle`> simg: it keeps the file handler open for the duration of the streaming, and as you read each line, it'll perform filesystem/disk IO to get you the next line
+00:58:13 <jle`> simg: MonadResource is used to manage the file handler(s) you use during the process
+00:58:23 <simg> merijn/jle`: ah, ok. so MonadResource is actually being provided by withArchive and runConduit needs to interface with that?
+00:59:04 <jle`> simg: MonadResource is a requirement on the conduit that 'getEntrySource' provides
+00:59:25 <jle`> simg: i think withArchive does IO, but it's not streaming IO.  all it can do is read metadata from the zip file
+01:00:12 <jle`> it does it "all at once", so there's really no need to do any streaming IO or do anything complicated with the file handlers
+01:00:54 <jle`> in fact it might even do a single fetch of all the metadata, and all of the actions within ZipArchive don't even require IO maybe.
+01:01:52 <jle`> simg: 'getEntrySource' processes the metadata of the zip file and returns a `ConduitT () ByteString (ResourceT IO) () ()`: it provides a way to fetch bytestrings in a streaming manner
+01:01:53 <bahamas> phadej: ok, but don't I also need to represent `Just a`?
+01:01:57 <simg> jle`: I get the concept of streaming. it's monad transformers and run<anything> that gives me headaches :)
+01:02:39 <jle`> yeah, so getEntrySource doesn't actually get any entries. it just assembles a source, a description of how to stream bytestrings from the entry in ResrouceT IO
+01:03:01 <jle`> getEntrySource assembles that Conduit, which can only be run in MonadResource m
+01:03:06 <bahamas> what are tag data types? sum and product types? see here for context https://github.com/tweag/inline-java/blob/494a37a9956eb1ed47dcf3706799e2dbf0252e13/jvm/src/Language/Java.hs#L174
+01:03:37 <jle`> so the MonadResource m doesn't come from withARchive, it comes from the conduit that getEntrySource assembles
+01:04:05 <simg> jle': that is making sense now. I was mentally blanking it and hoping for the best earlier :)
+01:05:07 <jle`> if you're familiar with IO in other languages, you can kiiinda think of a conduit as some form of continuation, and getEntrySource as returning a continuation, or iterator, from the metadata
+01:05:19 <jle`> and the continuation/conduit/iterator that it returns requires MonadResource m to be run
+01:05:48 <jle`> but i'm not sure if that analogy makes things more or less complicated, heh
+01:09:27 <simg> jle`: thanks, that's been very helpful.
+01:09:43 <jle`> np!
+01:21:54 <iqubic> jle`: What exactly is the MaybeF you were talking about earlier?
+01:22:10 <alp> bahamas, I am around for now yes. Indeed it looks like you'll want to represent Maybe a in Java land, and phadej's suggestion seems like a decent first attempt
+01:28:00 <jle`> iqubic: data MaybeF f a = MaybeF { runMaybeF :: Maybe (f a) }
+01:28:05 <jle`> basically Compose Maybe
+01:29:10 <qualiaqq> bahamas: Are you aware of java.util.Optional? Or are you on a version of Java before that came around?
+01:29:48 <iqubic> But that's nothing like Free.
+01:30:04 <zincy_> Is there a way of abstracting out the repetition here? https://pastebin.com/b3gVF1ev
+01:30:21 <alp> oh Java got itself an Optional class? That sounds like a perfect fit.
+01:30:25 <jle`> iqubic: do you mean Free like the Free Monad?
+01:31:05 <iqubic> Yes.
+01:31:07 <jle`> zincy_: the whole point if lambdacase is so that you don't have to give a throaway name to an argument you won't use
+01:31:27 <Solonarv> if you're naming it in each branch that rather defeats the point!
+01:31:28 <jle`> zincy_: but it looks like you give and use the name anyway, so there isn't any reason to use lambdcase, heh
+01:31:37 <zincy_> hehe
+01:31:43 <bahamas> qualiaqq: yes, I'm aware of it. this code has to run Spark which I see supports Java 8+
+01:31:47 <jle`> iqubic: yeah, it's not like Free because it doesn't really have anything to do with Free
+01:31:57 <shachaf> It has the letter F, though.
+01:32:06 <shachaf> That's a quarter of the way there.
+01:32:14 <Solonarv> I'd write it like:
+01:32:14 <Solonarv> handlePlayerAction game@Game {..} playerName action = validateAction game playerName action $> case action of ...
+01:32:33 <shachaf> "Free" is really not a very good name for the free monad.
+01:32:45 <iqubic> What does the F in MaybeF mean?
+01:32:57 <jle`> functor, i suppose
+01:33:02 <Solonarv> "Maybe wrapped around a Functor", I guess
+01:33:12 <jle`> or maybe i named it after my friend Maybef
+01:33:23 <iqubic> Oh. I see.
+01:33:40 <jle`> but yeah, another common convention is Maybe1
+01:33:53 <shachaf> Another convention is Compose Maybe
+01:34:19 <shachaf> (But it's probably not a very good one.)
+01:34:24 <zincy_> Solonarv: Thanks
+01:34:28 <dminuoso> :k (:.: Maybe)
+01:34:29 <lambdabot> error:
+01:34:29 <lambdabot>     Not in scope: type constructor or class ‘:.:’
+01:34:29 <lambdabot>     Perhaps you meant ‘:~:’ (imported from Data.Typeable)
+01:34:44 <dminuoso> % import GHC.Generics
+01:34:45 <yahb> dminuoso: 
+01:34:51 <dminuoso> % :k (:.: Maybe)
+01:34:51 <yahb> dminuoso: ; <interactive>:1:2: error: Operator applied to too few arguments: :.:
+01:34:58 <dminuoso> Oh shame
+01:34:59 <shachaf> That's wrong in at least two ways so maybe you should try it in /msg first.
+01:35:32 <shachaf> lambdabot should really have a one-line output limit in the channel.
+01:35:48 <shachaf> DoS amplification and all that.
+01:38:02 <dminuoso> shachaf: Well the order of composition I didn't care much about, actually. When I started to type `(:.: M` I realized my mistake but figured it didn't really matter on what side the composition was for the core idea.
+01:38:28 <shachaf> Hm?
+01:38:35 <dminuoso> Ah nevermind
+01:39:02 <zincy_> Is there a generic way of going from a data constructor name to a function (i.e lowerCasing it)?
+01:39:14 <zincy_> * function name
+01:39:32 <dminuoso> zincy_: data constructors can be functions.
+01:40:15 <zincy_> arbitrary functions?
+01:40:15 <dminuoso> zincy_: So if you have `data Foo where Foo :: Int -> Foo`, you can see that the data constructor `Foo` happens to be a function itself.
+01:40:55 <jle`> zincy_: do you mean, going from a string like "Just", to `a -> Maybe a` ?
+01:41:08 <Solonarv> dminuoso: the mistake is using operator sections at the type level; you can't do that
+01:41:10 <zincy_> yeah
+01:41:18 <zincy_> & jle
+01:41:31 <jle`> hm, it's not quite possible in normal haskell because it's not exactly well-typed
+01:41:41 <jle`> (what would the type of the function be?)
+01:41:44 <dminuoso> Solonarv: Why not anyway?
+01:41:45 <jle`> but it's possible in TemplateHaskell
+01:42:00 <jle`> dminuoso: operator sections are sugar for lambdas, but we don't have type lambdas
+01:42:14 <zincy_> what about a record type of wrapped functions
+01:42:19 <Solonarv> well, right sections (`op` foo) anyway
+01:42:32 <jle`> zincy_: what about them?
+01:42:49 <zincy_> it is a way of going from a data constructor to a function?
+01:43:11 <jle`> it's not possible in general in haskell
+01:43:16 <Solonarv> I suppose left sections like (Maybe :.:) could be allowed, but allowing only one side seems weird and inconsistent
+01:43:19 <jle`> what would the type be?  String -> ????
+01:43:20 <zincy_> :/
+01:43:38 <zincy_> String -> Either Err Bar
+01:43:39 <bahamas> alp: do you know how to call a Java Class method in the `Reflect` instance?
+01:44:11 <jle`> and that would only work for constructors of type Bar
+01:44:16 <jle`> for that we already have read
+01:44:26 <jle`> readMaybe :: String -> Maybe Bool
+01:44:28 <bahamas> since I assume I need to convert `Just a` to `Optional.of(a)`
+01:44:35 <jle`> % readMaybe @Bool "True"
+01:44:35 <yahb> jle`: ; <interactive>:12:1: error: Variable not in scope: readMaybe; <interactive>:12:1: error:; * Cannot apply expression of type `t1'; to a visible type argument `Bool'; * In the expression: readMaybe @Bool "True"; In an equation for `it': it = readMaybe @Bool "True"
+01:44:42 <jle`> % import Text.Read
+01:44:43 <yahb> jle`: 
+01:44:45 <jle`> % readMaybe @Bool "True"
+01:44:46 <yahb> jle`: Just True
+01:44:51 <jle`> % readMaybe @Bool "False"
+01:44:51 <yahb> jle`: Just False
+01:45:02 <jle`> zincy_: if you know the type in advance, then you can use read :)
+01:45:18 <zincy_> What if it isn't String in the first argument
+01:45:31 <zincy_> jle`: but Foo -> Either Err Bar 
+01:45:36 <jle`> i mean...aren't you asking about a function to convert a string into a constructor
+01:45:42 <alp> bahamas, you can use 'inline-java' to make this the easiest it can be
+01:45:43 <jle`> this sounds like a completely different question, then
+01:45:57 <jle`> "is there a generic way of turning a Foo into a Bar"
+01:46:05 <alp> or alternatively, you can use: https://www.stackage.org/haddock/lts-12.26/jvm-0.4.2/Language-Java.html#v:call
+01:46:06 <jle`> do you see how that is a little...undeconstrained
+01:46:07 <zincy_> jle`: ill try and phrase it
+01:46:19 <jle`> you're basically asking for a way to take an arbitrary type and turn it into another arbitrary type
+01:46:29 <zincy_> haha
+01:46:37 <zincy_> Example would help
+01:46:37 <jle`> (generically)
+01:46:57 <zincy_> So I have an action which is a sum type of nullary data constructors
+01:47:11 <zincy_> then I want to apply these actions to some game state
+01:47:32 <zincy_> so I have this function handleAction :: PlayerAction -> Game -> Either Err Game
+01:48:02 <zincy_> I am essentially wondering if there is a way of avoiding pattern matching on each PlayerAction constructor
+01:48:42 <zincy_> and then calling the associated function i.e a@(SitDown player) -> sitDown a game
+01:49:30 <zincy_> It just feels a bit silly to have a function which only maps data constructor names to functions
+01:50:06 <shachaf> Why don't you inline sitDown into handleAction?
+01:50:21 <shachaf> Since presumably sitDown is either partial or has to handle non-SitDown cases that never happen.
+01:50:23 <zincy_> what is inlining?
+01:50:46 <shachaf> Copy the body of sitDown into handleAction.
+01:50:59 <zincy_> ah right
+01:51:10 <shachaf> Does sitDown match on its argument, or what?
+01:51:48 <shachaf> There's no straightforward way to do what you're asking in Haskell. Separately from that, I think it's not a very good idea.
+01:53:15 <zincy_> sitDown just extracts the player from inside the (SitDown player) and applies it to `sitDown player game`
+01:53:16 <dminuoso> zincy_: You could encode the actions as continuations..
+01:53:27 <dminuoso> Not that you should...
+01:53:56 <zincy_> continuation monad?
+01:54:04 <dminuoso> zincy_: The word monad annoys me there.
+01:54:06 <shachaf> What you just said is a type error so I doubt it's whaty ou mean.
+01:54:22 <zincy_> dminuoso: why
+01:54:24 <dminuoso> The word "monad" suffixed to "IO/List/Cont/Maybe" in general annoys me.
+01:54:55 <dminuoso> jle`: You have that nice blog entry, dont you?
+01:55:20 <jle`> heh i wouldn't claim it is nice
+01:55:36 <jle`> but also in this case the difference is a bit subtler too
+01:55:43 <dminuoso> zincy_: Do you ever say "the addition monoid"?
+01:55:49 <jle`> Cont is a specific type of continuation
+01:55:59 <jle`> but it doesn't represent all sorts of continuations in general
+01:55:59 <dminuoso> zincy_: Or do you just say "integer addition"?
+01:56:13 <zincy_> dminuoso: integer addition
+01:56:17 <shachaf> You just said continuations aren't a good idea so why did turn the entire conversation into a conversation about which vocabulary to use to talk about continuations?
+01:56:36 <dminuoso> zincy_: Do you ever consider list a monoid on the basis of being able to contatenate lists? Or do you just call them lists?
+01:56:58 <zincy_> dminuoso: The former
+01:57:02 <jle`> so saying "continuation monad" here is probably coming from a misunderstanding that you didn't specifically mean the actual Control.Monad.Cont, but just the general vaguer idea of a continuation
+01:57:08 <zincy_> Well both more precisely
+01:57:27 <zincy_> I meant Control.Monad.Cont
+01:58:01 <dminuoso> zincy_: Why not call it "Cont functor"?
+01:58:03 <jle`> zincy_: right, i'm saying that dminuoso probably didn't mean Control.Monad.Cont, but was referring to "continuation" in the general sense.
+01:58:15 <dminuoso> jle`: Yeah.,
+01:58:29 <dminuoso> zincy_: Or why not call it "The Cont MonadFail"?
+01:58:35 <dminuoso> "The Cont MonadTrans"
+01:58:38 <adius> I have a question regarding Haskell and LLVm. Maybe one of you can help me? 😇 https://stackoverflow.com/questions/56322704/how-to-run-llvm-bitcode-generated-from-haskell-source-code
+01:58:45 <zincy_> because I am specifically interested in the Monadic instance of Cont
+01:59:32 <zincy_> If i want a list for the purpose of functorial computation I think I want the list functor
+01:59:46 <zincy_> It all depends on the context
+02:01:36 <zincy_> Does that make sense?
+02:11:35 <delYsid``> adius: lli?
+02:12:14 <merijn> adius: As in how to use the LLVM backend with GHC?
+03:05:39 <dminuoso> Why is cabal only trying `network-3.1.0.0`? https://gist.github.com/dminuoso/e62ed37dfb5d9de7154ce4d50b93192c
+03:05:53 <dminuoso> Looking at iproute-1.7.7 it has no bound on network
+03:07:05 <dminuoso> (I dont understand whats going on here at all)
+03:07:08 <merijn> dminuoso: compass-server requires < 2.9
+03:07:12 <merijn> (for network)
+03:07:40 <merijn> dminuoso: That's what line 8 tells you
+03:11:29 <merijn> dminuoso: I can't find compass-radius, so no idea how it might constrain network
+03:14:05 <int-e> dminuoso: hmm, it stopped backtracking, so it's unclear whether it wouldn't try older versions later
+03:15:14 <int-e> dminuoso: have you tried the --reorder-goals trick? I have (had? is too much to hope for) a similar problem with lambdabot; I need --reord-ergoals or --max-backjumps=5000 for cabal to find an installation plan.
+03:23:23 <int-e> dminuoso: http://paste.debian.net/1084145/ <-- this also overruns the backjump limit while trying to rule out network-3.1.0.0 as a candidate
+03:28:15 <JoeCordiingley> Hi, is it OK to paste code in here in asking a question?
+03:28:52 <Taneb> @where paste
+03:28:52 <lambdabot> https://gist.github.com
+03:29:06 <Taneb> JoeCordingley: for anything more than a line or two you should use a gist
+03:29:15 <Taneb> (other paste services are available)
+03:30:23 <gentauro> JoeCordingley: http://paste.debian.net <- good service if you don't use/have GitHub ;)
+03:32:09 <JoeCordingley> Ok I just wrote a function that I found difficult to name but seems so fundamental that I thought it must exist already. https://gist.github.com/JoeCordingley/ea5e24a9bc60792bd1e744db3cdc877c . All it does is run an effect until a predicate is met.
+03:32:30 <JoeCordingley> Does this already exist?
+03:32:53 <merijn> @hackage monad-loops
+03:32:54 <lambdabot> http://hackage.haskell.org/package/monad-loops
+03:32:57 <merijn> JoeCordingley: See that package :)
+03:33:31 <JoeCordingley> thanks
+03:34:45 <JoeCordingley> ah, iterateUntil
+03:59:50 * hackage elminator 0.2.2.0 - Generate ELM types/encoders/decoders from Haskell types.  https://hackage.haskell.org/package/elminator-0.2.2.0 (sras)
+04:24:21 * hackage systemd 2.0.0 - Systemd facilities (Socket activation, Notify)  https://hackage.haskell.org/package/systemd-2.0.0 (erebe)
+04:31:30 <dminuoso> int-e: Yes, the weird thing is I dont know why.
+04:31:41 <dminuoso> int-e: Cheers.
+04:32:28 <dminuoso> What exactly is that "backjump"? Is that a sort of backtracking when it determines that the goal its trying for is not valid?
+04:32:47 <merijn> dminuoso: Yes
+04:33:40 <dminuoso> merijn: Is there a way to track this process? Im asking because the problem is definitely not the < 2.9 requirement - it's that the backjump threshold is exceeded.
+04:33:50 <dminuoso> (And Im wondering where the regression came from)
+04:34:10 <dminuoso> It seems as if it might be a cabal upgrade that snuck in when I bumped my unstable nix channel
+04:43:02 <dminuoso> int-e: Okay interesting. So it seems that for some reason warp/vault/hashable created a scenario where a lot of conflicts were generated, which quickly exhausted the backjump ticks.
+04:44:13 <simg> I'm trying to extract data from zip archive, process it through conduit, and then stream it back into a different zip archive. I got some help earlier with the first 2 parts (thx) but now stuck creating a sinkEntry. https://gist.github.com/simg/035ec4d08b866d59196bcc793c13d85e#gistcomment-2927586
+04:45:24 <Cale> simg: Could you paste the errors as well?
+04:45:39 <Cale> oh, m not in scope?
+04:46:46 <simg> yeah. I just don't any idea how to make that work.
+04:46:51 <simg> *have
+04:47:25 <Cale> m should be source, no?
+04:48:21 <simg> no, because I want to pipe it through the conduit first (and ultimately make that more sophisticated by splitting the conduit to handle parse errors etc)
+05:04:21 * hackage haskoin-store 0.16.0 - Storage and index for Bitcoin and Bitcoin Cash  https://hackage.haskell.org/package/haskoin-store-0.16.0 (xenog)
+05:12:13 <simg> an alternative approach which fails for different reasons. I think I'm just missing something simple about how to apply monads in this situation (or indeed any situation ;)  
+05:12:16 <simg> https://gist.github.com/simg/035ec4d08b866d59196bcc793c13d85e#gistcomment-2927610
+05:15:06 <lyxia> simg: the error gives you a pretty strong hint "Probable cause: ‘sinkZip’ is applied to too few arguments"
+05:16:21 <simg> lyxia: yes, the bit I'm missing is how to apply the argument. it's like monads are supposed to  an implied parameter somehow?
+05:16:47 <simg> eg: this bit of code I'm trying to adapt:
+05:16:49 <simg> fileSink :: MonadResource m => FilePath -> Consumer ByteString m () fileSink fp = do   sinkFile fp
+05:17:37 <lyxia> there are no implicit parameters
+05:18:01 <lyxia> if you have a function, either it is being applied, or it is an argument to a function that expects a function as an argument.
+05:20:14 <simg> better example: 
+05:20:16 <simg> printSink :: (MonadIO m,Show a) => Consumer a m ()
+05:20:23 <simg> printSink = awaitForever (liftIO . print)
+05:20:51 <simg> how does the data to be printed get "into" the function.
+05:24:22 <lyxia> whoever runs printSink is going to provide that data
+05:24:33 <bahamas> alp: even though I think I implemented the instances for Session correctly, I get these errors https://gist.github.com/LucianU/7a1197e5bdebd05a42cfcc1abc46feee. do you know what I'm doing wrong
+05:24:38 <bahamas> or anyone else, if you have any idea
+05:25:23 <simg> lyxia: thx, I think I need to go away and think about this a bit more.
+05:25:58 <lyxia> simg: I'm still trying to understand the library, but it looks like it does the running of conduits for you so you shouldn't need "runConduitRes"
+05:27:13 <lyxia> simg: instead maybe you can just do    sinkZip out "data.txt" (source .| ...)
+05:27:28 <simg> lyxia: fairly sure I do need runConduitRes. that was based on advice from jle`
+05:27:33 <lyxia> simg: and sinkZip should really have an IO result
+05:28:27 <simg> why would sinkZip need to return IO but printSink and fileSink do not?
+05:28:47 <lyxia> jle`'s comment doesn't address the matter of compression
+05:30:09 <lyxia> it prints out your file to stdout, and the simplest way to do that is to run your "source" conduit with runConduitRes + some plumbing
+05:31:14 <lyxia> but if you want to compress things, the plumbing will need to target createArchive rather than runConduitRes
+05:32:18 <lyxia> simg: note the type of `createArchive :: MonadIO m => ... -> m a`
+05:32:46 <lyxia> it tells you that it can be specialized to any monad in which you can embed IO
+05:33:02 <lyxia> in particular, that means it will not use any more functionality than IO gives you
+05:33:25 <lyxia> so you might as well specialize it to `createArchive :: ... -> IO a` with no loss of generality
+05:34:05 <lyxia> you can always use `liftIO :: MonadIO m => IO a -> m a` later, the fact that createArchive does it for you is just a matter of convenience.
+05:36:48 <simg> lyxia: just pasted an update. showing in "pidgeon-Haskell" what I'm ultimately aiming for. I'm going to want to split my conduit into one or more endpoints which will be compressed seperately
+05:36:50 <simg> https://gist.github.com/simg/035ec4d08b866d59196bcc793c13d85e#gistcomment-2927631
+05:39:48 <lyxia> simg: what's the type of csvToThink and cs
+05:40:22 <simg> csvToThing :: [Text] -> Thing
+05:41:47 <simg> cs is from Data.String.Conversions and in this case is String -> ByteString
+05:42:30 <lyxia> what produces the Either that seems to be expected of filterLeft/filterRight
+05:43:28 <simg> ah, I lied! csvToThink is [Text] -> Either String Thing
+05:44:40 <simg> the more I think about it, the more I'd like my conduit to be arbitrarily complex, which is why I want to define my "zipSink" upfront and then just stick it on the end of the conduit(s)
+05:46:40 <simg> updated gist showing what I mean. https://gist.github.com/simg/035ec4d08b866d59196bcc793c13d85e#gistcomment-2927643
+05:48:04 <lyxia> that seems difficult to reconcile with the API of the zip library
+05:53:34 <lyxia> it does seem like a cool thing to have though
+05:54:19 <alp> bahamas, hmm, I think the Interpretation/Reify/Reflect instances for bytestrings are for _strict_ bytestrings while the result of encoding seems to be a lazy one, you probably need to turn it into a strict one.
+05:57:23 <simg> lyxia: I'm also trying to adapt the sinkEntrySpec code here: https://github.com/mrkkrp/zip/blob/master/tests/Main.hs
+05:59:17 <simg> lyxia: that's what makes me think I can create independant sources, sinkEntry's and conduits and then wire them up as I see fit. but the way you've described makes it seem like I have to provide the conduit when I create the sinkEntry
+05:59:33 <simg> but I don't know if that's true or whether I just have no idea what I'm doing :)
+06:01:17 <Guillaum> Hello there. I'm trying to pattern match a GDAT and get an associated type in scope. Something like: """case myGADT of (_ :: MyGADT t) -> something @t""". (Full example at: https://gist.github.com/guibou/ae97f2586eea8496128a2267a0b6657c). However it does not work because something have a constraint and GHC in usable to find the instance for the associated t, even if all the possible t in MyGADT t matchs 
+06:01:23 <Guillaum> the constraint. However, explicitly listing all the cases works. Is there a way to tell GHC to manually expend the case?
+06:04:26 <simg> ah, something I've just realised. sinkEntry wants ConduitT () ByteString (ResourceT IO) () and I'm trying to give it Conduit ByteString m a
+06:06:36 <simg> I have to go afk for an hour or so, but if anyone does have any suggestions I'll read them when get back. you're welcome to comment on my gist. lyxia: thanks for your help so far!
+06:08:15 <lyxia> simg: I think what makes your case a different and harder problem is to have a single source serve multiple sinks
+06:09:21 * hackage sendfile 0.7.11.1 - A portable sendfile library  https://hackage.haskell.org/package/sendfile-0.7.11.1 (JeremyShaw)
+06:13:09 <simg> lyxia: I think the multiple sinks can be done with ZipConduit https://github.com/snoyberg/conduit  (near the end of the page)
+06:13:56 <dminuoso> Guillaum: Yes.
+06:14:18 <dminuoso> Guillaum: Im pretty sure http://hackage.haskell.org/package/constraints-extras-0.2.3.4/docs/Data-Constraint-Extras.html#t:ArgDict would fit your bill
+06:15:14 <dminuoso> Or not sure, but it might.
+06:17:27 <lyxia> you still need to expand the cases to implement the instance(s)
+06:18:16 <Cale> Guillaum: yeah, this is exactly the sort of problem we created constraints-extras for -- you'll be able to write  has @Show (foo :: Foo t) (... use the Show instance for t here ...)
+06:18:35 <Cale> You do not need to pattern match all the cases
+06:19:01 <dminuoso> Cale: Seems like I understood the idea then. :)
+06:19:07 <Cale> :)
+06:19:18 <Guillaum> dminuoso: Cale: Thank you!
+06:19:23 <Cale> Though applying show to undefined seems unlikely to work
+06:19:28 <Cale> You probably also want a value of type t :)
+06:19:38 <simg> lyxia: better example here: https://stackoverflow.com/questions/21671688/single-stepping-a-conduit/21684239    
+06:19:40 <simg> gtg
+06:20:30 <Guillaum> Cale: indeed about undefined ;) (Minimal example, you know ;)
+06:23:19 <Cale> Guillaum: So one thing you could have written would be  reifyShow :: Foo t -> t -> String; reifyShow v x = case v of ... -> show x (with pattern matching on each case)
+06:23:30 <Cale> Guillaum: We could generalise this a bit:
+06:23:47 <Cale> reifyShow :: Foo t -> (Show t => r) -> r
+06:24:17 <Cale> and then do the pattern match and just give the second argument in each case
+06:24:35 <Cale> but then we could go yet further:
+06:25:14 <Cale> reify :: (c [Int], c Ordering, c Float) => Foo t -> (c t => r) -> r
+06:26:07 <Cale> This is basically the game that constraints-extras plays
+06:27:40 <Guillaum> Cale: thank you for the extra details, that's appreciated.
+06:27:43 <Cale> You specify a class associated type for your GADT, ConstraintsFor f c, which is basically this (c [Int], c Ordering, c Float) thing, and then you define  argDict :: ConstraintsFor f c => f t -> Dict (c t)  by pattern matching on all your constructors
+06:28:06 <Cale> (and producing Dict as the result)
+06:28:22 <dminuoso> Cale: So for me it was easier to think of it as an extension of (\\) for ArgDict - the pi-perspective is a bit too fuzzy for me.
+06:28:23 <Cale> There's some template haskell in there which will write the instance for you (at least most of the time)
+06:28:31 <dminuoso> *of (\\) for GADTs
+06:28:57 <Cale> Yeah, that's a reasonable way to think of it too
+06:29:29 <dminuoso> withDict :: HasDict c e => e -> (c => r) -> r 
+06:29:30 <dminuoso> has :: forall c f a r. Has c f => f a -> (c a => r) -> r 
+06:30:03 <Cale> I'm still not entirely convinced that we shouldn't just make has the primitive that everything is based on
+06:30:25 <Cale> argDict was a sort of arbitrary choice
+06:30:34 <Cale> and 'has' is the thing you actually use all the time
+06:31:27 <Cale> Also, I recently added an argument to the ArgDict class, so that you can have instances which fix particular choices of c
+06:32:00 <Cale> There were cases where we had GADT keys that instead of determining a particular type, were storing dictionaries for particular classes
+06:32:11 <Cale> and we wanted to be able to use the Has/ArgDict machinery with them
+06:33:05 <Cale> It's sort of unfortunate though, since once everyone is on 8.6, it's possible to write definitions of ConstraintsFor using QuantifiedConstraints that would do the same.
+06:40:12 <Guillaum> Cale: thank you, I found how to use the library for the "match all" case. I'm stuck for the "match all but something" case, but that's a great step forward.
+06:42:12 <dminuoso> Cale: https://gist.github.com/dminuoso/55ab7e2b788f4d46da30cdf7edb9d9b8 am I doing something obviously wrong here?
+06:50:48 <aveltras> dminuoso: dunno it this code is throwing errors but i had problems recently with the library because i didn't enable PolyKinds extension
+06:51:19 <Eite> Is there a "typical" lib that most projects use to load config files?
+06:51:39 <Eite> Having json is nice, but Aeson is producing mostly pretty bad error messages if parsing fails.
+06:52:05 <Guillaum> dminuoso: works for me if I write 'case v of (_ :: Foo t) -> has @Named v (name @t)
+06:52:23 <Guillaum> dminuoso: in this case I think that GHC is unable to know the @t@ you like for @name@.
+06:52:48 <dminuoso> Eite: http://hackage.haskell.org/package/ConfigFile-1.1.4 perhaps? There's no "typical", just search for "config" on hackage and make an informed decision :)
+06:54:46 <Eite> dminuoso: k
+06:55:57 <dminuoso> Eite: You can also handroll your own parser really quickly with say megaparsec.
+06:56:18 <dminuoso> Ive done it a few times to use a sexpr based grammar that is easy to parse and generate diagnostics for.
+06:56:42 <dminuoso> Or heck, even with plain base parser combinators its easy.
+06:58:31 <dminuoso> Guillaum: Mmm ScopedTypeVariables is a bit cleaner then.
+06:58:46 <lavalike> Eite: I like this one https://github.com/glguy/toml-parser
+06:59:25 <dminuoso> alex+happy is abit overkill as dependencies though :(
+06:59:48 <lavalike> I did use this a bunch too http://hackage.haskell.org/package/config-ini
+07:00:32 <dminuoso> Guillaum: I find it surprising, type unification should provide me with the `t` in that spot.
+07:01:49 <Cale> dminuoso: ah, I was going to say the same thing Guillaum said, yeah, the problem is that it's impossible to know which t you wanted
+07:02:14 <Cale> It's certainly possible that you wanted a different t than the one for which you have a Named instance in scope, and GHC won't guess for you
+07:03:05 <dminuoso> Cale: So in my naivity I see `Has c f => f a -> (c a => r) -> r` and conclude that if I supply `v :: f a`, then the `a` there is fixed already.
+07:03:48 <tty1> Hey super noob here. Would anyone be willing to take a look at a short haskell module i wrote and see if they see any room for improvement to help me learn. Its an implimentation of a Multibimap, so useful in some situations. https://dpaste.de/MKv0
+07:05:27 <tty1> Ive tested the code and it seems to work as expected by the way
+07:05:46 <lyxia> dminuoso: it is indeed fixed
+07:09:13 <tty1> Im particularly interested in any examples of where i could reduce the verbosity of my code by using operators like <*>, <>, >>=, <$>, stuff like that
+07:09:30 <tty1> which is the main spot i lack intuition it seems
+07:09:54 <lyxia> tty1: try ScopedTypeVariables to clean up the signatures of all those local functions
+07:10:30 <lyxia> these constraints are just noise
+07:10:34 <tty1> lyxia: never used that language extension. i need to look it up can you give a single example so i have a starting point?
+07:11:27 <aveltras> tty1: https://limperg.de/ghc-extensions/#scopedtypevariables
+07:11:40 <tty1> thanks
+07:13:12 <Guillaum> dminuoso: You are right (I think), however when you pass your 'v', that's a 'Foo t', without more information. The real 't' comes back from the pattern match.
+07:13:26 <lyxia> tty1: assocLeft l rs = rs >>= \(r, c) -> replicate c (Just l, Just r)
+07:13:51 <tty1> hmmm
+07:15:15 <lyxia> every time you have f (x : xs) = ... ++ f xs   that's a concatMap, which is (>>=)
+07:18:13 <tty1> lyxia: oh hmmm
+07:19:29 <dminuoso> Cale: Oh heh I see what went wrong.
+07:23:56 <tty1> lyxia: thx going through and applying those suggestions now
+07:32:05 <tty1> lyxia: this is the code with scoped type variables, just checking if this is what you intended: https://dpaste.de/32w4
+07:33:13 <lyxia> tty1: yes
+07:33:27 <tty1> cool
+07:34:15 <tty1> I actually built something useful in haskell, yay!
+07:36:05 <yushyin> great!
+07:37:08 <tty1> what did you guys think of my indentation style on my code? Good? Improper? Excessive?
+07:37:51 * hackage rattletrap 7.0.2 - Parse and generate Rocket League replays.  https://hackage.haskell.org/package/rattletrap-7.0.2 (fozworth)
+07:41:35 <tty1> btw what is everyones favorite IDE, I'm looking for one that is haskell specific with good code completion, the ability to pull up info by highlighting, and ideally the ability to autoclean unused imports... any suggestions?
+07:42:52 <monochrom> I am used to emacs, but that's just because 20 years ago I dedicated a week to learn it. My students like VS Code.
+07:43:49 <monochrom> Actually their VS Code setup does more than my simple Emacs setup.
+07:43:52 <Phyx-> monochrom: is that because you opened it and couldn't figure out how to close it? :)
+07:44:36 <monochrom> Naw. It was 20 years ago, the only choices were ed, vi, emacs.
+07:44:37 <yushyin> that's the joke with vim not emacs
+07:45:09 <monochrom> Actually there was also an xedit or something.
+07:45:28 <Phyx-> hehe
+07:45:35 <maerwald> emacs these days is (sadly) the better choice for haskell
+07:46:24 <maerwald> vscode however is also good, especially because the HIE author maintains the vscode plugin
+07:46:25 <jgt> maerwald: why?
+07:46:32 <yushyin> why sadly? if emacs does the job well that's great.
+07:46:51 <maerwald> jgt: intero support is better, there is dante, ...
+07:47:05 * Phyx- just uses vim with no plugins
+07:47:12 <monochrom> Because if someone revives the Eclipse plugin again, it could easily blow everything else out of the water.
+07:48:01 <tdammers> straight up vim here, too
+07:48:03 <monochrom> Also think of emacs as least worst.
+07:48:21 <tty1> yea i have vscode, but unless im missing something the only thing it appears to give me is cod ehighlighting
+07:48:36 <tdammers> between ghcid, hasktags, and a very small number of hand-wrought macros in ~/.vim/ftplugin/haskell.vim, I'm not really missing much
+07:48:55 <maerwald> tty1: trie HIE with vscode, it even gives you types of expressions (which the vim plugin simply cannot, it's not implemented, only for identifiers)
+07:48:56 <tty1> are there additional plugins i need maybe?
+07:48:59 <Phyx-> tty1: vscode is moduler, you install what you want
+07:49:33 <jgt> yeah I'm pretty happy with vim and GHCi
+07:49:44 <maerwald> GHCi triggers OOM here =)
+07:49:51 * hackage extensible-effects-concurrent 0.24.0 - Message passing concurrency as extensible-effect  https://hackage.haskell.org/package/extensible-effects-concurrent-0.24.0 (SvenHeyll)
+07:50:05 <Phyx-> tty1: yes https://marketplace.visualstudio.com/search?term=haskell&target=VSCode&category=All%20categories&sortBy=Relevance
+07:50:20 <maerwald> most tools are broken for me, except codex (which is only semi-broken)
+07:50:21 <monochrom> Wait, HIE doesn't trigger OOM just as much?
+07:50:44 <maerwald> monochrom: little less in fact, given that you manage to make it work at all haha
+07:50:46 <tty1> Well i already had two haskell extensions installed, but they dont appear to do much
+07:51:16 <yushyin> oh it certainly loves my ram
+07:51:48 <yushyin> tty1: https://marketplace.visualstudio.com/items?itemName=alanz.vscode-hie-server did you try this one?
+07:52:12 <Phyx-> you'll need to install and compile HIE manually for that to do anything though
+07:52:37 <Phyx-> I think HIE has half of hackage as a dependency chain so will take a bit
+07:52:50 <tty1> nope didnt try that one, ill give it a go
+07:56:31 <maerwald> alsoo
+07:56:40 <maerwald> there is a ghc-mod rewrite, but again: only emacs plugin
+07:56:50 * hackage network-multicast 0.3.0 - Simple multicast library  https://hackage.haskell.org/package/network-multicast-0.3.0 (AudreyTang)
+07:57:05 <jgt> in truth, my vim setup is pretty ghetto
+07:57:26 <jgt> I'm making it work with vim-dispatch and tmux send-keys
+07:57:40 <Phyx-> ghc-mod and ghc-simple both work with vscode too
+07:57:47 <jgt> which probably for a lot of people is too fragile
+07:57:59 <maerwald> https://github.com/kazu-yamamoto/hhp
+07:58:43 <Phyx-> that's a fork due to licensing differences, not a rewrite
+07:58:50 <yushyin> ^
+07:59:27 <maerwald> oh
+08:35:15 <dminuoso> Cale: Actually Im not sure anyhow why type inference fails there. If I take `... => f a -> (Named a => r) -> r` and pass something of type `v :: Foo t0` as first argument, why can't it deduce that `a ~ t0`?
+08:35:58 <dminuoso> I mean the occurence of `a` in both the first argument and the context of the second argument, it seems painstakingly obvious that this should unify without me doing type applications
+08:38:25 <dminuoso> For reference, this was the error: https://gist.github.com/dminuoso/55ab7e2b788f4d46da30cdf7edb9d9b8
+08:39:52 <__monty__> dminuoso: Couldn't f be a "stack" of type constructors that acts like a functor as a whole?
+08:40:08 <__monty__> Or is t0 a concrete type?
+08:40:27 <dminuoso> __monty__: Does it matter at all?
+08:41:20 <__monty__> Yes, because inference wouldn't be able to assume f ~ Foo.
+08:42:38 <dminuoso> __monty__: okay, so lets constrain `t :: *` then.
+08:43:05 <dminuoso> __monty__: Now it has to sasume that f ~ Foo.
+08:45:38 <dminuoso> __monty__: It seems like there's enough information here. Since we know that `Named :: * -> Constraint`, we can infer the kind of `a`, and since an argument of type `f a` is demandend, we can infer the kind of `f` too
+08:46:10 <dminuoso> Ohhh...
+08:47:08 <dminuoso> So if we had `Foo (Foo t0)` I cant know whether `f ~ Foo (Foo _) and a ~ Foo t0` or `f ~ Foo (_) and a ~ Foo t0`
+08:47:19 <Guillaum> dminuoso: `Foo t` means `forall t. Foo t`. Because that's forall t, you cannot deduce anything for this t. So actually, you just now that you have a t (called t0 in the error message) and no way to know which instance it must select. The pattern match in my solution brings the t in scope.
+08:47:33 <Guillaum> s/now/know (sorry about that one)
+08:48:14 <dminuoso> Guillaum: If I do type unification I just replace it with some meta variable that will end up turned into an existential
+08:48:34 <dminuoso> Guillaum: So during type unificatation that `t` is replaced with some `t0`
+09:18:05 <Eite> At some point in my code file I say:   x = 17     and I turn on -fwarn-unused-binds    – yet ghci does not complain when I reload my file.
+09:18:21 <Eite> And    stack build --ghc-options -fwarn-unused-binds    also does not tell me about the unused `x`.
+09:23:20 <Solonarv> Eite: is that a top-level binding?
+09:23:39 <Solonarv> if so, perhaps you're not getting a warning because it's exported
+09:24:10 <Eite> Solonarv: yes it is a toplevel binding, and it does not get exported
+09:24:32 <Solonarv> if you don't have an explicit export list then all top-level bindings are exported
+09:24:51 <Solonarv> do you have an explicit export list?
+09:25:13 <Eite> Solonarv: good, that did the trick. I did not have an explicit export list.
+09:25:30 <Solonarv> so it was in fact being exported :D
+09:25:35 <Eite> Indeed.
+09:25:51 <Eite> Solonarv: thanks for pointing this out.
+09:27:14 <dminuoso> __monty__: Is there a way to guide the type inference in such a way to not specify type annotations, but allow it to deduce `f ~ Foo`?
+09:29:06 <__monty__> dminuoso: I'm not sure the a in `Named a` isn't a new a distinct from the one in f a. I think that's what you're assuming.
+09:49:35 <gentauro> Mark Karpov around?
+09:50:06 <gentauro> just to tell him that they are doing `Haskell formatting` wrong :D -> https://www.tweag.io/posts/2019-05-27-ormolu.html
+09:50:42 <gentauro> after `then`, there should be a `\n` to be consistent with the `else` statement
+09:50:53 <gentauro> otherwise `OCD` is getting triggered :D
+09:53:02 <nitrix> OCD :: forall a. a -> IO Perfection
+09:57:10 <maerwald> nitrix: lol what? How can you? IT MUST BE PURE
+09:57:48 <nitrix> Fine, let's make it pure. This way we're closer to `absurd` :P
+09:59:17 <Solonarv> this is not close at all to absurd
+10:00:18 <Solonarv> forall a. a -> R ~ (exists a. a) -> R, but absurd :: Void -> R ~ (forall a. a) -> R
+10:00:43 <Solonarv> don't mix up your quantifiers!
+10:06:21 * hackage servant-snap 0.8.4 - A family of combinators for defining webservices APIs and serving them  https://hackage.haskell.org/package/servant-snap-0.8.4 (imalsogreg)
+10:10:22 <RedNifre> Hey there. Is there a simple solution for when you have a complex recursive data structure that for some use cases should be statically typed but for some other it would be better dynamic? I can only think about deriving some type instances, but I never did that.
+10:11:13 <RedNifre> I have this program AST that is typed according to some BNF and searching it for variables involved a lot of select (Bla x y) = select x ++ select y
+10:11:51 <lyxia> Have you heard about syb
+10:11:56 <RedNifre> no
+10:12:27 <RedNifre> scrap your boilerplate generic fp?
+10:12:58 <lyxia> yes
+10:13:57 <RedNifre> Wow, I'm currently reading about it and it sounds perfect. Thanks, I'll have some reading to do now :)
+10:14:07 <lyxia> other things to look at are the Lens.Plated module of lens, and the traversals from generic-lens
+10:17:08 <lyxia> and uniplate, which describes itself as like syb but simpler.
+10:45:28 <Guest99173> Hello, first time here. I was just going through the exercises at http://blog.tmorris.net/posts/20-intermediate-haskell-exercises/ 
+10:46:51 <Guest99173> The exercises basically bring you to reimplement monads with a class called Misty, and >>= is called banana and return is unicorn
+10:48:15 <lyxia> ehehe
+10:48:17 <Guest99173> Now in the implementation of forM I seem to have encountered a strange problem. moppy :: (Misty m) => [a] -> (a -> m b) -> m [b] moppy [] f = unicorn [] moppy (x:xs) f = f x `banana` (\y -> banana (moppy xs f) (\ys -> unicorn (y:ys)))
+10:49:09 <Guest99173> this doesnt typecheck but when i replace banana and unicorn with >>= and return it does. Any ideas?
+10:49:42 <lyxia> :t (>>=)
+10:49:44 <lambdabot> Monad m => m a -> (a -> m b) -> m b
+10:49:49 <lyxia> :t (=<<)
+10:49:51 <lambdabot> Monad m => (a -> m b) -> m a -> m b
+10:49:56 <lyxia> banana ^
+10:51:39 <Guest99173> OH. How careless of me
+10:51:59 <Guest99173> I wonder now how I got so far without realising the order of arguments was different
+10:52:08 <Guest99173> Thanks a lot!
+10:52:27 <lyxia> you're welcome!
+10:57:01 <Guillaum> gentauro: I think that by design, ormolu wants to keep the author initial formatting intents. So if the author want and else on one line and multilines on else, it should be preserved
+11:00:28 <__monty__> Ormolu's affinity for vertical whitespace feels very elmish.
+11:08:44 <ChrisPenner> Any lens experts around? I know that `filtered` isn’t a valid traversal if you invalidate the predicate; but I have a few questions:  1. What happens if you invalidate that invariant? What sort of *bad things*™ will happen? 2. Does something like `partitioned :: (a -> Bool) -> Traversal a b (Either a a) (Either b b)` exist? And if it did, is it always a valid traversal?
+11:15:56 <Solonarv> ChrisPenner: traversals have a law that looks like 'set traversal x . set traversal y = set traversal y', which is broken if the traversal is 'filtered' and y invalidates the predicate
+11:16:25 <ChrisPenner>  Right; but what does it actually DO?
+11:17:20 <ChrisPenner> And I suppose that would mean that 'partitioned' is invalid also?
+11:17:22 <Solonarv> if the double-set law is broken that means things aren't getting changed when they should be, or vice versa
+11:17:23 <lyxia> I feel like it might not be so bad even if it's unlawful
+11:17:33 <Solonarv> lyxia: indeed, that's why it's in lens anyway
+11:18:14 <Solonarv> your 'partitioned' is equivalent to '(a -> Bool) -> Traversal a b (Bool, a) (Bool, b)', which smells fishy to me
+11:18:31 <ChrisPenner> Yeah; I assume it's equivalent to `filtered`
+11:18:50 <ChrisPenner> Now that I know about which exact law 'filtered' is breaking :)
+11:18:52 <Solonarv> it isn't, in fact it's worse
+11:18:59 <lyxia> filtered doesn't give you any element that doesn't satisfy the predicate
+11:19:25 <lyxia> or what did you mean by "equivalent"
+11:19:28 <Solonarv> what does 'set (partitioned even) (True, 5)' do? I don't see any way for that not to be terribly broken
+11:19:31 <lyxia> equivalent on the moral scale?
+11:20:03 <ChrisPenner> Yup
+11:20:03 <Solonarv> note that if you're just retrieving values there are no problems
+11:20:09 <Cale> Normally you'd expect that  over t f . over t g = over t (f . g)  which breaks in this case
+11:20:34 <Solonarv> Cale: ah, that's just a slight generalization of the law I said would break
+11:20:38 <Cale> yeah
+11:20:44 <Cale> So you'll be at the whims of the precise manner in which the traversal gets used.
+11:21:01 <ChrisPenner> Gotcha :)
+11:21:13 <Cale> and someone who makes a simplification which looks harmless can suddenly cause things to break
+11:21:24 <ChrisPenner> I think if I'm always using it manually in one-off situations it's probably fine
+11:21:28 <tty1> As much as i love using anaconda to share haskell snippets I really wish the code displayed had more horizontal width: https://anaconda.org/freemo/multibimap/notebook
+11:21:29 <Solonarv> yeah
+11:21:57 <ChrisPenner> I also wrote this weird thing:
+11:21:59 <ChrisPenner> coTraverse :: (Comonad w, Traversable w, Applicative f) => (w a -> f b) -> w a -> f (w b)
+11:22:03 <ChrisPenner> coTraverse f w = sequenceA $ extend f w
+11:22:07 <lyxia> tty1: 100 character lines are arguably hard to read anyway
+11:22:29 <dminuoso> ChrisPenner: cotraverse :: (Distributive g, Functor f) => (f a -> b) -> f (g a) -> g b
+11:22:37 <Solonarv> also, note that you can build safe, law-abiding traversals out of filtered; for example:
+11:22:37 <Solonarv> each . filtered fst . _2 -- this can't alter the predicate, so it's safe
+11:23:02 <ChrisPenner> The naming is dumb; don't worry about it :P
+11:23:03 <Solonarv> this is a Traversal [(Bool, a)] [(Bool, b)] a b
+11:23:09 <tty1> lyxia: depends how they are indented, in some cases most of it is indentation white space
+11:23:11 <dminuoso> ChrisPenner: Ah fair.
+11:23:13 <ChrisPenner> You can just call it `extended` if it makes you feel better
+11:23:23 <ChrisPenner> 'co' for 'comonad'
+11:23:59 <lyxia> tty1: you can also get rid of all the constraints in toList
+11:24:28 <lyxia> tty1: by making the first line    "toList :: forall l r. (...) => ..."
+11:24:37 <Solonarv> tty1: side note: I don't think those default implementations for 'insert' and 'delete' do anything
+11:24:40 <tty1> lyxia: oh yea you're right, thanks
+11:24:55 <dminuoso> ChrisPenner: Whats the use case?
+11:25:03 <dminuoso> ChrisPenner: Isnt that just a more constrained Comonad in disguise?
+11:25:24 <lyxia> tty1: all the lines that overflow have only two or four spaces before
+11:25:37 <Cale> ChrisPenner: But also, if you're using lens in one-off situations, I'd be very careful about whether you actually need it.
+11:25:55 <ChrisPenner> It's basically just sugar for using `extend` in a traversal; so instead of `someOtherTraversal %~ extend f` you can do `someOtherTraversal . extended %~ f`
+11:26:29 <ChrisPenner> But what surprised me about it, is that `w ^.. extended` doesn't work;
+11:26:31 <dminuoso> ChrisPenner: Ahh I see, that's neat.
+11:27:20 <Cale> These days I only use lens once I've exhausted all other options for expressing what it is that I want. Usually where that breaks down is cases where you really need it as an abstraction: functions which need to be abstracted over a lens or prism.
+11:28:11 <lyxia> tty1: I'm really bothered by the one-arrow-per-line indentation
+11:29:36 <Cale> Cases where you have more than a few levels of nested structure and you're making modifications can also be annoying without lenses of course
+11:29:53 <tty1> lyxia: any reason?
+11:30:11 <Cale> It's very easy to piece things together with traversals that typecheck and do the wrong thing
+11:30:36 <tty1> lyxia: I seem unable to get rid of many of the constraints in toList though im not sure why
+11:31:22 <ChrisPenner> Cale: It doesn't even typecheck unfortunately
+11:31:37 <lyxia> tty1: can you show what you tried and the error
+11:31:51 <ChrisPenner> But I don't really know why; I think it's because the `a` and the `b` don't unify
+11:32:10 <tty1> lyxia: yea let me first show you how much i could remove without error
+11:32:27 <ChrisPenner> E.g. `Traversal (w a) (w b) (w a) b` is kinda funky
+11:33:05 <lyxia> tty1: "m -> Multimap l r" is perfectly readable on one line, prefer to break stuff that's too big to be digested at once.
+11:33:06 <tty1> lyxia: this is as much as I could reduce it without error: https://dpaste.de/g5x0
+11:33:07 <Solonarv> yeah, that really doesn't seem right
+11:33:21 <tty1> lyxia: if i take any other restraints away it will error
+11:33:35 <Solonarv> usually stabby lenses are supposed to look like 'Optic (F a) (F b) a b'
+11:33:57 <Solonarv> (where F a is some arbitrarily-complex type possibly mentioning a)
+11:34:01 <tty1> lyxia: is there any standard indention guidlines shared by the haskell community
+11:34:08 <ChrisPenner> But in this case, the `w` it focuses is part of the input; so I don't really see why it WOULDN'T work
+11:34:15 <lyxia> tty1: you need to add a "forall" to explicitly bind the type variables in the signature of toList
+11:34:20 <lyxia> tty1: by making the first line    "toList :: forall l r. (...) => ..."
+11:34:32 <ChrisPenner> Also it works as a setter; and it typechecks as a `Traversal`
+11:34:36 <tty1> lyxia: oops missed that sorry
+11:34:40 <ChrisPenner> And the docs say: "A Traversal can be used as a Fold. Any Traversal can be used for Getting like a Fold,"
+11:34:50 * hackage nvim-hs-ghcid 2.0.0.0 - Neovim plugin that runs ghcid to update the quickfix list  https://hackage.haskell.org/package/nvim-hs-ghcid-2.0.0.0 (saep)
+11:34:51 <ChrisPenner> So why can't I use it as a fold? haha
+11:34:52 <tty1> lyxia: i see forall on constraints a lot but dont understand it
+11:35:48 <lyxia> tty1: what other language with generics are you familiar with
+11:37:31 <lyxia> well you can mostly ignore the forall when reading code as long as RankNTypes (another extension) are not involved.
+11:37:31 <tty1> lyxia: java
+11:37:51 <ChrisPenner> Oh: "Most Getter combinators are able to be used with both a Getter or a Fold in limited situations, to do so, they need to be monomorphic in what we are going to extract with Const"
+11:38:03 <ChrisPenner> I suppose that makes sense
+11:38:15 <lyxia> tty1: in java you write   mygeneric<T>(...)   that <T>   plays a similar role to   forall a.
+11:38:43 <lyxia> it makes explicit the type variables used by the type of a function
+11:39:16 <tty1> lyxia: what would be the java equivelant of not having the forall?
+11:39:29 <lyxia> there is no equivalent
+11:39:51 <tty1> ahh
+11:40:15 <lyxia> it's still there, but implicit
+11:40:21 <dminuoso> tty1: Imagine the forall always being there. The reason you have to actually write it for ScopedTypeVariables to work is a sort of retrofit to fix what one might perceive as a wrong decision
+11:40:34 <iqubic> Java doesn't have any foralls.
+11:40:39 <__monty__> Wouldn't it just be providing concrete types rather than having generic ones?
+11:40:59 <tty1> hmm
+11:41:03 <lyxia> java does require you to bind type variables, that's one of the roles of the forall
+11:41:13 <dminuoso> tty1: If Haskell was made anew its possible that you don't have to write `forall` explicitly to get the behavior you are looking for.
+11:41:27 <lyxia> it's not exactly the same but you could say the same for any other feature comparison between languages
+11:41:52 <Cale> (It's also plausible that you'd have to write forall all the time)
+11:48:55 <lyxia> tty1: also consider dropping the type class and addressing the code duplication in delete.
+11:49:47 <tty1> lyxia: i could address the code duplication without dropping the typeclass. Any reason youd suggest I drop the typeclass?
+11:51:21 <tty1> unless im missing something that typeclass is giving me a greater ability to implement different implementations in the future that can be a drop-in replacement. For example if i wanted to back it with a binary tree implementation instead of a hash bucket implementation, or to use a strict rather than lazy hashmap
+11:52:24 <kashima> haskell is the bezt
+12:05:10 <mp___664> is there a way to attach a hook to GHC's GC, so that I can get all GCDetails?
+12:08:50 * hackage servant-snap 0.8.3.1 - A family of combinators for defining webservices APIs and serving them  https://hackage.haskell.org/package/servant-snap-0.8.3.1 (imalsogreg)
+12:29:35 <cocreature> mp___664: not sure what exactly you mean. Given that you seem to have already found GCDetails I guess "gc <$> getRTSStats" is not what you’re looking for?
+12:36:19 <mp___664> cocreature: I can see the last one, I can poll, but how do I see all of theml?
+12:41:38 <cocreature> mp___664: as in a list of all gcdetails during the execution of a program?
+12:43:26 <cocreature> the eventlog has some gc info iirc so that is at least worth a look
+12:59:53 <sezycei> c_wraith: Thanks for your help a couple days ago when I asked about getting a client's IP in a wai/warp application. I got it sorted out just a bit ago and now have some general functions to easily pull the contents of HTTP headers into a usable form. 
+13:03:41 <c_wraith> sezycei: nice work
+13:04:57 <sezycei> Big thanks! Just wanted to stop by and show my appreciation. <3
+13:17:58 <DiamondGirl99> Watch the Full Video "Stepmom Alexis Fawx Uses Stepson To Fulfill Her Sexual Needs": https://bitlylink.com/uF5O9 ♥
+13:28:14 <mp___664> cocreature: thanks!
+13:32:46 <roidusilence> why oh why didn't I check for space leaks before
+13:34:02 <roidusilence> are there tools or special techniques used to identify the source of a space leak or is it just good old debugging
+13:35:07 <Solonarv> you can profile your program, that'll tell you which parts of your code are consuming the most space/time
+13:36:00 <Solonarv> both cabal and stack have support for building & running your project in profiling mode, so this should be fairly painless
+13:39:51 * hackage Rasterific 0.7.4.3 - A pure haskell drawing engine.  https://hackage.haskell.org/package/Rasterific-0.7.4.3 (VincentBerthoux)
+13:40:20 <roidusilence> will look into it
+13:40:36 <tty1> Anyone here use haskell on OSX. I have had a lot of trouble getting it to work right since the getgo
+13:41:01 <merijn> tty1: I do
+13:41:26 <merijn> tty1: what kinda trouble are you running into?
+13:42:08 <tty1> merijn: I first noticed the problem when i tried using different resolvers, they all fail to compile. but most recently i seem to run into the issue again where i cant install ghc-mod (I tried through both cabal and stac).. it complains about being unable to resolve dependencies usually
+13:42:29 <tty1> merijn: though it seems to be more than one issue i have or maybe the same issue effecting several things
+13:42:45 <merijn> tty1: Which ghc version? ghc-mod is no longer actively maintained, so it's likely the build is broken with recent GHCs
+13:43:24 <tty1> merijn: i tried using lts-9 according to the how-to i followed with similar issues
+13:43:37 <tty1> merijn: 8.6.3
+13:44:55 <merijn> tty1: The last GHC version that was actively supported by a ghc-mod release was 8.0, there's an 8.2 PR on github, but I don't think anyone ever updated it for 8.4, let alone 8.6
+13:45:02 <MarcelineVQ> lts-9 is ghc 8.0.2
+13:45:35 <merijn> Ah, I don't use stack, so I dunno why that wouldn't compile, although last time I did use ghc-mod I recall it being a bit fickle
+13:46:13 <MarcelineVQ> there is a version that works with 8.4 floating around out there but I've never built it myself
+13:47:06 <tty1> let me share full logs...
+13:49:55 <tty1> here is the full error, redoing it now with verbose fla... https://dpaste.de/mqBv
+13:50:50 <tty1> here we go full error: https://dpaste.de/ZjqN
+13:51:18 <merijn> This is suspicious: configure: error: C compiler cannot create executables
+13:51:23 <tty1> i keep seeing the problem with several things i do in haskell, tried a whole lot to fix it with no success
+13:51:27 <merijn> tty1: What happens if you run "gcc --version"?
+13:51:29 <MarcelineVQ> this was really easy to google <_<
+13:51:39 <MarcelineVQ> https://www.google.com/search?q=ghc%20ExitFailure%2077
+13:51:48 <merijn> tty1: Did you ever succesfully build any Haskell executable/library? Or only in ghci?
+13:52:00 <MarcelineVQ> hit 1 should give you a lead to try out first
+13:52:09 <tty1> merijn: gcc version output: https://dpaste.de/Koko
+13:52:47 <merijn> tty1: ok, that looks sane, I was just wondering if you perhaps forgot to install xcode commandline tools, but then probably configure would've complained about something else
+13:52:49 <tty1> merijn: no i dont recall ever successfully building a haskell library other than my own haskell files
+13:53:43 <tty1> MarcelineVQ: that was the first thing i did and tried most of the hits but ill look again that was a week ago
+13:53:49 <merijn> MarcelineVQ: oh, ha, that's the bug in the GHC configure script I reported/fixed months ago
+13:55:00 <merijn> tty1: What happens if you try to install via cabal-install with GHC 8.0?
+13:55:00 <tty1> MarcelineVQ: first ht was a ubuntu specific solution/problem.. not sure how id reinstall gcc on mac though. I think i tried through brew once with little luck
+13:56:01 <tty1> merijn: cabal install tends to give different errors, what command exactly should i try
+13:57:05 <merijn> The most robust thing to try would be: "cabal v2-install ghc-mod" with cabal-install 2.4 and GHC 8.0. So it depends a bit on which GHC and cabal-install you have right now
+13:58:21 <tty1> merijn: that just gives me depency issues which i dont know how to overcome 
+13:59:06 <merijn> tty1: Can you pastebin the error you get from dependency resolution?
+13:59:20 * hackage Rasterific 0.7.4.4 - A pure haskell drawing engine.  https://hackage.haskell.org/package/Rasterific-0.7.4.4 (VincentBerthoux)
+14:00:50 <tty1> merijn: sure : https://dpaste.de/kPBO
+14:03:44 <merijn> tty1: Ah, that's because your GHC version is 8.6 :)
+14:04:07 <tty1> yea i only know how to change that in stack
+14:04:19 <merijn> tty1: How did you install GHC?
+14:05:00 <tty1> merijn: I dont recall offhand, could have been brew
+14:06:05 <merijn> tty1: Personally I always prefer to install GHC from the bindists (because that way the same prcoess works on every *nix OS for me), you can find the 8.0 bindists here: https://www.haskell.org/ghc/download_ghc_8_0_2.html#macosx_x86_64
+14:07:28 <merijn> tty1: Installation is just: untar and then run "./configure --prefix=path/to/install && make install". Usually I just install them to $HOME/ghc80, $HOME/ghc82, etc. so I can easily have multiple versions. cabal-install will just use whichever version is first in your path, so usually if I wanna switch (for testing) I just temporarily adjust my path
+14:09:27 <tty1> merijn: ideally id use stack to switch between ghc versions but that gives me its own errors.
+14:09:59 <merijn> tty1: For future reference: the base package is a part of GHC, so you cannot use a different version than what comes with your GHC version (the bonus of this is that it's easy to signify compiler compatibility via base versions), so your original dependency error is saying "ghc-mod wants base between 4.6 and 4.10 (aka GHC 7.6 and 8.0), but you have 4.12 (aka GHC 8.6)
+14:10:44 <merijn> (translation between versions: https://wiki.haskell.org/Base_package)
+14:11:50 <tty1> merijn: lack of good backwards compatibility is quickly becoming my number 1 legitimate issue with haskell :(
+14:13:54 <merijn> tty1: *usually* fixing up packages to work with newer versions is relatively trivial, but ghc-mod was always rather brittle and tied to GHC/Cabal details, so it's not really illustrative of packages in general
+14:15:30 <tty1> merijn: well it doesnt seem trivial for you since you need to change your path variable every time. It may work but to me that feels hackish
+14:16:58 <Phyx-> you don't need to change your path variable, just tell cabal which ghc to use and use the fully versioned form of ghc
+14:17:04 <merijn> tty1: As someone just pointed out to me, there's ghcup too for switching, but I haven't used it, so I can't comment
+14:17:15 <Phyx-> e.g. cabal v2-build -w ghc-8.6.4
+14:17:24 <merijn> And yeah, you can tell cabal which ghc to use if you want
+14:17:57 <tty1> let me try to uninstall haskell somehow...
+14:19:15 <merijn> tty1: Nuking ~/.ghc and ~/.cabal should get rid of 90% of things that might still leave cabal-install and GHC somewhere, depending on how you installed)
+14:20:46 <tty1> merijn: yea problem is im not sure how i installed it
+14:21:00 <tty1> merijn: i think i may have installed it when i installed the haskell platform dmg
+14:21:45 <merijn> tty1: You can run "type ghc" to find it's path, which would probably shed light on how you installed it
+14:22:38 <tty1> yea i did that with "witch" its in /usr/local/bin but i know i didnt install from source
+14:23:10 <tty1> merijn: its possible it was installed with stack or cabal though
+14:23:44 <Solonarv> merijn: ghcup pretty much just automates the process you just described, have you used it?
+14:24:01 <Solonarv> oh derp, you just answered that
+14:24:28 <merijn> tty1: If you run "ls -l /usr/local/bin/ghc" it might show whether that's a symlink (I'm guessing you used homebrew, in which case it would be a symlink)
+14:25:29 <tty1> merijn: it wasnt homebrew i listed all the stuff i had instaled there, haskell-stack was listed but i uninstalled that via brew and ghc is still there, it isnt from brew
+14:25:38 <merijn> Solonarv: Yeah, I'm just comfortable with the bindists and the effort of adjusting my workflows doesn't seem to be offset by the convenience ghcup supposedly gets me, so I'm lazy and sticking with my old ways, because I'm a grumpy curmudgeon :p
+14:26:16 <Solonarv> heh
+14:27:23 <tty1> merijn: i think it is installed by stack...
+14:27:58 <tty1> merijn: stack seems to show two lts snapshots it owns which i think is where my ghc comes from
+14:28:07 <merijn> Solonarv: Plus, I actually understand all of the process of using the bindists, so if anything breaks I know how to troubleshoot, the older I get, the more I appreciate "dumb and understandable" process over "convenient but opaque", because if something (inevitably) breaks, I can fix the former ;)
+14:28:12 <merijn> tty1: Could be
+14:28:38 <tty1> merijn: by the way lrwxr-xr-x  1 root  staff  67 May  1 20:36 /usr/local/bin/ghc -> /Library/Frameworks/GHC.framework/Versions/8.6.3-x86_64/usr/bin/ghc
+14:28:50 <tty1> merijn: look familiar?
+14:28:56 <merijn> Ah, that looks like one of the old platforms installers
+14:29:12 <merijn> tty1: The good news is, that has an uninstall script somewhere
+14:29:24 <tty1> i think i know where
+14:29:48 <tty1> merijn: sudo uninstall-hs?
+14:29:59 <merijn> tty1: Yeah
+14:30:17 <merijn> tty1: if you make sure to nuke ~/.ghc and ~/.cabal after that you should have a completely fresh system
+14:35:54 <tty1> merijn: every solution i try now to install ghc gives me that same error: configure: error: C compiler cannot create executables
+14:36:56 <c_wraith> that's a thing a C compiler should do
+14:37:37 <oni-on-ion> mismatch host/target 
+14:37:56 <comerijn> Oh, bollocks
+14:38:20 <comerijn> tty1: Yeah, the same reason as stack fails, and no one listened to my request to make new bindists with fixed configure script
+14:38:37 <comerijn> tty1: I wrote a patch/fix, lemme quickly look it up
+14:39:12 <comerijn> At least, assuming it's the same error as I think it is/what the stack issue showed earlier
+14:39:55 <tty1> comerijn: got a link to the bug?
+14:43:41 <comerijn> ugh, I can't find the report anymore
+14:44:14 <comerijn> It was on trac, but I can't find it after the migration to gitlab
+14:44:37 <comerijn> tty1: What does your config.log say?
+14:46:16 <tty1> comerijn: the temporary directory the error claims contains the log doesnt exist, I have been unable to find where exactly this log is generated
+14:47:40 <comerijn> tty1: If you run "./configure --prefix=path" config.log should be in the directory where you run that
+14:49:04 <tty1> comerijn: I'm not running ./configure, im using the ghcup install script. I'll have to hack apart the script and figure out when/if it even calls ./configure (might pull down a binary)
+14:50:00 <comerijn> Ah, I dunno about ghcup
+14:51:24 <MarcelineVQ> comerijn: what was the fix you made?
+14:52:53 <comerijn> MarcelineVQ: introduce a "head -n1" to the version grep, because on OSX gcc frequently reports multiple versions if (for example) you have CUDA or other things installed
+14:52:55 <tty1> comerijn: this is the same error i get when i try to use a different resolver in stack for the ghc version... but it may be a more generl issue
+14:56:13 <MarcelineVQ> comerijn: oh so was it https://gitlab.haskell.org/ghc/ghc/issues/16620 ?
+14:59:09 <comerijn> MarcelineVQ: No, that's a different bug in configure
+14:59:11 <jcowan> What if any are the practical applications of type List (List a)?
+14:59:17 <comerijn> MarcelineVQ: I have a gift for finding those :p
+14:59:24 <comerijn> MarcelineVQ: I think it's the 4th one I found
+15:00:30 <MarcelineVQ> But only the 2nd gitlab reveals unfortunately :X
+15:01:16 <comerijn> MarcelineVQ: Yeah, although admittedly I may have let Ben or someone else file the one I'm thinking of
+15:22:21 <tty1> So i figured out my problem, sorta
+15:23:03 <gaze___> hey lens experts, if I have a list of things, and I want to select out all the xs for which f x == blah, what's the lensey way to do it?
+15:23:36 <Cale> filtered (== blah)?
+15:24:01 <Cale> er, oops
+15:24:08 <Cale> filtered (\x -> f x == blah)
+15:24:11 <Cale> of course
+15:24:25 <Cale> But be careful what you do with that
+15:24:40 <gaze___> why do you say that?
+15:25:24 <Cale> It's not a proper traversal, and won't satisfy the laws, except in the case that you are careful to preserve the status of the condition when you change things with it
+15:25:53 <Cale> Normally, you have the property that  over t f . over t g = over t (f . g)
+15:26:23 <gaze___> ahh I see...
+15:26:29 <gaze___> so maybe I don't wanna do it using lenses?
+15:26:50 <gaze___> I don't wanna imply anything weird
+15:26:54 <Cale> but that doesn't hold universally when t is a filtered traversal -- over t g might make modifications that cause the property to no longer hold, or to hold when it didn't before, and so over t f will observe different elements
+15:27:32 <Cale> Generally I would say don't use lenses unless you're sure they're much better than the alternative.
+15:28:34 <Cale> If you can get away just using filter or a list comprehension or whatever basic stuff, you don't need to involve all that machinery.
+15:29:13 <gaze___> ehhh I'm playing with clang-pure which is already completely lens-based
+15:29:20 <Cale> It's really easy to use traversals to write things that typecheck but don't do the thing you wanted if you're not paying close attention.
+15:29:26 <gaze___> otherwise yeah I wouldn't invoke the machinery
+15:29:31 <Cale> ah, okay
+15:29:42 <Cale> There are certainly cases where lens is the best thing for the job
+15:29:51 <gaze___> and I really am completely unfamiliar with lenses
+15:29:53 <Cale> (I don't know about that one in particular, but it's quite possible)
+15:30:17 <gaze___> and this seemed like as good an excuse as ever to learn them
+15:30:36 <Cale> for sure :)
+15:30:45 <gaze___> ultimately libclang requires traversals and manipulation of deep and complex data structures
+15:30:57 <gaze___> so... maybe lens is the right thing? I'm really not sure.
+15:32:54 <gaze___> but you know if there's a better library/structure for traversing the sort of data structures that libclang gives you, I'm interested
+15:34:20 <gaze___> ultimately what I wound up with is 'x ^..folded.(filtered (\c -> (cursorSpelling c) == (BS.pack "QPushButton")))'
+15:34:30 <gaze___> which I don't understand particularly well
+15:34:44 <gaze___> I'm trying to select out a class called "qpushbutton"
+15:35:13 <gaze___> I guess filtered gives you a fold? I guess I don't understand the ^.. folded piece
+15:40:31 <c_wraith> filtered is a lawful fold.  It's also an unlawful traversal.
+15:40:38 <c_wraith> That doesn't mean it doesn't work, in practice.
+15:40:51 <c_wraith> The lens laws are just about being able to mechanically refactor.
+15:41:01 <c_wraith> You can't mechanically refactor if you've used filtered as a traversal
+15:41:13 <c_wraith> You have to make sure it's filtering the correct things.
+15:41:24 <gaze___> I can also appreciate using things within the applicable laws
+15:41:35 <gaze___> I don't want to mislead someone reading my code
+15:41:49 <c_wraith> It's usually completely fine.  It's just a thing to be aware of.
+15:41:56 <gaze___> hmm okay
+15:42:43 <gaze___> I'm still quite confused with what this "^.. folded" idiom is
+15:43:13 <c_wraith> (^..) is an operator that returns a list of all targets of a multi-target optic - a lens or traversal, in practice.
+15:43:26 <c_wraith> folded is a generic fold that works on every instance of Foldable
+15:44:45 <gaze___> oh... is it maybe the "last" thing you want to do? like if you have a series of folds you want to compose, do you compose the folds and then use ^.. to get the result?
+15:44:58 <c_wraith> yes, that's a common use
+15:45:03 <gaze___> gotcha.
+15:46:14 <gaze___> I'm also having a bit of a hard time figuring out how I'm supposed to read these things...
+15:46:44 <gaze___> is it left to right or right to left, or some combination depending on what operators the author decided upon?
+15:48:12 <dmwit> Theoretically each operator can have its own associativity, which ranges over left-associative, right-associative, or non-associative.
+15:48:32 <dmwit> Practically speaking, though, a particular library tends to pick a single convention an stick with it.
+15:49:30 <dmwit> Some operators, like (.), are given an associativity because they're forced to have one but mean the same thing whether you read them as right- or left-associative.
+15:50:16 <dmwit> (+) and (*) are usually like that, too.
+15:54:44 <gaze___> I mean more in the context of lens
+16:32:45 <newhoggy> Is there a filesystem IO library that doesn't throw exceptions?
+16:53:10 <dmwit> Whoa, Hoogle's new "Uses" link is rad!
+16:53:33 <dmwit> gaze___: I don't think the answer changes with that context.
+16:53:46 <dmwit> newhoggy: I don't think so.
+16:54:47 <MarcelineVQ> dmwit: link this uses link :O
+16:56:34 <MarcelineVQ> Ah found it, another grey link on a grey background on the far side of a page ;_;
+17:00:21 * hackage dson 0.3.0.1 - Haskell Doge Serialized Object Notation Parser  https://hackage.haskell.org/package/dson-0.3.0.1 (lcycon)
+17:18:07 <jackdk> What is the canonical package for type-level wranglings? It feels silly to reimplement type-level Append etc in my library if it already exists in a standard place
+17:26:42 <lyxia> there's singletons and first-class-families
+17:36:12 <Axman6> I'm sure I've seen a package for this
+17:36:30 <Axman6> I thought it was type-level but apparently not
+17:37:35 <Axman6> Maybe it was just the singletons package
+17:38:14 <argent0> hi, does any one know if `vty`-packge or `brick` package allows to modify an specific character in an image/widget?
+17:41:54 * argent0 the answer seems to be no
+17:47:50 * hackage servant-snap 0.8.3.2 - A family of combinators for defining webservices APIs and serving them  https://hackage.haskell.org/package/servant-snap-0.8.3.2 (imalsogreg)
+17:51:20 * hackage antiope-athena 7.0.4 - Please see the README on Github at <https://github.com/arbor/antiope#readme>  https://hackage.haskell.org/package/antiope-athena-7.0.4 (arbornetworks)
+17:52:21 * hackage antiope-s3 7.0.4, antiope-messages 7.0.4, antiope-dynamodb 7.0.4, antiope-optparse-applicative 7.0.4, antiope-contract 7.0.4, antiope-sns 7.0.4, antiope-sqs 7.0.4, antiope-core 7.0.4 (arbornetworks)
+18:30:29 <jusss> how we do share state with pure function?
+18:30:51 <jusss> avoid to re-assignment
+18:31:34 <dmwit> Pass in the old state, return a new state.
+18:31:54 <dmwit> All operations which wish to share state in this way must be so modified.
+18:32:58 <jusss> dmwit: what about some state need to be stored for another function to use in a few time later?
+18:34:03 <jusss> dmwit: create a new one?
+18:35:16 <dmwit> I think my answer stays the same.
+18:35:25 <dmwit> I don't understand what the question "create a new one?" means.
+18:35:59 <jusss> create a new one variable to store that state which another function may use a few time later
+18:36:05 <jusss> sorry, my English is not good
+18:36:36 <dmwit> That is one way to do it, yes.
+18:36:51 <jusss> dmwit: and there's another way?
+18:36:57 <jusss> or ways?
+18:37:09 <dmwit> Yes. But start with this way.
+18:37:23 <dmwit> Once you have practiced the pattern, then we can show you the next way.
+18:37:54 <jusss> I know the recursion way
+18:39:03 <jusss> dmwit: I think you can show me the next way
+18:39:05 <dmwit> Hm. I don't think recursion is related, really.
+18:39:14 <dmwit> So I don't know what "I know the recursion way" means.
+18:39:35 <dmwit> Perhaps you should show some code that uses the way you know.
+18:40:02 <jusss> dmwit: can I use js to show?
+18:40:21 <dmwit> You can try. I do not promise that I can understand it, but I too will try.
+18:41:55 <dmwit> argent0: You can overlay two pictures (vty) or widgets (brick), but that's a bit kludgy. Better to just draw the widget with the right character in the first place.
+18:43:57 <jusss> dmwit: https://paste.ubuntu.com/p/PB3MT6C3ny/
+18:44:50 <jusss> return the same state with the new value
+18:45:26 <shachaf> That looks like a complicated way of writing (2 + 5) * 2
+18:45:49 <shachaf> + and * already return the new value.
+18:46:40 <jusss> dmwit: shachaf  and this one https://paste.ubuntu.com/p/KRGpbYnZ6P/  ?
+18:47:01 <jusss> this was what I wrote yesterday
+18:48:20 <shachaf> The programs you're posting seem to be about 90% about the semantics of those other languages and maybe 10% about whatever you're trying to accomplish.
+18:48:48 <shachaf> So I suggest English would be better even if your English is not good.
+18:55:42 <jusss> I don't know how to express, but it's about return an new same form with the new value
+18:58:05 <monochrom> Ugh shoehorning algebraic data types and monads into Python.
+18:58:23 <monochrom> Just as bad as shoehorning metaclasses into Haskell.
+18:58:50 <jpg> Is there some paper to reference when using the "constraint trick" (on some typeclass instance, to move equality to the context because its behaviour is `better` in some context than syntactic equality on head)
+18:59:20 <jpg> That should end with a question mark :P
+19:01:45 <MarcelineVQ> jpg: probably not but there's a blog post
+19:02:05 <jusss> monochrom: this one ? https://paste.ubuntu.com/p/8YZ7TQCz9w/
+19:03:13 <monochrom> AbsurdTranslationsFactory
+19:05:09 <jusss> monochrom: ok, and they have this https://github.com/fnl/pymonad 
+19:06:29 <jusss> and this in js,  https://medium.com/javascript-scene/javascript-monads-made-simple-7856be57bfe8
+19:07:07 <dmwit> jusss: (I have looked at only your first paste so far.)
+19:07:25 <dmwit> jusss: This doesn't appear to be a function that uses some state (perhaps modifying it) to compute a value.
+19:07:33 <dmwit> jusss: It is just a normal function with no state.
+19:08:10 <dmwit> jusss: If you used state, you would have to return both the computed value and the (updated) state -- say as a pair or tuple or class or whatever. Here you return only a computed value.
+19:08:53 <jusss> dmwit: yeah, that first code is old, a long time ago, this second is better
+19:09:16 <dmwit> jusss: (I have now looked at your second paste.)
+19:09:40 <dmwit> jusss: I don't see the connection to stateful computation here at all. This appears to be a study of Maybe (and mostly wrong at that).
+19:10:22 <jusss> dmwit: ok...
+19:11:04 <dmwit> So I think that you do not yet understand the pattern I say you should learn first.
+19:11:18 <jusss> dmwit: what you said is related with state monad?
+19:11:19 <dmwit> But I think also that you do not yet need to learn the pattern, because you do not need state.
+19:11:34 <jusss> dmwit: and now I don't what is state
+19:11:47 <dmwit> Progress! =D
+19:13:08 <jusss> show some codes?
+19:13:31 <jusss> 3 is a value, (+1) is a function, and what's state?
+19:13:46 <monochrom> (+1) is both a value and a function.
+19:13:56 <monochrom> 3 is both a value and a number.
+19:14:00 <jusss> ok, function is a value
+19:14:17 <jusss> monochrom: (+1) is a computation?
+19:14:18 <dmwit> A common use of state is to keep track of an auto-incrementing number, so that you can know when you get the next number it's unique over your whole computation.
+19:14:27 <monochrom> the "function" part is about type, the "value" part is about which level.
+19:14:42 <dmwit> An example of the pattern that I propose you learn would be the operation that gets the current number and increments the state. It looks like this:
+19:15:03 <dmwit> :t \state -> (state+1 {- the new state -}, state {- the result of the computation -})
+19:15:05 <lambdabot> Num b => b -> (b, b)
+19:15:12 <monochrom> This is why we say that other languages do not have first-class functions.
+19:19:13 <jusss>  I still don't get it
+19:19:37 <jusss> \state -> (state+1 {- the new state -}, state {- the result of the computation -})   why this called computation?
+19:20:21 <monochrom> I think dmwit would agree with me if I said: We don't answer "what is state?", instead we answer "what is a state transition function?". dmwit's is a state transition function.
+19:20:24 <dmwit> Some computations don't require much work. =)
+19:20:26 <jusss> or say state is like (new value, old value)?
+19:20:45 <dmwit> The state is the number.
+19:21:05 <dmwit> The function I proposed models a computation that uses a number as state.
+19:21:28 <dmwit> The tuple itself is nothing. Just a convention that many people use.
+19:21:47 <monochrom> The beauty is that John Backus proposed this too back then.
+19:22:50 <dmwit> (I think I object to "state transition function", because traditionally those take extra inputs and produce fewer outputs than what I'm proposing. But I generally am OK using whatever terminology people want, as long as we all agree on what it is.)
+19:22:53 <iqubic> Is that the Backus of BNF grammar?
+19:23:07 <monochrom> Yes.
+19:24:10 <iqubic> What is the N?
+19:24:25 <iqubic> I know its Backus ???? Form.
+19:24:47 <shachaf> If only such questions could be answered somehow.
+19:24:52 <jusss> dmwit: why not just return the new state? in that lambda
+19:25:30 <dmwit> Because my goal was to get an updated state and the result of a computation.
+19:25:36 <monochrom> The other known choices are worse. "computation" is too broad (in Haskell, every term represents a computation). "state" is simply wrong. "function" is too bland.
+19:26:24 <dmwit> And to fit in a simple pattern that could be used not just by this particular function but by all the functions I want to write that use a number as state.
+19:26:55 <dmwit> So, if I wanted to return an AST that had unique numbers used as labels, I could still use the same "shape": it will be a function that takes a number and returns a new number together with a tree, as a tuple.
+19:27:05 <jusss> you guys make me like I haven't learn any programming language
+19:28:17 <monochrom> Maybe a new name? state transition and answer function.
+19:28:29 <iqubic> jusss: Haskell is just so vastly different from anything else out there that attempting to use your prior way of thinking *IS* going to fail.
+19:30:13 <monochrom> Traditionally, "state transition function" is fairly flexible about extra inputs and extra outputs, basically "take a look at the context", e.g., Mealy machines vs Moore machines vs finite state automata vs pushdown automata vs Turing machines vs Turing machines for the purpose of defining log-space.
+19:31:26 <monochrom> Heck they even all reuse the same greek letter.
+19:32:19 <monochrom> newtype State s a = MkState{ δ :: s -> (s, a) }  -- >:)
+19:32:55 <jusss> I just thought a state is a value
+19:33:25 <iqubic> Well, see, this is where applying prior patterns of thought can, and will lead to errors in thinking.
+19:33:26 <jusss> a=1, a's state is 1, a=2, a's state is 2
+19:33:28 <dmwit> Okay. Then I accept "state transition function". My only exposure to it was in Turing machines and DFAs/NFAs/similar, where they only return a state. But I have reviewed transducers and there we call it that even though it returns more stuff and isn't even a function.
+19:33:55 <dmwit> jusss: That seems like a reasonable description to me.
+19:33:56 <monochrom> Values don't change. States do. 5 doesn't change. A memory cell that holds a 5 can hold a different value later.  State cannot possibly be a synonym for value.
+19:34:11 <monochrom> Your "a" is not a value.
+19:34:26 <iqubic> jusss: Even that is wrong. In haskell you can't change the value of a variable, so it makes little sense to say that 'a' has different values in Haskell.
+19:34:26 <dmwit> heh
+19:34:29 <monochrom> To wit, even take a look at C's "lvalue" (therefore not a value).
+19:34:33 <dmwit> I will let monochrom take over. =)
+19:35:26 <monochrom> But I could disappear in a puff of logic any time.
+19:35:49 <jusss> ok, 5 or "a" is value, they don't change
+19:36:12 <jusss> but this identifier a, what it has to do with the term 'state' ?
+19:36:51 <monochrom> Actually I may regret it, but consider shell scripting. You write "x=5" to change state. "x" there is a state variable. For its value, you write "$x" not "x".
+19:37:19 <jusss> and?
+19:37:32 <monochrom> Hey on second thought I think it's great, because that's also how SML and Haskell present state variables.
+19:38:12 <monochrom> In Haskell you say "writeIORef x 5" and "readIORef x".  "x" alone doesn't do anything apart from being a handle.
+19:38:48 <monochrom> In SML I forgot how to write, but read is "!x".  Actually let me double-check.
+19:39:56 <monochrom> Ah write is "x := 5", read is "!x".  "!x" refers to the current value, "x" alone doesn't do anything apart from being a handle, but you can write "x := 5" to change.
+19:40:18 <jusss> monochrom: "You write "x=5" to change state "  change who's state?
+19:41:27 <monochrom> shell's state?
+19:41:52 <monochrom> Is this a philosophy channel?
+19:42:25 <jusss> yeah?
+19:44:40 <jusss> ok, !x refers to the current value of state variable x, and x:=5 can change state variable's ?
+19:45:15 <jusss> x,    !x to get the value,    x:=5   store the value
+19:46:21 <iqubic> What language are you talking about now.
+19:46:59 <jusss> I don't know...
+19:47:20 <jusss> this talk really confuse me
+19:47:51 <jusss> I just want to know "share sate" with "pure function"
+19:48:06 <jusss> and now I don't know how I get in this "state" term
+19:48:43 <iqubic> Take a look at the runState, evalState and execState.
+19:49:25 <iqubic> Also, the first step to learning is admitting that you know nothing. Congratulations, you are now learning.
+19:49:47 <jusss> and still know nothing
+19:49:54 <jusss> or knowing nothing
+19:52:21 <supersweetsweetc> is this the freenode server?
+19:53:32 <iqubic> No.
+19:53:39 <iqubic> This is the #haskell server.
+19:53:52 <iqubic> I think you meant to type "/join #freenode"
+19:54:09 <shachaf> What are you even talking about?
+19:54:33 <iqubic> supersweetsweetc wanted the freenode channel.
+19:54:50 <supersweetsweetc> oh no i am just wondering is this an irc channel?
+19:55:04 <iqubic> Yes. This is an irc channel.
+19:55:18 <jusss> supersweetsweetc: channel for haskell on freenode server
+19:55:22 <supersweetsweetc> ah okay cool
+19:55:23 <shachaf> This is the IRC channel #haskell, on a server which is part of the IRC network Freenode.
+19:55:34 <iqubic> Yes. That is right.
+19:55:35 <supersweetsweetc> just wonderin because i got here through a Riot client
+19:55:52 <supersweetsweetc> and was just confused about how i was able to see a freenode channel
+19:55:58 <iqubic> I see.
+19:56:15 <iqubic> Why did it take you to #haskell?
+19:56:22 <iqubic> This is so confusing.
+19:56:33 <supersweetsweetc> i don';t really undrestand the GUI
+19:56:40 <shachaf> That's enough. This isn't the place for that.
+19:56:51 <supersweetsweetc> sorry
+20:03:20 * hackage elminator 0.2.2.1 - Generate ELM types/encoders/decoders from Haskell types.  https://hackage.haskell.org/package/elminator-0.2.2.1 (sras)
+20:16:14 <bandali> supersweetsweetc, i believe it’s because you can set up a two-way sync or bridge between matrix rooms and irc channels
+20:17:08 <bandali> and i think the haskell room on matrix.org is bridged with this channel (#haskell, on freenode)
+22:12:21 * hackage sensu-run 0.6.1.1 - A tool to send command execution results to Sensu  https://hackage.haskell.org/package/sensu-run-0.6.1.1 (MitsutoshiAoe)
+22:27:51 * hackage skylighting-core 0.8 - syntax highlighting library  https://hackage.haskell.org/package/skylighting-core-0.8 (JohnMacFarlane)
+22:28:50 * hackage skylighting 0.8 - syntax highlighting library  https://hackage.haskell.org/package/skylighting-0.8 (JohnMacFarlane)
+22:55:28 <delYsid``> I'd like to be able to write "pattern (Foo, Bar, Baz, ...) = [2, 4..]"
+22:58:28 <Axman6> Congratulations you just did!
+23:00:45 <dminuoso> delYsid``: What are the expected semantics? Do you intend on matching any n-tuple that has `Foo`, `Bar` and `Baz` respectively in their first three elements?
+23:20:20 * hackage network-multicast 0.3.1 - Simple multicast library  https://hackage.haskell.org/package/network-multicast-0.3.1 (AudreyTang)
+23:29:20 * hackage hasql-dynamic-statements 0.1.0.2 - Toolkit for constructing Hasql statements dynamically  https://hackage.haskell.org/package/hasql-dynamic-statements-0.1.0.2 (NikitaVolkov)
+23:32:20 * hackage hasql 1.4 - An efficient PostgreSQL driver with a flexible mapping API  https://hackage.haskell.org/package/hasql-1.4 (NikitaVolkov)
+23:39:39 <dminuoso> Say I have a type `f t` for some metavariables f0 and t0, is there a way to have GHC unifi this with the type of a given term `v :: Foo Int` and tell me the results?
+23:40:00 <dminuoso> I specifically want to observe the type unification GHC does.
+23:41:21 * hackage hasql-transaction 0.7.2 - A composable abstraction over the retryable transactions for Hasql  https://hackage.haskell.org/package/hasql-transaction-0.7.2 (NikitaVolkov)
+23:41:54 <dminuoso> Oops. Of course I mean a type `f0 t0` for some metavariables f0 and t0.
+23:42:21 <Solonarv> dminuoso: do you mean using the GHC API, or..?
+23:42:48 <dminuoso> Solonarv: Ah mmm. I was thinking about doing it inside Haskell, but that should be an option too.
+23:43:01 <Solonarv> well I was just asking for clarification
+23:43:04 <MarcelineVQ> not sure where you're sourcing f t, there's asAppliedTo, asTypeOf, f a ~ Foo Int, etc
+23:43:15 <Solonarv> the simple answer is 'unify f0 with Foo and t0 with Int'
+23:43:34 <Solonarv> MarcelineVQ's suggestions seem helpful
+23:50:20 * hackage hasql-pool 0.5.1 - A pool of connections for Hasql  https://hackage.haskell.org/package/hasql-pool-0.5.1 (NikitaVolkov)
+23:50:42 <MarcelineVQ> like many interesting things this is just abuse of const. asTypeOf :: a -> a -> a; asTypeOf = const, asAppliedTo :: (a -> b) -> a -> (a -> b); asAppliedTo = const
+23:53:20 * hackage hasql-optparse-applicative 0.3.0.4 - "optparse-applicative" parsers for "hasql"  https://hackage.haskell.org/package/hasql-optparse-applicative-0.3.0.4 (NikitaVolkov)
+23:55:21 * hackage hasql-cursor-transaction 0.6.4 - An abstraction for simultaneous fetching from multiple PostgreSQL cursors  https://hackage.haskell.org/package/hasql-cursor-transaction-0.6.4 (NikitaVolkov)

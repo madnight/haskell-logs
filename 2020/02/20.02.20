@@ -1,0 +1,648 @@
+01:24:35 <absence> is anyone using nix integration with stack? how do you build a docker image for deployment?
+01:34:04 <srk> with pkgs.dockerTools.buildDockerImage
+01:34:16 <srk> better to use haskell & nix without stack tho 
+01:34:32 <srk> if it builds you can just include the output anywhere you need
+01:41:19 <kuribas> does there exist bytestrings for arbitrary (compact) types?
+01:41:26 <kuribas> like chunked lists
+01:46:52 <merijn> kuribas: Storable Vector? :p
+01:49:19 <absence> srk: docker is required where i need to deploy it. why is it better to use it without stack?
+01:49:49 <kuribas> merijn: list of storable vector then...
+01:50:15 <absence> srk: if i use haskell and nix without stack, won't i lose the stackage lts system?
+01:50:54 <srk> absence: IMHO it's a redundant solution, you can use nixpkgs just as well as stackage lts
+01:51:16 <srk> with pinning to specific nixpkgs versions and overlays for packages if needed
+01:51:58 <merijn> kuribas: I'm using Storable Vector just to have dense arrays I can easily marshal from/too ByteString, it works rather well
+01:53:41 <kuribas> merijn: do you use fromChunks?
+01:54:00 <absence> srk: are the same packages available in nix? are versions curated so i don't have to specify package versions?
+01:54:03 <merijn> kuribas: I use strict ByteString only
+01:54:16 <srk> absence: yes and yes :)
+01:54:43 <kuribas> merijn: using foreingptr?
+01:54:56 <srk> absence: package set is semi-automatically generated from hackage (with few custom rules) similar to what stackage does
+01:55:09 <davean> absence: stackage is just a subset of packages
+01:55:20 <merijn> kuribas: https://github.com/merijn/Belewitte/blob/master/benchmark-analysis/src/Utils/Vector.hs
+01:55:24 <merijn> Cursed code ;)
+01:55:26 <absence> srk: that's interesting. is there a similar concept to the lts version number?
+01:55:45 <merijn> oh, I just realised I can get rid of that plusForeignPtr reimplementation :>
+01:56:18 <kuribas> merijn: couldn't you let the vector library handle the pointer arithmetic?
+01:56:33 <srk> absence: yes, that's pinning to specific version (commit) of nixpkgs
+01:57:05 <merijn> kuribas: It does handle the poitner arithmetic for actual indexing, but you need to point it at the right starting point...
+01:57:20 <srk> absence: so your package is always built with packages present in that commit, better for reproducibility than stack as it handles *all* deps no just haskell packages
+01:57:33 <kuribas> merijn: I wonder if that works with a lazy bytestring
+01:57:44 <merijn> kuribas: No, because lazy bytestrings aren't dense
+01:58:03 <srk> absence: https://nixos.org/nixpkgs/manual/#haskell https://github.com/Gabriel439/haskell-nix
+01:58:08 <kuribas> merijn: maybe a list of strict bytestrings would work
+01:58:14 <kuribas> merijn: and give efficient append
+01:58:24 <merijn> You have no way to guarantee that every chunk is a nicely aligned multiple of your elements
+01:58:29 <kuribas> indeed
+01:58:41 <merijn> What are you actually doing?
+01:59:32 <kuribas> merijn: nothing really.  I have lisp code that uses lists of conses for timeseries.  I was just wondering how I would do it in haskell efficiently
+02:00:49 <kuribas> merijn: like reading the series from the database (is compressed chunks), transforming them
+02:01:07 <merijn> Sounds like conduit to me :p
+02:01:36 <dminuoso> siraben: I can give you a simple set of excercises to come up with their implementation on your own.
+02:02:50 <kuribas> merijn: I am not sure streaming would be the solution.  It would keep the database connection open.
+02:03:00 <kuribas> merijn: better read the whole series at once.
+02:03:05 <merijn> Why?
+02:03:35 <kuribas> it will exhaust the connection pool quickly
+02:03:44 <kuribas> if we have many clients at the same time
+02:04:00 <dminuoso> kuribas: Dont stream directly out of the database.
+02:04:54 <dminuoso> kuribas: Though sometimes streaming via cursors can be necessary though. If you end up with resource limits, then scale up.
+02:05:18 <tdammers> davean: stackage is a subset of packages *pinned to specific versions*, and those versions have been (somewhat) tested to be compatible across the entire thing
+02:05:55 <kuribas> dminuoso: loading it in a list of vectors, then streaming that?
+02:06:01 <kuribas> could work...
+02:06:55 <absence> srk: thanks, will have to consider that
+02:08:05 <kuribas> dminuoso: I find streamly interesting, as it is more efficient, and has a list-like interface
+02:10:15 <merijn> streamly seems to be...kinda complex and I'm not entirely sure what problem this complexity is supposed to solve
+02:10:38 <kuribas> merijn: I thought it was supposed to be more simple...
+02:10:52 <kuribas> merijn: it does add support for parallelism
+02:11:13 <kuribas> which is perhaps the complexity you refer to
+02:11:31 <merijn> kuribas: Simpler than what? It seems much more complex than Conduit
+02:12:16 <merijn> kuribas: I already wrote my own library for supporting concurrency in conduit :p
+02:14:33 <merijn> Granted my implementation isn't super fast, since it's only intended for parallelising long-running IO bound tasks. I could improve the speed a bit, but it's not high priority
+02:16:12 <kuribas> if I don't want performance, I can just load lists of timeseries, and be done with it.
+02:16:16 <kuribas> much easier that streams
+02:16:23 <maerwald> Streamly is simple
+02:16:36 <merijn> kuribas: "not fast" is relative
+02:17:02 <maerwald> A few things are obviously harder, because it doesn't describe stream processors like conduit, but is just a fast event loop abstraction 
+02:17:07 <merijn> kuribas: I basically mean that if your IO tasks are <0.5s or something you might not gain much
+02:17:49 <maerwald> And currently you need a lot of internal modules to make something work. But I already use it for file reading and writing 
+02:17:50 <kuribas> yeah, I think we are IO bound more than anything
+02:18:31 <merijn> kuribas: Basically, I'm using it to parallelise IO tasks that are anywhere from 1s to several minutes and there it works wonders
+02:18:51 <maerwald> Resource handling isn't provided by it, so you have to be careful about underlying handles etc. They become "invisible" once you turn an Unfold into an stream with an inner IO monad
+02:18:54 <merijn> kuribas: I just meant that, if you're wanting to parallelise like "20 ms computations" my implementation isn't going to be much use
+02:19:32 <merijn> Because the MVars are going to introduce too much overhead to be worth it
+02:21:03 <kuribas> merijn: what would I gain over lists if not speed?
+02:21:35 <merijn> kuribas: You gain speed if your parallel computation *is* longer than, say, 0.5 seconds
+02:21:59 <kuribas> I doubt any of our calculates take 0.5 seconds
+02:22:09 <kuribas> more like 5ms or less
+02:22:38 <merijn> tbh, if it's time series data I'd just try and move the computation to the database instead of the other way around :p
+02:23:14 <kuribas> the computations are to complex for that
+02:27:16 <kuribas> and it's not easier to do computations in SQL
+02:27:29 <kuribas> unless they are really basic
+02:28:40 <merijn> Who said the computations have to be done in SQL?
+02:29:01 <merijn> I meant like a stored procedure or something along those lines
+02:29:19 <kuribas> we have like hundreds of different computations
+02:29:26 <merijn> So?
+02:29:28 <kuribas> based on the parameters of the plants etc...
+02:29:43 <kuribas> I'd rather have hundred haskell functions that hundred SQL procedures
+02:30:49 <absence> srk: when there are interproject dependencies, do i have to make nix packages out of my local projects?
+02:30:55 <merijn> Use stored procedures implemented in Haskell? >.>
+02:31:28 <kuribas> merijn: I see only added complexity, for no gain whatsoever
+02:32:42 <tdammers> the appeal of that is that you can run your stored procedures as part of a database transaction
+02:33:09 <tdammers> you can also do that by keeping transactions open on the client though, and running the logic there
+02:33:34 <tdammers> but there's something to say about the "keep data logic on the database side" too
+02:33:48 <tdammers> it's a paradigm that was quite popular back in the early 2000s
+02:34:01 <tdammers> especially in corporate programming
+02:34:27 <tdammers> essentially, what you'd do is encode all the constraints of the business domain into the database; and then you'd build a bunch of software talking more or less directly to the database
+02:35:05 <srk> absence: yes but that's usually just a matter of using haskellPackages.callCabal2nix
+02:35:07 <tdammers> some people would even go so far as to route *all* database access through stored procedures; those SP's would effectively become an API for the database, allowing DBA's to modify the underlying schema without changing the API
+02:35:38 <merijn> tdammers: Also if your processing dramatically reduces the data size (say you're doing something fold/filter-y) doing it on the database saves you the network transfer
+02:36:44 <srk> absence: something like https://github.com/HaskellEmbedded/ivory-tower-nix/blob/master/nix/hgdb.nix
+02:37:02 <tdammers> merijn: yep, that too.
+02:37:10 <srk> absence: except you don't need to use special namespace, just haskellPackages instead of myHaskellPackages
+02:37:25 <tdammers> many of those operations could even be written as a series of plain old SQL queries
+02:42:54 <merijn> tdammers: I'm happily abusing my ability to move arbitrary logic into my queries :>
+02:44:54 * hackage genvalidity 0.10.0.1 - Testing utilities for the validity library  https://hackage.haskell.org/package/genvalidity-0.10.0.1 (Norfair)
+02:45:33 <tdammers> I once wrote an implementation of Levenshtein Distance in C# and loaded that into the database
+02:45:37 <tdammers> that was quite awesome
+02:45:47 <tdammers> fuzzy search in SQL Server
+02:46:09 <boxscape> srk absence since I don't think it's been mentioned yet today developPackage is also a function that can be quite useful https://github.com/JakobBruenker/assembler/blob/master/default.nix
+02:47:21 <srk> boxscape: thats new, interesting!
+02:48:20 <srk> This could be used in place of a simplified `stack.yaml` defining a Nix derivation for your Haskell package.
+02:48:41 <maerwald> tdammers: so you think it's a good thing to move logic into eg Postgresql? 
+02:48:42 <srk> simplified and more powerful :D
+02:49:01 <tdammers> maerwald: it depends
+02:51:07 <merijn> hmm, optparse-applicative docs mention --bash-completion-enriched, but that doesn't seem to really do anything
+02:54:16 <zceejkr> is ski online?
+03:11:48 <maerwald> tdammers: don't leave me hanging here :p
+03:42:03 <tomjaguarpaw> Does anyone know why cabal v2-repl says the following when actually those modules *are* in other-modules?  "These modules are needed for compilation but not listed in your .cabal file's other-modules". 
+03:42:29 <merijn> tomjaguarpaw: Library and executable sources in the same directory?
+03:46:59 <tomjaguarpaw> I only have an executable entry in the cabal file.
+03:47:56 <merijn> tomjaguarpaw: Can you link the cabal file and full error?
+03:59:12 <tdammers> maerwald: it depends on where you draw your tier boundaries
+03:59:47 <tdammers> maerwald: you can go and say "let's put all business logic in the database, and have only presentation logic in the client applications" - that's a fine approach for a corporate information system
+04:00:40 <tdammers> maerwald: you can also go and say "the database is just a dumb storage layer, we do all the logic and consistency checks on the application side, wrap that in a data access layer, and route all presentation logic through that"
+04:01:12 <tdammers> maerwald: or you can take an approach somewhere in the middle, where you say "we put consistency checks in the database, but business logic is done in the application layer above that"
+04:01:43 <tdammers> depending which architecture you pick, having logic running on the DB server may be a good thing, or not
+04:11:17 <absence> srk: i did get a bit further, but some of the dependencies won't build, so it seems the packages are somewhat less curated than the stack ones?
+04:14:22 <srk> absence: which compiler you are using? default haskellPackages?
+04:14:59 <srk> like that should be good, think that's still ghc865
+04:15:39 <srk> what kind of failures are you getting on which packages?
+04:15:57 <absence> srk: ghc882
+04:18:24 <srk> absence: due to MonadFail ghc88* is still catching up
+04:19:07 <srk> I've managed to fix most of the deps I use only recently, few are still on ghc86
+04:19:27 <absence> srk: hm, it works when compiling the same packages with stack lts 15 (ghc 8.8.2)
+04:21:16 <srk> are they failing to compile or fail on bounds?
+04:21:40 <srk> stack lts won't downstream patch packages, right?
+04:21:54 * hackage dobutokO 0.2.0.0 - Creates the time intervals for CLI changing messages on the screen.  https://hackage.haskell.org/package/dobutokO-0.2.0.0 (OleksandrZhabenko)
+04:22:06 <merijn> srk: Do they do *any* updates?
+04:22:30 <srk> merijn: who? stack(age)?
+04:23:01 <merijn> oh, wait they do
+04:23:20 <absence> srk: bounds. the package is marked as broken too
+04:23:54 <srk> absence: you can try to apply haskell.lib.doJailbreak in that case
+04:24:18 <srk> absence: like here https://github.com/HaskellEmbedded/ivory-tower-nix/blob/master/nix/mainland-pretty.nix#L6
+04:29:54 * hackage dobutokO 0.2.0.1 - Creates the time intervals for CLI changing messages on the screen.  https://hackage.haskell.org/package/dobutokO-0.2.0.1 (OleksandrZhabenko)
+04:31:31 <absence> srk: it seems a bit brittle, so i think we'll stick to stack for now, but possibly use nix for non-haskell dependencies if we can somehow get the result into a docker image
+04:38:51 <boxscape> why does head use errorWithoutStackTrace?
+04:39:00 <boxscape> I imagine efficiency?
+04:39:11 <boxscape> So you don't have to pass the callstack around?
+04:40:57 <kuribas> why isn't an unboxed vector foldable?
+04:43:49 <merijn> kuribas: Need an Unbox constraint
+04:44:54 <merijn> kuribas: You'd need "instance Unbox a => Foldable Vector where ..."
+04:45:00 <merijn> kuribas: Which doesn't work
+04:45:20 <kuribas> ah, because the a is not available
+04:45:24 <kuribas> rather shitty
+04:57:52 <jsomedon> is this some operator in haskell *=>
+04:59:30 <boxscape> @hoogle *=>
+04:59:30 <lambdabot> No results found
+04:59:47 <boxscape> doesn't look like it
+05:00:59 <jsomedon> was reading through Conal's FRP paper and saw this in his code example on page 2: http://conal.net/papers/icfp97/icfp97.pdf
+05:01:02 <MasseR> jsomedon: it *could* be
+05:01:11 <MasseR> He's probably defining it himself 
+05:01:25 <jsomedon> hmm okay
+05:02:31 <phadej> he does, on page 4
+05:04:55 <jsomedon> ah I see :-)
+05:08:33 <phadej> while reading a paper it might make sense to make notes while you read it, and then check at the end whether you learned answers to the questions you had
+05:09:12 <phadej> not all papers are (or can) be structured so everything is explained beforehand
+05:14:08 <jsomedon> great tip :-)
+05:21:31 <jsomedon> do people still use postcript to write paper these days
+05:21:49 * merijn sighs
+05:21:53 * hackage dobutokO 0.3.0.0 - Creates the time intervals for CLI changing messages on the screen.  https://hackage.haskell.org/package/dobutokO-0.3.0.0 (OleksandrZhabenko)
+05:22:05 <Uniaika> I might know someone who still (ab)uses postscript…
+05:23:02 <merijn> For something designed to make things typesafe there's a ton of mines buried in persistent when it comes to concurrency >.>
+05:23:29 <Rembane> merijn: How did it bite you this time? 
+05:24:23 <merijn> Rembane: It didn't, but I was revisiting some stuff I knew was dicey and needed to audit and honestly I don't see how any of the obvious ways people end up using this could *ever* be safe
+05:25:27 <Rembane> merijn: Oh, that's somewhat of a disappointment for a library that really wants to be safe.
+05:26:59 <merijn> Rembane: Oh, even the most basic thing as "use this (thread safe on the database side) connection from multiple threads breaks down horribly and immediately
+05:27:13 <Rembane> merijn: That's really sad. 
+05:27:33 <merijn> You need one connection per thread, but even then things are dicey
+05:29:13 <merijn> Like, if you use something like selectSource :: [Filter rec] -> [SelectOpt rec] -> ConduitT () (Entity rec) m ()" with a downstream conduit that doesn't consume the entire stream it looks like you'll just happily crash next time you run that query
+05:29:34 <merijn> Not to mention you'll leak space in the database keeping the results live until you do
+06:17:17 <tdammers> it's almost as if people were ignoring 30 years of collective programming wisdom
+06:31:29 <merijn> I'm somewhat sure my code is now fine and safe, but I don't think it's actually possible to safely use persistent withou knowing a significantt portion of it's internals AND resourcet's internals :\
+06:51:54 * hackage streamly 0.7.1 - Beautiful Streaming, Concurrent and Reactive Composition  https://hackage.haskell.org/package/streamly-0.7.1 (pranaysashank)
+07:05:29 <sm[m]> merijn: a blog post with some reproducing examples would be very useful!
+07:06:02 <merijn> sm[m]: Well, there's already this issue: https://github.com/yesodweb/persistent/issues/981
+07:07:54 <sm[m]> a blog post (syndicated on planet haskell) with a small reproducing example would get the word out much more widely
+07:08:49 <sm[m]> but I guess most persistent users are doing fine, and you probably have better things to do
+07:09:01 <merijn> sm[m]: Sure, but I don't have the time nor energy for the forseeable future
+07:09:29 <sm[m]> thanks for working on making it better
+07:09:34 <merijn> sm[m]: And a lot of uses/usecases (appear to) work fine superficially
+07:09:57 <merijn> So long as you don't think too much about whether things are actually safe and fine, there's no problem >.>
+07:10:30 <sm[m]> it's just that for something like this, in a lib which probably a lot of companies are depending on, getting the word out might attract more help with the issue
+07:11:49 <merijn> sm[m]: The basic issue is that the reliance on MonadResource means that statement only get reset (and thus clean up their results) when you exhaust the stream produced by them, so if your stream processing ever stops early the statement isn't reset/cleaned up. And since statements are shared and reused within a connection the next time you run it you'll be trying to bind a pre-existing non-reset query
+07:12:06 <nshepperd2> i don't trust conduit tbh
+07:12:22 <merijn> conduit is fine, the issue is the way persistent is using conduit and resourcet
+07:13:56 <sm[m]> it's also surprising that nobody has reported this before, so a reproducer and/or explanation of that would help convince
+07:14:35 <sm[m]> how come you noticed it and others haven't ?
+07:15:25 <merijn> sm[m]: It's because the failure isn't obvious. There was an older issue linked from 981 where someone reported "I intermittently get ErrorMisuse with SQLite" which is what happens if you share connections between threads
+07:15:59 <artem_> Hi,
+07:16:08 <merijn> sm[m]: The other one is even more obscure, it requires running the same query on a single connection AND not exhausting the upstream ConduitT
+07:16:27 <merijn> sm[m]: If the connection gets GCed/reset due to pool cleanup you don't notice a thing
+07:17:10 <artem_> I use emacs with lsp-mode and hie. By default, hie relies on brittany. How can I switch it to stylish-haskell?
+07:18:00 <sm[m]> I see, interesting info
+07:19:43 <merijn> sm[m]: So the question is: How many people have downstream processing exit early from their queries AND are having a high enough load to run that query again within the default pool connection timeout?
+07:20:44 <merijn> sm[m]: I only just started triggering this error condition because I'm streaming results to a pager so I can scroll the results in the terminal. If I exit the pager early and rerun the query quickly then I hit it
+07:20:49 <Uniaika> Hi everyone, I'm somewhat at loss with the usage of getLine and putText (works like putStr) in the context of a very minimalist REPL. If I type `:main` in GHCi, everything works well, but if I start the binary from my shell, then I don't see the output of 'putText' before I type anything and press Enter
+07:20:54 <Uniaika> Here's the code https://gist.github.com/Kleidukos/45cf3ce059cd678053e7676ad964e150
+07:21:38 <geekosaur> Uniaika, ghci sets the terminal to unbuffered and character mode, executables don't
+07:22:09 <geekosaur> because ghc conflates them, you use "hSetBuffering stdin NoBuffering" in main to change it
+07:22:24 <glguy> You can use explicit flush instead of disabling buffering
+07:22:25 <Uniaika> thank you very much!!
+07:22:43 <sm[m]> or print a newline
+07:22:45 <Uniaika> glguy: would it be necessary for a back-and-forth workflow?
+07:23:20 <glguy> hFlush stdout; any time you want to be sure the stuff you've printed is all emitted to screen
+07:23:22 <Uniaika> sm[m]: I wish to display something before letting the use enter their commands :) Like "Enter your command: " 
+07:23:53 <sm[m]> yup, then you need to "hFlush stdout" or do what geekosaur said
+07:24:34 <Uniaika> I'm going to go with geekosaur's solution
+07:24:35 <sm[m]> setting NoBuffering can make your output less efficient I expect
+07:24:37 <Uniaika> thank you all
+07:24:56 <Uniaika> sm[m]: ah, well it's for a text adventure, I'm not expecting running into performance issues :P
+07:25:33 <geekosaur> you have to do a lot of output for it to matter
+07:25:36 <sm[m]> maybe it'll slow down your play through tests !
+07:25:52 <geekosaur> terminals are not high throughput in general, mostly because of the human on the other end
+07:26:23 <sm[m]> I'll wait till you have "200 rooms!" like the old text adventures :)
+07:28:45 <geekosaur> also note that there's still buffering, but at the level of strings (that is, a putStr will be a single output operation)
+07:29:39 <sm[m]> aha
+07:29:44 <Uniaika> hum, curious. It does not seem to work.
+07:29:54 <Uniaika> I'll upload the whole code on GitHub
+07:32:09 <dminuoso> Mmm, does anyone here run hackage-server on centos? I cant seem to be able to build lukko (a transitive dependency of hackage-repo-tool) due to bizarre C errors about F_OFD_SETLKW and the likes not being defined.
+07:32:48 <dminuoso> *undeclared, sorry.
+07:32:54 * hackage elbow 0.1.0.0 - Find the elbow point.  https://hackage.haskell.org/package/elbow-0.1.0.0 (GregorySchwartz)
+07:34:03 <Uniaika> https://github.com/Kleidukos/little-hecate-adventures/blob/master/app/Main.hs <- here's the code
+07:34:12 <sm[m]> Trivia: Level 9's "Snowball" had "over seven thousand locations". Of which "sixty-eight hundred locations on the passenger disks form a colour-coded maze with minimal descriptions." That must have been fun.
+07:34:27 <Uniaika> sm[m]: wow
+07:35:39 <sm[m]> Uniaika: you should set it on stdout, not stdin
+07:35:48 <Uniaika> bloody fucking hell
+07:35:51 <Uniaika> thanks
+07:35:55 <Uniaika> that'll teach me
+07:36:10 <sm[m]> hehe
+07:38:51 <sm[m]> I'm surprised that putTextLn didn't force output, since it prints a newline
+07:39:58 <sm[m]> oh I guess it was the putText at https://github.com/Kleidukos/little-hecate-adventures/blob/master/app/REPL.hs#L10
+07:40:06 <Uniaika> oh yes it was the culprit
+07:40:18 <Uniaika> wait, did I say putTextLn in my previous message?
+07:41:00 <sm[m]> no you didn't
+07:41:11 <Uniaika> okay
+07:41:21 <Uniaika> I mistake them quite often
+07:46:53 * hackage elbow 0.1.1.0 - Find the elbow point.  https://hackage.haskell.org/package/elbow-0.1.1.0 (GregorySchwartz)
+07:53:43 <dminuoso> When I use `cabal install foo`, how can I specify a flag `t` for a transitive dependency `bar`?
+07:54:25 <merijn> dminuoso: You can't
+07:54:53 <merijn> dminuoso: Because flags aren't supposed to impact the public API (of course everyone ignores that and abuses them to do just that)
+07:55:07 * dminuoso mumbles
+07:55:44 <ClaudiusMaximus> i think you might be able to specify flags on the command line, but not in cabal files
+07:57:51 <ClaudiusMaximus> oh, maybe i'm mixing up with --constraint
+07:59:15 <ClaudiusMaximus> dminuoso: cabal install --constraint "bar +t"
+08:00:26 <ClaudiusMaximus> https://cabal.readthedocs.io/en/latest/installing-packages.html#cmdoption-setup-configure-constraint
+08:59:53 * hackage polysemy-RandomFu 0.4.1.0 - Experimental, RandomFu effect and interpreters for polysemy  https://hackage.haskell.org/package/polysemy-RandomFu-0.4.1.0 (adamCS)
+09:14:54 * hackage cabal-rpm 2.0.2 - RPM packaging tool for Haskell Cabal-based packages  https://hackage.haskell.org/package/cabal-rpm-2.0.2 (JensPetersen)
+09:18:24 * hackage headroom 0.1.0.0 - License Header Manager  https://hackage.haskell.org/package/headroom-0.1.0.0 (xwinus)
+09:28:54 * hackage elbow 0.2.0.0 - Find the elbow point.  https://hackage.haskell.org/package/elbow-0.2.0.0 (GregorySchwartz)
+10:00:07 <Darwin226> Hey guys. I'm using the foldl library and I want to construct a new FoldM that applicatively uses another FoldM, but I also want to specify the initial value and the extraction function for my new fold
+10:00:21 <Darwin226> Is there a way to do this or is it somehow fundamentally impossible?
+10:01:04 <Darwin226> Basically I'd like to use the FoldM constructor, but instead of the first function returning m x, I'd like it to be in FoldM m a x
+10:20:55 <merijn> For strict appending in a transformer I want strict StateT, right?
+10:28:32 <d34df00d> merijn: I think it won't hurt.
+10:44:24 * hackage birch-beer 0.2.3.0 - Plot a colorful tree.  https://hackage.haskell.org/package/birch-beer-0.2.3.0 (GregorySchwartz)
+10:48:53 * hackage tree-sitter-go 0.5.0.1 - Tree-sitter grammar/parser for Go  https://hackage.haskell.org/package/tree-sitter-go-0.5.0.1 (tclem)
+10:56:53 * hackage curl-runnings 0.12.0 - A framework for declaratively writing curl based API tests  https://hackage.haskell.org/package/curl-runnings-0.12.0 (aviaviavi)
+10:59:03 <dsal> heh.  I can't decide if that name's great or horrible.
+11:04:32 <koz_> dsal: Golden rule of Haskell library naming - it must feature some kind of reference or wordplay.
+11:04:49 <dsal> I need to step my game up.
+11:05:11 <koz_> Lol.
+11:05:23 <koz_> In this regard, my libraries are very poorly named.
+11:05:33 <koz_> 'finitary' features neither of those things.
+11:06:07 <merijn> koz_: Could be worse, you could name a library than drastically expand it's scope, resulting in a rather oddly named combo :p
+11:06:15 <koz_> merijn: This is true.
+11:06:33 <merijn> I am, of course, not talking from personal experience at all...
+11:06:39 <koz_> merijn: ;)
+11:09:44 <iqubic> Or you could name all the data types in your library T. And the constructors are MkT.
+11:09:50 <iqubic> Like that one guy did.
+11:09:59 <koz_> iqubic: Do I look like my name is Henning?
+11:10:09 <iqubic> No.
+11:10:13 <koz_> Or that I desperately want Haskell to be ML?
+11:12:37 <iqubic> No.
+11:13:50 <koz_> iqubic: Good to know.
+11:13:54 <iqubic> Yeah.
+11:26:29 <viewtiful> Hi, I'm having a problem with attoparsec: I tried putting together a very simple parser that parses a particular type of s-expression into a tree.  It works, but it consumes a *huge* amount of memory for some reason (like 150mb for a small file of about 2k lines). 
+11:26:43 <viewtiful> I would love for someone to look at this and tell me what I'm doing wrong: http://ix.io/2cfi 
+11:27:40 <sm[m]> how long are the lines
+11:28:34 <merijn> viewtiful: How did you determne the memory usage?
+11:29:01 <viewtiful> sm[m] All lines are copies of the following: (S (T t) (T (T t) (S t)) (T t) (T t (T t)) (T (T (T (T (T (T (T (T t)))))))) (T t (T (T (T (T t))))))
+11:30:33 <viewtiful> merijn I did a `stack build --profile` and then a `stack exec --profile attotest +RTS -p`
+11:31:55 <merijn> hmm, what's "+RTS -p" even do?
+11:32:58 <merijn> I would've expected something like -h to generate a heap profile with it's fancy graphs
+11:35:51 <viewtiful> -p generates a `.prof` file
+11:35:56 <Ariakenom> hi whats happening in haskell lands lately?
+11:36:58 <viewtiful> now that I think about it I think +RTS is unecessary, because stack already takes care of that
+11:37:16 <Guest_80> when I use this: curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
+11:37:26 <Guest_80> its not working
+11:38:02 <Guest_80> Failed to install, consider updating this script via: ghcup upgrade"ghcup --cache install" failed!-----> thats what it prints out
+11:38:44 <merijn> viewtiful: I'd use "+RTS -sstderr" for checking memory consumption (since it doesn't require a profiling build), to investigate what is actually using that memory I'd use the -h profiling flags (https://downloads.haskell.org/ghc/latest/docs/html/users_guide/runtime_control.html#rts-options-for-profiling) because then hp2ps can produce nice graphics showing what is using memory
+11:43:32 <sm[m]> the tooling really doesn't make this easy..
+11:44:44 <sm[m]> I would write that command as: stack --profile exec -- irc-mem-issue-exe +RTS -p
+11:45:51 <sm[m]> --profile is a flag of stack not exec. Not appearing in --help; I think there's an open issue. It's required so that stack looks in the profiling build PATH.
+11:46:23 <sm[m]> The -- is needed, otherwise +RTS -p is applied to stack exec, and fails
+11:48:09 <geekosaur> Guest_80, that sounds like it doesn't recognize your system
+11:49:43 <viewtiful> merijn I'm gonna give it a shot, cheers
+11:50:00 <viewtiful> sm[m] Oh yes, I'm actually doing that as well, sory must have messed up copying the command
+11:50:24 * hackage dobutokO 0.3.1.0 - The library is intended to print updated messages on the terminal screen.  https://hackage.haskell.org/package/dobutokO-0.3.1.0 (OleksandrZhabenko)
+11:50:46 <sm[m]> so it's 120Mb total allocation. Only 9.4M maximum residency. That sounds normal
+11:51:00 <sm[m]> haskell programs allocate and garbage-collect a lot
+11:52:41 <merijn> 120Mb total allocation sounds tiny
+11:53:14 <sm[m]> or if you run a non-profiling build with merijn's trick, you'll see it's 66M allocated and 5M max residency
+11:53:46 <merijn> My conduit code sustains like 1Gb/s of allocation :p
+11:57:41 <phaazon> hey
+11:57:49 <phaazon> what’s the name of that lib to wrap over inotify, again? :)
+11:57:54 <phaazon> hinotify?
+11:57:56 <phaazon> I never know
+11:58:34 <sm[m]> http://hackage.haskell.org/package/fsnotify is the cross platform one
+11:58:45 <koz_> fsnotify wraps inotify.
+11:59:06 <maerwald> not sure if cross platform is a good thing here
+11:59:39 <maerwald> https://hackage.haskell.org/package/hinotify 
+11:59:47 <maerwald> it also uses correct filepaths
+12:00:14 <viewtiful> sm[m] merijn Oh... Well in that case sorry for causing a stir :P  Still quite new to haskell
+12:00:32 <phaazon> thanks
+12:00:47 <viewtiful> I guess in that case I might as well use the megaparsec version, which is almost twice as fast (for some reason), but has almost twice the total allocation
+12:01:20 <sm[m]> viewtiful, sounds good
+12:03:15 <merijn> viewtiful: allocation is mostly irrelevant, the number you really care about is "residency" (aka "max amount of memory used at the same time")
+12:04:16 <merijn> viewtiful: A lot of haskell programs allocate *a lot* (like, I've seen >4Gb/s allocation rates), but that's fine because the GC is heavily tuned for "large amounts of short-lived allocations".
+12:05:29 <viewtiful> ah I see, that makes a lot more sense
+12:05:33 <viewtiful> thank you so much!
+12:06:28 <merijn> viewtiful: GHC uses a "bump pointer allocator", which means the cost of allocation is (essentially) the cost of incrementing an integer, so that's hard to beat ;)
+12:06:35 <sm[m]> also look for: a low Productivity in the -s report (same as -sstderr), or unexplainably large numbers in the profile's entries column
+12:07:48 <phaazon> I have to say it
+12:07:55 <phaazon> Haskell and Archlinux is a huge shame to me
+12:07:56 <sm[m]> (that also have a significant %time usage)
+12:08:03 <phaazon> Archlinux fucked up there.
+12:08:31 <koz_> phaazon: Yes, this.
+12:08:33 <sarahzrf> merijn: well, the cost of allocation is *also* the cost of a branch ;-)
+12:08:33 <merijn> Yeah, high residency and low productivity are the bad ones
+12:08:59 <sarahzrf> not just an increment
+12:09:18 <merijn> sarahzrf: The branch is predictable and thus, essentially free
+12:09:29 <sarahzrf> well, ok
+12:09:53 <merijn> And when it's false you GC anyway, so the pipeline stall there isn't that big of a deal
+12:09:56 <sarahzrf> yeah
+12:10:31 <sarahzrf> cause for celebration if that were the concern there :-)
+12:10:39 <merijn> sarahzrf: Anyway, that seemed needlessly detailed to go into for newcomers ;)
+12:10:51 <sarahzrf> :>
+12:19:37 <d34df00d> Ugh. How do I give a PR to the bytestrings a go?
+12:19:54 <d34df00d> Like https://github.com/haskell/bytestring/pull/202 which I pasted here already.
+12:20:02 <d34df00d> Or should I just maybe make that a separate (simd-optimized) library?
+12:21:23 * hackage magmas 0.0.1 - Magma-like objects.  https://hackage.haskell.org/package/magmas-0.0.1 (cmk)
+12:24:25 <sm[m]> d34df00d: to build with that PR, you can add an entry referencing the commit hash in extra-deps in stack.yaml. Or the cabal equivalent.
+12:26:05 <d34df00d> sm[m]: yeah, that's what I'm doing locally at the moment. But I'd like to bring that change to something reusable and complete — keeping code in form of open PRs doesn't seem reasonable.
+12:28:08 <sm[m]> you could also merge bytestring in your project
+12:28:21 <sm[m]> until this gets released
+12:28:59 <d34df00d> Yeah, so should I just, well, wait till it gets merged, or should I do something more actively?
+12:29:35 <sm[m]> it's only 18 days old.. I wouldn't have thought it's worth cluttering hackage with a temporary package that'll be there forever yet.. others might disagree
+12:35:11 <sm[m]> you could ask what the timeline for merging in bytestring might be, and what else is needed for that
+12:36:42 <sm[m]> dcoutts the maintainer is here, but probably quite busy
+12:42:45 <sm[m]> also sjakobi suggested the mail list. That can help build demand
+12:42:48 <sm[m]> and get more review
+12:44:47 <sm[m]> oh, the libraries list.. I see you've done it
+13:12:19 <merijn> Not only will it be there forever, it will also bloat the index forever :\
+13:16:20 <srid`> sm: hi - simonmic on reddit?
+13:16:54 * hackage heart-core 0.2.0 - An opinionated library prelude in the UnliftIO style  https://hackage.haskell.org/package/heart-core-0.2.0 (ejconlon)
+13:17:35 <sm[m]> hey there srid`
+13:18:11 <sm[m]> yes I'd love an industrial strength Venus replacement, making life easier for planet admins
+13:18:24 <srid> cool. yea, about the planet stuff. i see that there is no Haskell successor yet
+13:18:47 <srid> what sort of features would planet admins need? CLI management, or with browser UI?
+13:19:11 <sm[m]> something shake/rib based sounds pretty good. I think the hard part is robustly handling all the crazy feed situations you encounter
+13:19:57 <srid> I believe https://bazqux.com/ is written in Haskell; I wonder if its creator has open sourced its RSS parser library
+13:20:19 <merijn> It's Haskell for the backend and Ur/Web for the frontend
+13:21:03 <sm[m]> rss2irc uses the feed library. It leaks memory, but that mightn't be a problem
+13:21:12 <srid> can't see one in https://github.com/bazqux - so the author probably choose to keep it proprietary for competitive advantage.
+13:22:33 <sm[m]> the app needs to be smart about never showing junk in the published html or feeds, even when the source feeds come and go, reorder their entries, change their timestamps and uuids, etc.
+13:23:28 <sm[m]> I think rss2irc could have some ideas
+13:23:41 <srid> it sounds like this would be a two-part app (or three-part). one that parses feeds, and 'concat' them to produce an uniform feed, and another part that does the whole feed management and static generation.
+13:25:16 <sm[m]> yes: feed poller worker(s), and multiple output generators (rss, atom, html..)
+13:27:21 <sm[m]> I think ideally with some kind of queuing/event system and concurrency, for maximum liveness - so that you show updates promptly regardless of slow feeds or a long list of feeds to poll
+13:28:00 <merijn> Incidentally, bazqux is pretty great :>
+13:28:21 <sm[m]> merijn: agreed! highly recommended
+13:29:28 <sm[m]> srid: I remember with Venus, polling a good number of feeds took a long time and was pretty heavy on the machine, and I was running it hourly
+13:29:49 <merijn> \o/
+13:30:02 <merijn> My massive rewrite of a bunch of stuff didn't break anything obvious!
+13:30:32 <maerwald> why is eitherReader from optparse-applicative fixed to String?
+13:30:55 <merijn> maerwald: Because it's intended to produce a message to show the user, presumably?
+13:31:07 <maerwald> No, the input for parsing is a string even
+13:31:26 <maerwald> I can't work with String :>
+13:31:34 <merijn> maerwald: Because optparse-applicative uses String for the arguments
+13:31:47 <maerwald> strOption accepts ByteString just fine though
+13:31:48 <sm[m]> oh come now :)
+13:31:52 <geekosaur> because your options for commnd argumen ts are String and ByteString, not Text
+13:31:59 <AWizzArd> How can I configure hie to know what ghc version to use?  This is: I have a flat .hs file, no cabal/stack or anythign.
+13:32:12 <maerwald> I want it to pass the command line stuff as untouched bytestrings
+13:32:17 <maerwald> and then apply my parser
+13:32:20 <merijn> maerwald: No, it *returns* bytestring, it doesn't accept them
+13:32:32 <tabaqui1> AWizzArd: which IDE do you use with hie?
+13:32:36 <maerwald> Ok, any sane alternative then?
+13:32:38 <maerwald> This seems broken
+13:32:39 <merijn> maerwald: Well, god help you, then
+13:32:44 <srid> sm[m]: what's the state of feed aggregators in haskell? there seems to be a few
+13:33:02 <sm[m]> srid: really ? where ?
+13:33:02 <srid> (some even use database, which is overkill IMO)
+13:33:09 <geekosaur> are you also dealing with locale stuff?
+13:33:21 <srid> like this uses mongodb https://hackage.haskell.org/package/lucienne - but it does more (reader)
+13:33:31 <AWizzArd> tabaqui1: Emacs
+13:33:46 <AWizzArd> if you want to call it an "ide" (instead of best text editor)
+13:34:11 <sm[m]> well mongo db is right out, but it might have some ideas/code
+13:34:14 <srid> and there is https://github.com/Arguggi/heed - but that's not updated in a while.
+13:34:23 <srid> actually, nevermind - nothing up to date in haskell
+13:34:30 <maerwald> geekosaur: on linux, arguments are raw bytestrings. I don't want to deal with locale and encoding at all, which is why I want to pass the bytestring untouched as a RawFilePath
+13:34:37 <tabaqui1> AWizzArd: let's omit the fact the emacs is a good OS but horrible text editor :)
+13:34:39 <srid> but yea, we may be able to steal some parser ideas from them
+13:34:45 <maerwald> Without interpreting and messing things up
+13:34:45 <tabaqui1> anyway, hie accept --compiler flag
+13:35:07 <tabaqui1> I dunno, my Ale (nvim plugin) can be configured to pass additional options
+13:35:08 <srid> sm[m]: btw, are you on Zulip? conversations are pretty organized there; with archives available at https://funprog.srid.ca/ 
+13:35:34 <geekosaur> that was my point; at some point you either have to deal with locale, or you're in effect forcing locale C and hoping
+13:35:35 <sm[m]> heed, interesting
+13:36:14 <maerwald> I don't have to
+13:37:02 <sm[m]> srid: too many chat systems, sorry.. I'm in the matrix Haskell room.. I like your zulip archive, need that for matrix!
+13:37:05 <merijn> geekosaur: You're forgetting the option maerwald always picks
+13:37:25 <merijn> geekosaur: Only ever use bytestring and fork all your dependencies to change them to support that :p
+13:37:30 <maerwald> heh
+13:37:45 <maerwald> yes and that works well, so gonna fork optparse-applicative now
+13:38:01 <merijn> maerwald: Or you could submit a patch upstream and improve the world
+13:38:09 <srid> sm[m]: what do you use for the matrix irc bridge? (i'm on irccloud, but wanna migrate to something else...)
+13:38:13 <maerwald> merijn: btw... my approach fixed 'tar', which breaks unicode filenames completely ;)
+13:38:31 <maerwald> well, no one responding on the 'tar' issue tracker for years, so
+13:38:41 <sm[m]> srid: the Freenode IRC bridge provided by matrix.org ? I'm using it now
+13:38:42 <merijn> maerwald: I meant for optparse :p
+13:38:45 <maerwald> and it's easier to do the correct thing when you don't have to pretend to be multi platform
+13:39:02 <merijn> maerwald: It seems fairly easy to parameterise it over the thing to parse
+13:39:03 <maerwald> (ignoring mac, lol, kinda)
+13:39:55 <sm[m]> (srid: and Riot for the client, it's great)
+13:40:09 <merijn> maerwald: The "strOption" returning ByteString was still running things through getArgs first, which is IO [String]
+13:40:16 <AWizzArd> tabaqui1: will give it a try
+13:40:59 <maerwald> I never understood why ppl are so obsessed with multi platform libraries. I would guess 95% of the "production" code runs on linux machines anyway. The rest of the 5% probably suffer from the cross platform approach more than they benefit (because of half-correct abstractions)
+13:42:09 <maerwald> merijn: let me see if it uses Char8 :P
+13:42:24 <merijn> maerwald: No, it looks up encoding from the locale
+13:42:27 <srid[m]> o/ sm 
+13:42:36 <sm[m]> see you srid
+13:43:04 <sm[m]> maerwald: some of us like to make software that runs on user machines ?
+13:43:25 <maerwald> and some try to write software that works correctly on a single platform :P
+13:43:31 <sm[m]> also, it's character-building
+13:43:39 <maerwald> which is hard when you fight cross-platform abstraction that is wrong half of the time
+13:43:57 <merijn> I agree with his frustration that broken cross-platform stuff is annoying. But "brokenly coding to the interface of a single broken OS" is that wrong solution >.>
+13:44:34 <maerwald> most widely used broken OS
+13:45:04 <merijn> Only if you're going to count Android which doesn't support any of these interfaces you're fixing anyway
+13:45:08 <maerwald> Did you see the Permission thing from directory?
+13:45:44 <maerwald> https://hackage.haskell.org/package/directory-1.3.6.0/docs/System-Directory.html#g:7
+13:46:00 <maerwald> I don't know what that is even
+13:47:20 <merijn> I fail to see your problem? Either that suffices or your done, or you use the unix package.
+13:47:24 * hackage heart-core 0.3.0 - An opinionated library prelude in the UnliftIO style  https://hackage.haskell.org/package/heart-core-0.3.0 (ejconlon)
+13:47:50 <maerwald> yes, then you use unix and are incompatible with everything anyway
+13:48:01 <merijn> maerwald: What's your point?
+13:48:09 <maerwald> Just ranting
+13:48:27 <merijn> There's hundreds or thousands of use cases where those limited permissions are just fine
+13:48:37 <maerwald> It came up in the 'tar' issue tracker about broken file permissions
+13:48:52 <maerwald> (oh, tar throws away executable bit btw)
+13:49:05 <maerwald> so it sets this bit during pack, but throws it away during unpack!
+13:49:33 <maerwald> then I tried to unpack a tarball and run a script :P
+13:50:07 <maerwald> https://github.com/haskell/tar/pull/26
+13:50:08 <merijn> I'm unsure what the point is
+13:51:32 <maerwald> that 'tar' is POSIX to begin with
+13:52:19 <maerwald> now it's half-working on posix :>
+14:06:40 <srid[m]> sm: In regards to administration, an idea to make it seamless is to to use Github Pages, and automate the whole feed scheduling using CI. https://help.github.com/en/actions/reference/events-that-trigger-workflows#scheduled-events-schedule 
+14:06:53 * hackage tree-sitter-java 0.7.0.1 - Tree-sitter grammar/parser for Java  https://hackage.haskell.org/package/tree-sitter-java-0.7.0.1 (tclem)
+14:10:24 * hackage tree-sitter-json 0.7.0.1 - Tree-sitter grammar/parser for JSON  https://hackage.haskell.org/package/tree-sitter-json-0.7.0.1 (tclem)
+14:11:53 * hackage heart-core 0.3.1 - An opinionated library prelude in the UnliftIO style  https://hackage.haskell.org/package/heart-core-0.3.1 (ejconlon)
+14:12:54 * hackage tree-sitter-python 0.9.0.2 - Tree-sitter grammar/parser for Python  https://hackage.haskell.org/package/tree-sitter-python-0.9.0.2 (tclem)
+14:14:54 * hackage tree-sitter-ruby 0.5.0.2 - Tree-sitter grammar/parser for Ruby  https://hackage.haskell.org/package/tree-sitter-ruby-0.5.0.2 (tclem)
+14:16:22 <parsnip> I've forgotten. What separates typeclasses like Monoid, Functor, Applicative, Monad, from typeclasses like num, etc.
+14:16:53 * hackage tree-sitter-tsx 0.5.0.1 - Tree-sitter grammar/parser for TSX  https://hackage.haskell.org/package/tree-sitter-tsx-0.5.0.1 (tclem)
+14:18:11 <tabaqui1> parsnip: I would say Kind, but Monoid has *
+14:18:48 <parsnip> Thank you.
+14:18:55 <tabaqui1> am I right?
+14:19:09 <amalloy> also, Num is a lawless hellscape
+14:19:49 <tabaqui1> yeah, and first ones are more algebraic
+14:21:47 <koz_> amalloy: Num confirmed for Wild West?
+14:22:54 * hackage tree-sitter-typescript 0.5.0.1 - Tree-sitter grammar/parser for TypeScript  https://hackage.haskell.org/package/tree-sitter-typescript-0.5.0.1 (tclem)
+14:23:12 <koz_> Also, what is this tree-sitter thing and why does it support so many languages?
+14:23:59 <maerwald> koz_: dunno, but the docs say don't use it xD
+14:24:04 <koz_> maerwald: Lol.
+14:24:18 <maerwald> good enough for hackage :P
+14:24:26 <koz_> Lol.
+14:24:46 <koz_> Makes me feel a bit better about the obvious bug jle` found in finitary a while back.
+14:38:45 <dmwit> treesitter is github's library for doing incremental parsing. It supports so many languages because github wants to do syntax highlighting for a lot of languages.
+14:42:04 <koz_> dmwit: Ah, OK. That explains a bunch.
+14:42:27 <koz_> I guess it's going to have a huge number of modules then, because Github has syntax highlighting for... some very obscure languages.
+14:44:23 <koz_> s/modules/helper libraries/
+14:58:29 <maerwald> dmwit: can't build your encoding lib https://git.io/JvRY5
+15:01:08 <maerwald> https://github.com/dmwit/encoding/blob/master/encoding.cabal#L39
+15:02:23 <maerwald> and you have a pull request fixing that already https://github.com/dmwit/encoding/pull/5
+15:02:25 <maerwald> merge!
+15:09:24 <maerwald> seems to hang on preprocessing stage, lol
+15:44:58 <maerwald> merijn: https://github.com/pcapriotti/optparse-applicative/issues/368 :)
+15:49:07 <maerwald> It's getting a little tiring these things
+15:51:08 <phadej> maerwald: you said it yourself "you are free to interpret them", and optparse-applicative does, as Strings
+15:51:19 <maerwald> no, it truncates
+15:51:38 <phadej> the input? No it doesn't.
+15:52:13 <phadej> you can do `option (eitherReadM toUTF8BS)` instead of `strOption`
+15:52:24 <maerwald> yeah
+15:53:06 <maerwald> and what was the original encoding? :>
+15:53:40 <phadej> optparse-applicative doens't care
+15:53:46 <phadej> it sues `getArgs :: IO [String]`
+15:53:48 <phadej> uses*
+15:53:51 <maerwald> yep
+15:54:10 <phadej> really, commenting on issues like that only irritates maintainers
+15:54:26 <phadej> well written patch should make it clear that you'll need to depend on unix/Win32 + bytestring
+15:54:27 <maerwald> Well, IsString shouldn't be used
+15:54:36 <maerwald> That's the solution
+15:54:40 <phadej> and HuwCampell already implied that he's not keen on adding dependencieds
+15:55:08 <phadej> nor he's probably happy with OS conditional code either
+15:55:24 <phadej> You are fighting uphill battle
+15:55:27 <maerwald> time for optparse-bytestring :P
+15:56:41 <phadej> I wonder whther anyone else than you use your -bytestring forks?
+15:56:43 <maerwald> I guess a workaround is to use env variables for things that need to be bytestring and then use unix package
+15:56:58 <maerwald> phadej: some have been merged, like hinotify :)
+15:58:06 <phadej> hinotify depends on `unix` already, and deals with low-level-ish concerns already
+15:58:13 <maerwald> yep
+15:58:52 <maerwald> I don't see reasonable cross-platform support for such things, unless the abstract filepath proposal for example is pulled off, so
+15:59:09 <maerwald> but that will only fix some of the problems, overuse of Char8 is still there
+15:59:55 <phadej> I'd say that a dealbroker for optparse-applicative e.g.
+16:00:01 <phadej> it has to work reliably on Windows
+16:00:33 <maerwald> I agree, which is why it would be cleaner to avoid auto-converting to bytestring
+16:00:56 <maerwald> and let people deal with it manually
+16:01:01 <phadej> try to fix the core issue, "broken" ByteString's IsString
+16:01:12 <phadej> there have been ghc-proposals
+16:01:17 <phadej> but people don't try too hard
+16:01:20 <maerwald> those things usually sit 2+ years in the pipeline before something happens
+16:01:26 <phadej> fixing that on the library level is wrong
+16:01:57 <phadej> 2+ years is fine, start now, not wait until someone would fix the core issue
+16:02:48 <phadej> I'd argue that fixing the core issue is way more satisfactory and right than trying to fix every possible library out there
+16:03:15 <phadej> (or forking them and try to convince people to switch, even worse)
+16:03:35 <maerwald> Well, I want to write some code that works before politics has settled ;P
+16:04:27 <phadej> not using IsString ByteString instance should be easy, isn't it?
+16:05:00 <maerwald> would be a breaking change though, yeah
+16:06:37 <phadej> I mean, in your own code
+16:06:44 <phadej> simply don't use `strOption`
+16:06:52 <phadej> define your own variants, and call it a day
+16:07:07 <phadej> (and nudge work on core issue)
+16:10:06 <phadej> https://github.com/ghc-proposals/ghc-proposals/pull/124#issuecomment-487763505 (though IIRC that proposal was over-engineered, yet new pair of eyes may make it better and get it eventually accepted)
+16:11:52 <maerwald> yeah, can achieve something similar with quasiquoters
+16:12:31 <maerwald> so he argues for the bytestring instance to reject unicode... interesting
+16:13:21 <sm[m]> srid: could be interesting to try... my feeling is, the fewer moving parts, the better
+16:14:17 <phadej> maerwald: yes, making it accept only 7bit strings is reasonable limitation 
+16:14:28 <phadej> at least it will make you think
+16:15:17 <maerwald> the other argument I guess is that haskell source files are UTF-8 anyway, right?
+16:15:26 <maerwald> (as seen by the compiler)
+16:15:41 <phadej> so?
+16:15:58 <maerwald> Well, then you could argue that converting to utf8 encoded bytestring is a thing
+16:16:29 <phadej> what string literal "\x99" would represent then?
+16:16:49 <phadej> two byte utf8 encoded one, or single byte 99?
+16:16:54 <phadej> 0x99
+16:17:00 <phadej> > "\0x99"
+16:17:03 <lambdabot>  "\NULx99"
+16:17:07 <phadej> > "\x99"
+16:17:09 <lambdabot>  "\153"
+16:18:08 * Axman6 Looks like you need some more string syntaxes </yaml>
+16:18:16 <koz_> Axman6: Rofl.
+16:18:36 <hpc> i vote for triple-quoted strings
+16:18:46 <Axman6> I think Yaml only has 64 (or possible 128) different syntaxes for strings
+16:18:48 <phadej> with some syntax (e.g. quasiquoter for ByteStrings) you could tell an encoding you want, but with OverloadedStrings it's IMHO ok with restricting ourselves to 7bits, which is common enough denominator
+16:26:39 <John_Ivan> are we getting a change in the spec or syntax of haskell anytime soon?
+16:27:30 <hpc> probably not in specification, but language extensions are under constant development in ghc
+16:27:37 <John_Ivan> I'm reading this on wikipedia and it says
+16:28:15 <John_Ivan> >  Da last formal justification of tha language was made up in July 2010, while tha pimpment of GHCz implementation has continued ta extend Haskell via language extensions. Da next formal justification is planned fo' 2020
+16:28:17 <lambdabot>  <hint>:1:30: error: parse error on input ‘of’
+16:28:53 <hpc> wikipedia be trippin
+16:29:08 <ChaiTRex> Seriously, lambdabot can't even parse what Wikipedia is saying.
+16:29:54 <koz_> Wat.
+16:29:56 <hpc> i think haskell 2020 was planned, but the other day someone mentioned there's not much urgency for it
+16:30:49 <hpc> i could be wrong though
+16:31:04 <John_Ivan> okay, thanks.
+17:14:24 * hackage rings 0.1 - Ring-like objects.  https://hackage.haskell.org/package/rings-0.1 (cmk)
+17:28:21 <jackdk> I have a HKD type `data Config f` with `instance (forall a . Monoid (f a)) => Monoid (Config f)`. I want to use a `Config (Compose Maybe Last)` to build up partial results. `Compose` has no monoid instance. Should it have `instance Monoid (f (g a)) => Monoid (Compose f g a)`?
+17:28:57 <koz_> jackdk: Perhaps you want this? https://hackage.haskell.org/package/base-4.12.0.0/docs/Data-Monoid.html#t:Ap
+17:29:47 <jackdk> koz_: I'm not sure I do. Can you explain further?
+17:30:00 <jackdk> (you may be right, but I'm not seeing it)
+17:30:37 <koz_> Compose Maybe Last m (for Monoid m) should get a Monoid instance from being wrapped in Ap.
+17:30:49 <koz_> So wouldn't that give you the Monoid instance that you seek?
+17:31:00 <koz_> (since Compose f g is an Applicative as long as both f and g are)
+17:33:43 <koz_> jackdk: ^ ?
+17:34:01 <jackdk> koz_: received, playing with it in ghci
+17:34:23 <koz_> jackdk: I'm not sure if it 100% does what you want.
+17:36:36 <jackdk> koz_: hm, that's not quite it. Trying to use `<>` on an `Ap (Compose Maybe Last Char)` is trying to find a `instance Semigroup Char`
+17:37:05 <koz_> Ah, OK.
+17:37:15 <koz_> What's the desired behaviour of <> in that specific case?
+17:37:43 <koz_> Also, wouldn't it be 'Ap (Compose Maybe Last) Char'?
+17:37:51 <koz_> Since it's Ap f a?
+17:39:18 <jackdk> it would. typo, sorry. the behaviour I want is to collect  the final `Just` from a series of `<>`. I'm using `instance Semigroup Last` and `instance Semigroup g => Monoid (Maybe g)`
+17:39:53 <koz_> Ah, I see.
+17:40:39 <koz_> Yeah, then Ap isn't what you need.
+17:40:42 <jackdk> but then to fit into my HKD structure I have to use `Compose Maybe Last`, which does not have a `Monoid` instance 
+17:40:42 <koz_> Sorry about the confusion.
+17:40:52 <jackdk> no worries, I appreciate the effort
+17:41:11 <koz_> Ap (Compose Maybe Last) has what kind again? Would it be Type -> Type?
+17:41:17 <jackdk> yes
+17:41:22 <koz_> You could try stuffing that into your HKD?
+17:41:39 <koz_> Ah, wait, never mind, I am daft.
+17:41:54 <koz_> The 'Compose Maybe Last' needs to be glued to the value.
+17:48:39 <jackdk> yeah, and the `(<>)`s are wrong - it tries to the the Monoid instance on the a, and Ap uses the Applicative instance so it sees through the (Compose Maybe Last) and tries to `(<>)` with the `a` instance (which may not exist)
+17:56:00 <dmwit> maerwald: The preprocessing step takes a long time. Probably not hung, just still working.
+19:40:01 <jackdk> koz_: filed https://gitlab.haskell.org/ghc/ghc/issues/17859
+19:40:32 <koz_> jackdk: Seems legit. Thanks for filing!
+19:42:55 <zeta_0> does xmonad have problems vscodium? when i search for it in dmenu it does not pop up? i have no idea what is wrong
+19:46:26 <jackdk> zeta_0: what have you tried to diagnose the problem?
+19:48:55 <zeta_0> jackdk: i installed vscodium with nix and it build without any errors, but when i rebooted and searched dmenu, it does not pop up, like it does not exist?
+19:49:24 <zeta_0> i have never had something like that happen before
+19:51:15 <jackdk> zeta_0: that is a description of what you did, not your efforts to diagnose the problem. What have you done on that front?
+19:52:25 <zeta_0> i looked it up and it looks like i need to install it in my system packages instead of my user packages, i'll try it out now
+19:52:54 <zeta_0> jackdk: sorry about that, i wasn't sure if anyone here had a similar isue
+19:55:36 <jackdk> zeta_0: good work. If you want to keep it in user packages, you'll want to dig into how dmenu populates its list of options, which will probably depend on how xmonad invokes dmenu, which may depend on xmonad config
+20:00:03 <zeta_0> jackdk: ok, i have never had this issue with any other packages, so this is strange
+20:10:44 <d34df00d> Alright, I figured I don't know how type classes work.
+20:11:05 <d34df00d> Somebody mentioned elsewhere that specializations of the same class instance have to share the same code. Why?
+20:11:21 <kleisli> hey all. how do i construct a value of type GHC.Word.Word32?
+20:11:45 <ChaiTRex> kleisli: Does fromIntegral work?
+20:11:56 <d34df00d> kleisli: depends on what you have. If you have some Integral, then fromIntegral works.
+20:12:26 <kleisli> yes, fromIntegral does indeed work. thank you
+20:13:06 <kleisli> just for my understanding, what are the pound signs in this definition: `data GHC.Word.Word32 = GHC.Word.W32# GHC.Prim.Word#` ?
+20:15:54 <ChaiTRex> kleisli: Those are primitive types. You can have primitive literals like 5#, which is unboxed.
+20:16:57 <ChaiTRex> kleisli: I think W32# 5# or something is another way to construct a Word32
+20:17:17 <kleisli> ah. thanks
+20:19:38 <ChaiTRex> kleisli: Ahh, it's W32# 5## (word literals are ## instead of #).
+20:19:47 <ChaiTRex> > GHC.Word.W32# 5##
+20:19:50 <lambdabot>  5
+20:22:24 * hackage heart-core 0.3.2 - An opinionated library prelude in the UnliftIO style  https://hackage.haskell.org/package/heart-core-0.3.2 (ejconlon)
+21:16:17 <Axman6> > 3 :: Word32
+21:16:19 <lambdabot>  3
+21:19:49 <zeta_0> jackdk: alright, so i installed vscodium and when i rebooted and search codium it did appear in dmenu of xmonad, but when i pressed it nothing happened, that's strange, someone sent me this link but i don't understand what i need to do? https://github.com/VSCodium/vscodium/blob/master/DOCS.md#terminal-support
+21:20:12 <jackdk> beats me, I neither use vscodium nor xmonad.
+21:21:10 <zeta_0> oh
+21:24:51 <jackdk> I strongly suggest you learn how to dig for your own solutions, so that you aren't forever depending on others' generosity. Sometimes people are unable or unwilling to help.
+21:58:41 <winny> zeta_0: that sounds pretty self explainatory =)
+22:08:51 <rikkytikkytabby> Registration required?
+22:08:59 <rikkytikkytabby> No! Neat :)
+22:18:54 * hackage HCodecs 0.5.2 - A library to read, write and manipulate MIDI, WAVE, and SoundFont2 files.  https://hackage.haskell.org/package/HCodecs-0.5.2 (Mokosha)
+22:36:24 * hackage ptr 0.16.6.2 - Abstractions for operations on pointers  https://hackage.haskell.org/package/ptr-0.16.6.2 (NikitaVolkov)
+22:38:24 * hackage ptr 0.16.7 - Abstractions for operations on pointers  https://hackage.haskell.org/package/ptr-0.16.7 (NikitaVolkov)
+22:40:24 * hackage bindings-GLFW 3.3.2.0 - Low-level bindings to GLFW OpenGL library  https://hackage.haskell.org/package/bindings-GLFW-3.3.2.0 (Mokosha)
+22:59:26 <kleisli> is it possible to somehow view the instances that a given use of "deriving" produces?
+23:00:06 <glguy> GHC has a -ddump-deriv flag for that
+23:01:47 <kleisli> perfect, thansk
+23:03:48 <dminuoso> How do you change the IP address hackage-server is bound to?
+23:04:01 <dminuoso> Or are you supposed to serve this via a reverse proxy?
+23:55:27 <gabbiel> why doesn't this work
+23:55:34 <gabbiel> compose = foldr1 (.)
+23:55:47 <gabbiel> compose $ replicate 10 head

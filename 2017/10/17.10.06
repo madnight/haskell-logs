@@ -1,0 +1,1548 @@
+00:14:03 <vaibhavsagar> friends, why is catMaybes specialised to lists?
+00:14:54 <geekosaur> nobody thought about it?
+00:14:56 <c_wraith> vaibhavsagar: https://hackage.haskell.org/package/witherable-0.1.3.4/docs/Data-Witherable.html#v:catMaybes
+00:15:11 <c_wraith> vaibhavsagar: because it's not something that neatly generalizes along with any standard class
+00:15:28 <c_wraith> vaibhavsagar: you'll note the package that generalizes it had to introduce a new class in order to do so
+00:15:51 <vaibhavsagar> why not `catMaybes ls = do {x <- ls; guard $ isJust x; return (fromJust x)}`?
+00:16:14 <c_wraith> That only works for types that are Monad and MonadPlus
+00:16:29 <c_wraith> It won't work for Data.Sequence.Seq, for instance
+00:17:05 <vaibhavsagar> Seq has Monad and MonadPlus instances
+00:17:10 <vaibhavsagar> https://hackage.haskell.org/package/containers-0.5.10.2/docs/Data-Sequence.html
+00:17:22 <c_wraith> not especially efficient ones
+00:17:33 <vaibhavsagar> but it has them
+00:17:47 <ertes-w> hell
+00:17:52 <vaibhavsagar> I was asking about Vectors in my case
+00:18:15 <c_wraith> No monad instances there
+00:18:47 <vaibhavsagar> uhh... https://hackage.haskell.org/package/vector-0.12.0.1/docs/Data-Vector.html
+00:19:04 <vaibhavsagar> https://hackage.haskell.org/package/vector-0.12.0.1/docs/src/Data.Vector.html#line-338
+00:19:08 <c_wraith> oh.  *boxed* vectors?  People use those?
+00:19:27 <vaibhavsagar> I think Aeson does
+00:19:34 <Axman6> it needs to
+00:19:46 <Axman6> since Vectors in Aeson hold sum types
+00:20:19 <vaibhavsagar> what do we lose by using my more general definition for catMaybes?
+00:20:21 <Axman6> (well, Iguess sumtype does not necessarily imply needing boxed vectors, but beyond Maybe it starts to get hairy)
+00:20:38 <Axman6> vaibhavsagar: what would be the type of the generalised catMaybes?
+00:21:18 <vaibhavsagar> according to GHCi, catMaybes :: (Monad m, GHC.Base.Alternative m) => m (Maybe b) -> m b
+00:21:18 <c_wraith> vaibhavsagar: in any case, that would be phenominally inefficient with Vector, too.
+00:21:52 <vaibhavsagar> and?
+00:22:19 <vaibhavsagar> moreso than converting to lists first, running catMaybes, and converting back?
+00:22:35 <c_wraith> if it's about 50% Nothing and the list is long?  Yes.
+00:22:39 <Axman6> if it were a class (like Witherable above), then the implementation for Vector could be very efficient
+00:22:55 <c_wraith> that algorithm is O(n^2) worst-case
+00:22:57 <vaibhavsagar> MonadPlus implies Monad, right?
+00:23:23 <vaibhavsagar> sure, but I literally transcribed the list comprehension that's already there to use `guard`
+00:23:47 <c_wraith> why didn't you just enable MonadComprehensions and not change the source at all? :P
+00:24:31 <vaibhavsagar> literally my first suggestion :)
+00:24:35 <vaibhavsagar> does MonadComprehensions generalise existing type signatures though?
+00:24:40 <c_wraith> But you *really* wouldn't want to use that definition for Vector
+00:24:50 <c_wraith> It an O(n^2) algorithm in common cases with Vector.
+00:24:57 <vaibhavsagar> but fusion!
+00:25:02 <c_wraith> irrelevant
+00:25:09 <Axman6> the Vector instance would begin with runSTArray $ do ... :P
+00:25:31 <phadej> Axman6: it won't. There's fusion framework to write stuff
+00:25:50 <Axman6> (or I guess you could write the list fusion stuff, but fusion isn't all it's cracked up to be)
+00:26:09 <Axman6> though it's more useful in Vector than it is in Text
+00:26:13 <vaibhavsagar> I just want to remove some Nothings from a Vector, why can't I do that within base :)?
+00:27:02 <c_wraith> because Vector isn't in base? :P
+00:27:25 <phadej> Axman6: watch https://www.youtube.com/watch?v=5PZh0BcjIbY&index=5&list=PLetHPRQvX4a9uUK2JUZrgjtC_x4CeNLtN
+00:27:53 <vaibhavsagar> fair enough c_wraith
+00:28:04 <c_wraith> vaibhavsagar: amusingly, fusion *will* for for using fromList and toList
+00:28:10 * Axman6 adds to Watch Later
+00:28:13 <c_wraith> err, will work for
+00:28:41 <phadej> there is mapMaybe in Data.Vector btw
+00:29:11 <c_wraith> vaibhavsagar: as that definition isn't recursive, the rewrites will actually fire
+00:29:28 <vaibhavsagar> how was my definition recursive?
+00:29:29 <phadej> mapMaybe f = unstream . inplace (S.mapMaybe f) toMax . stream -- fusionable!
+00:29:39 <phadej> *fusable
+00:30:07 <vaibhavsagar> so since catMaybes = mapMaybe id, we could easily have fusable catMaybes for Data.Vector?
+00:30:20 <phadej> yes
+00:30:36 <c_wraith> vaibhavsagar: yes, but not using things in base that don't know about vector.
+00:30:41 * Axman6 wrote some code for Text which is 100x faster than the version using fusion, but if any fusion exists in the production of the value it's working on, it immediately slows down to the original speed
+00:34:21 <Cale> Axman6: hm, just incompatible RULES?
+00:34:22 <saurabhnanda> I have multiple functions of the shape (a -> b -> c) and (a -> b -> c -> d). If I have to write a "massaging" function that can be passed `a` and `b` along with any one of aforementioned functions, so that it can massage the 'a' and 'b' params before calling the target function, how do I do it? (did this make sense to anyone else?)
+00:34:59 <Cale> saurabhnanda: Perhaps a and b should be packaged together into a single data type
+00:35:28 <saurabhnanda> Cale: trying to avoid that -- will trigger a refactor in a lot of other places.
+00:35:41 <Cale> saurabhnanda: so that you can write a function which does whatever that transformation is and then conveniently pass it along to the functions which need it
+00:36:22 <saurabhnanda> the functions in question are the WREQ series of get, getWith, post, postWith, etc. and I need to massage the Options and URL before calling them.
+00:36:25 <Axman6> Cale: the code worked directly on the backing memory (in some work to make a utf-8 backed Text value), and used some SIMD techniques, so anything that used fusion needed to first be written out
+00:36:27 <Cale> If the "massaging" of the a and b parameters is independent, of course, you just write functions a -> a and b -> b separately and use them
+00:37:50 <ertes-w> saurabhnanda: massage :: A -> B -> (A -> B -> r) -> r
+00:37:56 <ertes-w> saurabhnanda: like that?
+00:37:59 <Axman6> Cale: RULES helped a lot though, because it's possible to detect when this bad case is going to happen and just use the stream fusion version: foo (unstream t) = Stream.foo t
+00:38:39 <saurabhnanda> ertes-w: yes. but will that work with (a -> b -> c) and (a -> b -> c -> d), both?
+00:38:45 <ertes-w> saurabhnanda: yes
+00:38:51 <saurabhnanda> ertes-w: let me try...
+00:38:52 <ertes-w> notice that 'r' is universal
+00:38:58 <Axman6> which (probably) doesn't make things faster, but does reduce the need to allocate the Text if possible
+00:39:28 <ertes-w> saurabhnanda: also perhaps turn the arguments around: massage :: (A -> B -> r) -> A -> B -> r
+00:40:10 <saurabhnanda> ertes-w: can't do that -- doing this on top of WREQ functions. So have to deal with whatever they've given...
+00:40:11 <Cale> Yeah, it probably makes more sense to have the function argument first
+00:40:41 <Cale> saurabhnanda: You can, because ertes-w is talking about rearranging the arguments to a function you're going to write
+00:40:56 <saurabhnanda> ah okay, missed that
+00:41:16 <saurabhnanda> so you're saying something like -- withAuth getWith opts url
+00:41:32 <Cale> yeah
+00:42:11 <ertes-w> saurabhnanda: notice the type shape of 'massage'
+00:42:19 <ertes-w> massage :: (A -> B -> r) -> (A -> B -> r)
+00:42:33 <ertes-w> it takes a function and returns a slightly modified version of it
+00:43:01 <saurabhnanda> right... currying and right-associativity at work?
+00:43:08 <Cale> That certainly works... I feel a little uneasy in a case like this about placing so much importance on the particular structure of the arguments to these functions, but given that it already exists that way, I suppose it's fine.
+00:43:09 <ertes-w> yup
+00:46:23 <ertes-w> well, in the worst case arguments could be rearranged
+00:46:42 <ertes-w> :t flipped
+00:46:44 <lambdabot> (Functor f, Profunctor p) => p (b -> a -> c) (f (b' -> a' -> c')) -> p (a -> b -> c) (f (a' -> b' -> c'))
+00:47:50 <Cale> Yeah, you could always stick in a lambda, even :)
+00:48:57 <ertes-w> @let data Blah = Blah; data Blubb = Blubb; someFunc :: Blah -> Blubb -> (); someFunc _ _ = (); massage :: (A -> B -> r) -> (A -> B -> r); massage = id
+00:48:58 <lambdabot>  .L.hs:217:13: error: Not in scope: type constructor or class ‘A’
+00:48:58 <lambdabot>      |
+00:48:59 <lambdabot>  217 | massage :: (A -> B -> r) -> (A -> B -> r)
+00:49:20 <ertes-w> @let data Blah = Blah; data Blubb = Blubb; someFunc :: Blah -> Blubb -> (); someFunc _ _ = (); massage :: (Blubb -> Blah -> r) -> (Blubb -> Blah -> r); massage = id
+00:49:22 <lambdabot>  Defined.
+00:49:39 <ertes-w> :t over flipped massage someFunc
+00:49:40 <lambdabot> Blah -> Blubb -> ()
+00:49:45 <ertes-w> like that
+00:50:26 <ertes-w> there's probably also…
+00:50:28 <ertes-w> :t curried
+00:50:30 <lambdabot> (Functor f1, Profunctor p) => p (a -> b -> c) (f1 (d -> e -> f2)) -> p ((a, b) -> c) (f1 ((d, e) -> f2))
+00:50:52 <ertes-w> @let someFunc2 :: (Blah, Blubb) -> (); someFunc2 _ = ()
+00:50:54 <lambdabot>  Defined.
+00:51:04 <ertes-w> > over (curried . flipped) massage someFunc2
+00:51:07 <lambdabot>  <(Blah,Blubb) -> ()>
+01:21:47 <Alovenom> <3
+01:37:33 <krazEtch> what is haskell
+01:46:19 <ertes-w> a programming language for patient people
+01:46:32 <merijn> ertes-w: Shit, what am I doing here, then?
+01:47:09 <ertes-w> merijn: abusing haskell for getting shit done
+01:57:45 <Alovenom> is haskell-gamedev really deader than dead
+02:01:56 <ertes-w> Alovenom: it has never been dead, but it has always been rather slow
+02:02:17 <ertes-w> Alovenom: join us at our quiet little channel #haskell-game =)
+02:02:41 <[exa]> also some people moved to more general FRP discussion
+02:04:35 <ertes-w> kinda sad that most game-dev discussion seems to focus on FRP…  not that i don't like FRP (i certainly do), but there is so much more stuff missing
+02:05:00 <ertes-w> really basic stuff even like simple media loading and processing
+02:07:21 <Alovenom> I will join =)
+02:07:32 <Alovenom> I agree
+02:12:06 <saurabhnanda> is it just me or does search on stackage take too long?
+02:18:01 <dragon_> idk but fetching package index with stack is dreadfully slow
+02:23:07 <saurabhnanda> Cale: ertes-w you around?
+02:23:32 <saurabhnanda> that idea is not working because the signature of the underlying functions is (a -> b -> m c) and (a -> b -> c -> m d)
+02:23:40 <saurabhnanda> they're monadic actions.
+02:26:59 <ertes-w> saurabhnanda: pong
+02:27:22 <ertes-w> saurabhnanda: that doesn't matter
+02:27:50 <ertes-w> @let someFunc3 :: Blubb -> Blah -> Integer -> IO (); someFunc3 = undefined
+02:27:52 <lambdabot>  Defined.
+02:27:57 <ertes-w> :t massage someFunc3
+02:27:59 <lambdabot> Blubb -> Blah -> Integer -> IO ()
+02:28:38 <ertes-w> saurabhnanda: or do you need effects to massage the arguments?
+02:34:52 <saurabhnanda> ertes-w: I need to call some other effect in the same monad to massage the arguments.
+02:35:00 <saurabhnanda> ertes-w: get the auth token from the reader environment
+02:35:48 <ertes-w> saurabhnanda: one option is:  massage :: (MonadWhatever m) => A -> B -> m r
+02:35:57 <ertes-w> err
+02:36:17 <ertes-w> massage :: (MonadWhatever m) => (A -> B -> r) -> A -> B -> m r
+02:36:39 <saurabhnanda> that'll work for (a -> b -> m r), but will it work for (a -> b -> m (c -> d))
+02:36:51 <ertes-w> with a binary function f:  join (massage f x y)
+02:36:55 <saurabhnanda> because the sign of the underlying function will be (a -> b -> c -> m d)
+02:37:15 <ertes-w> with a ternary function f:  massage f x y >>= ($ z)
+02:37:57 <ertes-w> or to keep it somewhat uniform:  join (massage f x y <*> pure z)
+02:38:06 <saurabhnanda> the call-site will get complicated?
+02:38:16 <xelxebar> So, I do everything in bash these days and live on the command line. Would really like to learn Haskell and think I might absorb it naturally if I could somehow "replace bash with Haskell". Is it possible/reasonable to use ghci like a shell without relying on things like :!, shelly, or turtle?
+02:38:34 <ertes-w> saurabhnanda: you need some heavy class-based trickery to make it simpler than that…  i suggest to just go with it
+02:38:44 <saurabhnanda> ertes-w: hmm
+02:38:58 <ertes-w> saurabhnanda: it's uniform at least
+02:39:06 <ertes-w> 2 args:  join (massage f x y)
+02:39:12 <ertes-w> 3 args:  join (massage f x y <*> pure z)
+02:39:17 <ertes-w> 4 args:  join (massage f x y <*> pure z <*> pure w)
+02:39:31 <xelxebar> I've given it a bit of a go, but I hit some roadblocks with git and ssh as well as trying to install new packages from *within* ghci
+02:40:12 <merijn> xelxebar: I don't think it's reasonable to use ghci like a shell even with shelly/turtle, tbh
+02:40:25 <ertes-w> xelxebar: somewhat…  haskell is not really designed for shell programming, so you need some tool libraries to make it less verbose…  that's what shelly and turtle are
+02:41:00 <ertes-w> xelxebar: and even then using GHCi like a shell probably won't pay off except for some specific tasks where you can abstract from haskell features and libraries
+02:41:16 <ertes-w> for example sometimes haskell is nice for on the fly stream processing
+02:41:40 <mantasg> Hi guys. I'm struggling to parse a simple integer number with attoparsec. 
+02:41:40 <mantasg> maybeResult $ parse decimal "1432432.0" succeeds
+02:41:40 <mantasg> maybeResult $ parse decimal "1432432" fails
+02:41:40 <mantasg> Can somebody tell me how to parse integer without decimal point?
+02:41:52 <xelxebar> Well, thinking of userspace as "just" an interface to the kernel syscall API, naively one would think that haskell libraries would have nice abstractions to do all the things we want, no?
+02:42:28 <xelxebar> I don't feel like I learn much by relying on shelly or whatever and just calling out to, say grep
+02:42:51 <ertes-w> mantasg: i would expect 'decimal' to work for that
+02:43:14 <merijn> xelxebar: Well, how else would you run grep? Unless you plan to reimplement a much more poorly performing version of grep from scratch?
+02:43:24 <ertes-w> xelxebar: the issue is that doing a project with haskell involves some upfront cost
+02:44:12 <ertes-w> xelxebar: it's a great language for software engineering, not so great for quick-n-dirty one-off tasks
+02:44:28 <xelxebar> The problem is that shelly wrapping grep only gives very thin/dumb types by necessity. I would think that there are more "Haskelly" ways to achieve the same end that I would by using grep
+02:44:33 <ertes-w> xelxebar: that's why those libraries exist…  their aim is to reduce that upfront cost
+02:44:41 <ertes-w> xelxebar: even just importing all the stuff you need is a cost
+02:45:26 <merijn> xelxebar: Well, either you want strings, in which case you grep, or you end up writing your own parser and using a streaming library like pipes or conduit to stream parse stuff
+02:45:30 <ertes-w> xelxebar: for example just to write a small program that what 'cat' (without options) does requires at least some System.* imports
+02:45:34 <merijn> xelxebar: But that requires far more upfront engineering
+02:45:36 <geppettodivacin> mantasg: I've never used `parse` alone in my own work (I usually use parseOnly), but it seems like parse is still searching for more to the number.
+02:45:45 <geppettodivacin> mantasg: The result is (Partial _)
+02:46:27 <xelxebar> Well, my goal here is learning, not productivity, so I don't mind faltering a bit. Maybe the idea is just misguided...
+02:46:33 <geppettodivacin> mantasg: parseOnly decimal "1432432" returns Right 1432432
+02:46:49 <ertes-w> xelxebar: i suggest to just try it
+02:47:10 <ertes-w> xelxebar: you should be able to understand what we mean very quickly
+02:47:18 <mantasg> geppettodivacin thanks!
+02:48:07 <xelxebar> Well, I have, and I started to want to do things like mess with git repositories or ssh into a remote machine. I don't know enough to ask the right questions to find out how to "do X on remote machine" in a "Haskell" way.
+02:48:11 <geppettodivacin> mantasg: Was there a reason you were using (maybeResult . parse)?
+02:48:25 <geppettodivacin> mantasg: As opposed to parseOnly
+02:48:27 <xelxebar> Or even just pretty printing out a directory listing :P
+02:48:27 <ertes-w> xelxebar: here is a challenge: pipe the output of one program to another and count the number of lines of stdout output of the latter program
+02:48:37 <mantasg> geppettodivacin: I just wanted a Maybe value
+02:48:38 <merijn> xelxebar: Honestly? "Call ssh via system"
+02:48:45 <saurabhnanda> what's the easiest way to filter out certain fields (like apiKey) from a ToJSON instance without writing the instance by hand? I'm using $(deriveJSON defaultJson{sumEncoding=defaultTaggedObject} ''MyDataType)  currently
+02:49:19 <xelxebar> merijn: I can call out to ssh, but like I said, I'm trying to avoid system binaries at the moment as a learning exercise.
+02:49:47 <ertes-w> xelxebar: there is only an SSH *server* implementation in haskell, as far as i know, and no bindings to libssh i know of
+02:49:52 <merijn> xelxebar: That would involve implementing an SSH implementation from scratch, which, honestly, is freaking dumb idea
+02:50:12 <ertes-w> no, you could write an OpenSSH binding
+02:50:15 <merijn> xelxebar: bash and haskell are suited to wildly different things
+02:50:39 <merijn> ertes-w: Yeah, but why would you? If you're going to rely on OpenSSH, just freaking use the convenient executable they already have...
+02:50:56 <xelxebar> Well, I'm not talking about reimplementing ssh. If I just want to do something like check my server's uptime, I don't think I need all of openssh
+02:51:01 <ertes-w> merijn: of course
+02:51:23 <ertes-w> xelxebar: "all of openssh"?  you need SSH, OpenSSH is SSH =)
+02:51:35 <merijn> xelxebar: Well, unless you run your own server program to talk to on the server, you're going to have to use SSH, since it's the only sane way of communicating with remote machines
+02:51:56 <ertes-w> xelxebar: you need *something* on the remote side to talk back to you
+02:52:00 <ertes-w> and SSH is kinda the default choice
+02:52:55 <ertes-w> and now just imagine for a moment the complexity associated with using a different secure protocol, including not only implementing and deploying a remote server, but also managing extra keys
+02:53:13 <ertes-w> and an extra configuration just for your program, ignoring the already configured and ready-to-go SSH
+02:53:18 <xelxebar> I don't know the ssh protocol, but it doesn't seem unreasonable that one would just need a portion of the protocol to achieve certain tasks, like calling 'uptime' on the remote.
+02:53:44 <vaibhavsagar> i gotchu fam: https://github.com/glguy/ssh-hans
+02:53:45 <ertes-w> SSH has a few subprotocols for different things, and calling remote commands is one of them
+02:53:46 <merijn> xelxebar: The only thing SSH does is "connect to remote machine, run command there"
+02:54:19 <ertes-w> xelxebar: that protocol is used whenever you invoke "ssh target cmd"
+02:54:25 <merijn> vaibhavsagar: Yeah...I would *never* use something untested like that
+02:54:32 <vaibhavsagar> untested?
+02:54:48 <vaibhavsagar> I would imagine that Galois tests that quite thoroughly
+02:55:02 <ertes-w> (i wish HaNS weren't HaLVM-specific)
+02:55:02 <vaibhavsagar> I'd happily use anything by glguy over my code
+02:55:09 <merijn> vaibhavsagar: I would imagine it not close to as battle-tested and analysed as OpenSSH
+02:55:19 <xelxebar> Well, it's a little more involved than that. There are things like buffering the command line and things for interactive use that non-interactive doesn't have to worry about.
+02:55:29 <merijn> And given that literally every unix machine on the planet right now has OpenSSH, what's the point?
+02:55:46 <ertes-w> xelxebar: "ssh target cmd" is non-interactive…  you don't even get a terminal by default
+02:56:08 <vaibhavsagar> you're talking to the person who implemented git for funsies: https://github.com/vaibhavsagar/duffer
+02:56:14 <merijn> vaibhavsagar: Like, give me one good reason not to use OpenSSH
+02:56:20 <vaibhavsagar> it's not pure Haskell?
+02:56:34 <vaibhavsagar> and you can't use it as a library?
+02:56:34 <merijn> That's not a good reason, tbh
+02:56:40 <ertes-w> vaibhavsagar: that's an idealist's reason
+02:56:56 <merijn> vaibhavsagar: None of you programs are pure Haskell, since GHC's runtime isn't written in Haskell either
+02:57:15 <xelxebar> Hey, I'm just trying to figure out a way that I could fit learning Haskell into my already crammed schedule. "Replacing bash" is just a dumb idea I had like "use stairs instead of elevator" for exercise. I'm not *actually* trying to reimplement ssh or something, I just thought that I may be unaware of some better way than calling out to the system binary.
+02:57:22 <ertes-w> the only reason i can imagine why that project even exists is that you don't get to use OpenSSH from a HaLVM program
+02:57:25 <vaibhavsagar> what does that have to do with my programs?
+02:57:33 <vaibhavsagar> my programs still get to be pure Haskell
+02:58:23 <xelxebar> Exactly, calling the ssh binary gives really crappy types wrapped around what we really want to do.
+02:58:31 <glutamate> @2+2
+02:58:31 <lambdabot> Unknown command, try @list
+02:58:36 <glutamate> @list
+02:58:36 <lambdabot> What module?  Try @listmodules for some ideas.
+02:58:38 <ertes-w> xelxebar: here is an example "script" i wrote: https://github.com/esoeylemez/config/blob/master/scripts/lock-desktop.hs
+02:58:40 <vaibhavsagar> exactly, thank ou xelxebar
+02:58:51 <ertes-w> xelxebar: all it does is call xtrlock with varying arguments
+02:59:05 <merijn> Well, who am I to stop masochists from suffering
+02:59:06 <ertes-w> xelxebar: it's done without shelly/turtle
+02:59:09 <glutamate> @listmodules
+02:59:09 <lambdabot> activity base bf check compose dice dict djinn dummy elite eval filter free fresh haddock help hoogle instances irc karma localtime metar more oeis offlineRC pl pointful poll pretty quote search
+02:59:09 <lambdabot> slap source spell system tell ticker todo topic type undo unlambda unmtl version where
+02:59:24 <ertes-w> xelxebar: (mostly because i don't really like those)
+02:59:39 <vaibhavsagar> ertes-w: do you get a compilation error when you pass xtrlock the wrong arguments?
+02:59:48 <xelxebar> ertes-w: Thanks. I'll take a look
+02:59:50 <vaibhavsagar> that's one good reason to use something in Haskell
+03:00:17 <ertes-w> vaibhavsagar: no
+03:00:22 <vaibhavsagar> otherwise you might as well use bash :)
+03:00:28 <ertes-w> vaibhavsagar: no
+03:00:34 <glutamate> @faq Can Haskell make coffee?
+03:00:34 <lambdabot> https://wiki.haskell.org/FAQ
+03:00:58 <ertes-w> vaibhavsagar: there is a trade-off between the amount of testing and the amount of reinventing you have to do
+03:01:12 <glutamate> @faq Is Predicate a functor?
+03:01:12 <lambdabot> https://wiki.haskell.org/FAQ
+03:01:38 <vaibhavsagar> yes, you're right
+03:01:44 <ertes-w> vaibhavsagar: and i'd rather not reinvent xtrlock, partly because the code would have been 20 times as long, and partly because locking is security-related, and i don't trust myself to understand all the details involved in *properly* locking an X session
+03:01:46 <xelxebar> I find it hard to believe that no haskeller has ever wanted to do filesystem tasks or syscalls on a remote machine for some system...
+03:02:09 <vaibhavsagar> xelxebar: have you seen propellor?
+03:02:23 <ertes-w> vaibhavsagar: also reading C code makes my eyes bleed, so i'd rather not figure out how xtrlock works…  i'd rather just use it =)
+03:02:28 <vaibhavsagar> https://propellor.branchable.com/
+03:02:39 <ertes-w> xelxebar: i do it all the time, and i use SSH for it
+03:02:51 <vaibhavsagar> ertes-w: that's fair, but even a typesafe wrapper around SSH in Haskell would be nicer that shelling out
+03:02:59 <merijn> xelxebar: We do, but we just use ssh
+03:03:40 <ertes-w> vaibhavsagar: are you familiar with type-safe routing?
+03:03:43 <ertes-w> in web apps
+03:03:52 <xelxebar> vaibhavsagar: Actually, yeah. I've looked at it cursorily.
+03:06:04 <xelxebar> merijn: Hmmm... Is it possible to just call the ssh binary and build reasonable typechecks around it for specific use cases?
+03:06:09 <ertes-w> vaibhavsagar: at some point i abandoned type-safe routing completely, because seriously getting my routes wrong is the least of my worries, and it's so easy to get it right without type-level help that i don't feel like investing into those libraries anymore…  the investment is unreasonably large for that miniscule pay-off
+03:06:35 <xelxebar> Like, if I wanted a list of files in my home directory instead of just a blob of text from ls
+03:07:03 <ertes-w> vaibhavsagar: same happened with all the "database abstraction" libraries i tried to use…  they always promise safety, but never has a library promised that it wouldn't get in my way, so that's what ended up happening
+03:07:13 <xelxebar> ertes-w: Oh. That's not something I'd have expected.
+03:07:21 <ertes-w> these days i'm back to writing SQL
+03:08:17 <xelxebar> I've searched for type safe sql libraries before and apparently they exist. Have you munched on these much?
+03:09:10 <xelxebar> Also, completely random question, but in abstract CT gobbledygook, what is applicative?
+03:10:42 <xelxebar> Oh. I should google before blabbing: https://bartoszmilewski.com/2017/02/06/applicative-functors/
+03:25:18 <Yotam_> Whenever I start a new project with intero I don't get completions or types untill I build it. Is there a way to make intero know those things before?
+03:40:09 <mivael> hi all
+03:40:56 <Yotam_> sup mivael
+03:42:34 <mivael> having a question regarding Parsec   :)
+03:44:34 <mivael> Could not find module ‘Text.Parsec’ (while trying to import in ghci).  I thought parsec is kind of a basic package when installing haskell platform (I'm on Ubuntu 16.04), is not it?
+03:47:14 <brynedwards> mivael: This page says parsec is only in the 'Full Platform' https://www.haskell.org/platform/contents.html
+03:47:40 <brynedwards> Although I'm not actually sure what that even is...I'm not familiar with haskell platform
+03:48:33 <brynedwards> I suggest trying `cabal install parsec` first, then try to import `Text.Parsec` in ghci again
+03:48:47 <mivael> brynedwards, thank you for that page
+03:51:52 <mivael> brynedwards, I'm interested rather not in installing it but in understanding why this specific package is not in kind of basic set of libraries.  There is a reason, I'm sure, the question is what reason it is.  (I somehow feel that text parsing is a basic functionality and should be available by default.  Maybe Parsec is considered like not "a right choice" for this for some reason?)
+03:56:54 <mivael> (I'm aware of Text.Read but I have an impression it is not used by many because of performance issues.)
+03:58:39 <MarcelineVQ> Nothing so judgemental as the right or wrong choice, just that the basic setup is what's needed to use ghc and cabal. Everyone needs those but what you need beyond those is quite different from project to project.
+04:00:10 <MarcelineVQ> for example I've not even heard of a number of the things on this Libraries with Full Platform listing, and more than half I've not used
+04:02:36 <MarcelineVQ> giving everyone parsec when megaparsec or Earley or trifecta might fit their project better isn't super handy. Especially if the platform libraries are installed globally, that can cause version clashes, though that's becoming less of a thing with work benig done on Cabal
+04:07:27 <mivael> MarcelineVQ, would it be close to the truth if one said that the main reason parsec (or another parser) is not included by default is the absence of agreement on which of parser solutions is superior comparing to the others in most cases?
+04:07:55 <ertes-w> xelxebar: i have tried all sorts of libraries for DB abstractions…  my conclusion is that "database abstractions" simply don't work…  the only thing i could imagine to work is perhaps a "type-safe sqlite wrapper"
+04:08:55 <ertes-w> xelxebar: what i do now is to write an application-specific DSL with driver-specific backends, and that's much more maintainble…  it also enables some nice things i couldn't do before like writing an STM backend for testing
+04:09:43 <MarcelineVQ> mivael: depends who you ask, I'd say no for the reasons above.
+04:10:26 <MarcelineVQ> as much as possible it's better to prefer your project's manager to handle libraries over installing them globally, this means things like cabal sandbox, or a stack project, or using nix. this also means it's a good idea not to type `cabal install parsec` because now there's one version of parsec everything can see and it might not be the one you need for every project or dependency
+04:10:55 <mivael> By the way, there are Text.ParserCombinators.ReadP and Text.ParserCombinators.ReadPrec in 'base' package.  Anyone could say whether they are usable (handy and fast for simple text parsing cases)?
+04:13:04 <MarcelineVQ> I used it for a cli program to check it out, was entirely useable but subjectively I'd prefer something like megaparsec for the role it fits.
+04:13:58 <MarcelineVQ> And mostly because there's slight differences in behavior between the two that I was just more used to one way, though I can't recall what they were now.
+04:14:39 <merijn> mivael: They're usable, but slow as shit
+04:14:51 <merijn> mivael: They're used to implement instance of Read (which is also slow)
+04:15:23 <mivael> merijn, understood, thanks
+04:15:28 <merijn> mivael: One (strong) argument for keeping libraries separate from base is that libraries can evolve faster, since updates are no longer tied to compiler updates
+04:16:04 <merijn> mivael: Projects like (mega)parsec can be updated many times during a compiler version's release cycle. Base can only be upgraded when your compiler is
+04:16:31 <mivael> merijn, fair enough.  Thank you for explanation!
+04:16:43 <merijn> MarcelineVQ: Or you can use cabal new-build and you can forget about sandboxes ;)
+04:18:10 <MarcelineVQ> merijn: I'm abstaining from advocating that until there's a new-install but I'm a big fan of how things are going
+04:18:45 <merijn> MarcelineVQ: You only need new-install for binaries, no?
+04:19:06 <merijn> MarcelineVQ: Also, I'm hoping getting more people to use new-build will speed up contributions to things like new-install :p
+04:19:08 <MarcelineVQ> Yes just to fetch them from the morasse of the build site
+04:19:39 <MarcelineVQ> entirely fair :>
+04:20:10 <merijn> MarcelineVQ: Have you looked at cabal-plan?
+04:20:23 <merijn> MarcelineVQ: "cabal-plan list-exes" gives you executables + path
+04:20:37 <merijn> Making that part easier :)
+04:22:59 <MarcelineVQ> Thank you, I'll likely find a use for this
+04:33:25 <ertes-w> i wish writing CPS-transformed stuff were easier
+04:33:39 <ertes-w> i feel like most of this brain-twisting exercise could be automated
+04:43:45 <mivael> Could someone hint me what (s -> t) syntax means in 'class Monad m => Stream s m t | s -> t where ...'?   ( http://hackage.haskell.org/package/parsec-3.1.11/docs/Text-Parsec.html#t:Stream )
+04:46:39 <merijn> mivael: It's a functional dependency
+04:46:53 <merijn> mivael: Also, I would probably recommend megaparsec over parsec for new projects
+04:54:38 <orion> Why not attoparsec?
+04:55:38 <merijn> orion: attoparsec is suited for machine produced input, not so much for human input
+04:55:54 <orion> I see.
+04:56:00 <merijn> orion: attoparsec = speed at any cost (including error reporting)
+04:56:11 <merijn> So attoparsec's errors basically amount to "shit's fucked!"
+04:56:20 <merijn> Whereas megaparsec tries to report useful parse errors
+04:56:37 <merijn> (but is therefore less fast)
+04:58:28 <orion> I See.
+05:01:42 <mivael> orion, attoparsec is usually not supported by competitive programming sites (not safe)
+05:02:59 <mivael> merijn, I'll check the megaparsec option, thanks
+05:23:25 <xormor> I have used ghci and BASIC. I like both.
+05:23:41 <xormor> my mother asked if Haskell is like BASIC. I think not.
+05:23:57 <xormor> both have good features, but they are different.
+05:32:49 <APic> lol
+05:33:16 <stevenxl> Hi folks. Can anyone point me to where the applicative of functions is defined?
+05:33:20 <stevenxl> I've looked here: https://hackage.haskell.org/package/base-4.10.0.0/docs/Prelude.html#t:Applicative
+05:33:21 <stevenxl> can't fidn it
+05:33:55 <ahihi> it's "Applicative ((->) LiftedRep LiftedRep a)"
+05:34:14 <stevenxl> ahihi: Oh. That's surprising. 
+05:35:12 <stevenxl> ahihi: Thank you. 
+05:35:49 <ahihi> yeah, iirc the LiftedRep parameters are related to levity polymorphism
+05:37:28 <stevenxl> ahihi: Thank you. I still don't know how to build a web app in Haskell, so that's likely something I don't need to know yet. I'll tuck it away for later. 
+05:37:31 <stevenxl> ;)
+05:37:42 <ahihi> :)
+05:39:06 <ahihi> i'm not super familiar with it either, just aware it's a thing that exists
+05:46:41 <texasmynsted> I have been writing my type signatures mostly on one line.  I want to develop a good style habit.  Should I be doing multi-line type signatures?
+05:46:48 <texasmynsted> Here is an example:  https://github.com/data61/fp-course/blob/master/src/Course/Optional.hs#L26
+05:47:10 <texasmynsted> It would easily fit in 80 characters on one line.  (I think.)
+05:48:28 <texasmynsted> I think it is about 60 characters in the link I provided.  I like how readable that is, so I think this might be the better way to go.
+05:50:28 <lyxia> texasmynsted: it seems overkill for that one
+05:50:49 <texasmynsted> It does but I am asking as a matter of style
+05:54:19 <lyxia> I would use it only for long signatures or when I want to add per-argument haddocks
+05:55:25 <texasmynsted> ok
+05:55:28 <texasmynsted> Thank you
+05:55:38 <ertes-w> texasmynsted: doesn't really matter for that one…  but one consideration is that you're now using 4 LoC for the signature, which means less information will fit on one screen page
+05:56:11 <texasmynsted> hmm.  Yes
+05:56:30 <texasmynsted> It fits in under 80 characters, so seems reasonable to be on one line
+05:57:18 <ghost83> https://github.com/data61/fp-course/blob/master/src/Course/Optional.hs#L26
+05:57:38 <ghost83> oops ment to copy that to my browser
+06:06:15 <texasmynsted> I have been trying to go with this --> https://github.com/tibbe/haskell-style-guide/blob/master/haskell-style.md
+06:13:53 <stevenxl> Hi folks. I have a folder with a bunch of haskell source files. The source files are named 01-Reader.hs, for example because I am going through the Haskell Book and I wanted to have a way of ordering the files. Anyway, How can I import '01-Reader.hs' from '02-AnotherFile.hs'?
+06:15:31 <lyxia> Rename the file
+06:18:09 <texasmynsted> oops got rather disconnected...
+06:18:12 <bolver> hey, last i fiddled with ghc-mod was some time agao, when ghc 7.10 was released.  at that time ghc-mod (with emacs) was buggy and a real pain.  have things improved now with ghc-mod?
+06:18:27 <texasmynsted> lyxia: who/what as rename the file in response to?
+06:19:02 <bolver> i mean, is it worth it really -- this ghc-mod?
+06:19:13 <lyxia> texasmynsted: to stevenxl who wants to import 01-Reader.hs in 02-AnotherFile.hs
+06:19:38 <texasmynsted> ty
+06:19:45 <stevenxl> lyxia: thanks. I did.
+06:20:29 <ertes-w> texasmynsted: use whatever style *you* find readable…  now as well as in six months…  there is no reason to follow a strict style guide in haskell
+06:20:47 <ertes-w> texasmynsted: it's a matter of taste…  for example i find that style guide you linked terrible
+06:20:58 <ertes-w> lines starting with commas make my eyes bleed
+06:21:04 <texasmynsted> lol
+06:21:11 <texasmynsted> what does your style look like?
+06:21:44 <ertes-w> texasmynsted: here's what my code looks like: https://github.com/esoeylemez/predictive/blob/master/Data/Predictive.hs
+06:22:58 <texasmynsted> oh nice
+06:23:09 <texasmynsted> very clean, readable and documented.
+06:23:11 <Tuplanolla> I always put punctuation and keywords at the end of the line. It makes indentation constant almost everywhere.
+06:23:49 <texasmynsted> I think the idea for punctuation at the start is to simplify commenting and uncommenting
+06:23:52 <Tuplanolla> It looks terrible, but not much worse than anything else.
+06:24:31 <ertes-w> texasmynsted: how?
+06:25:17 <ertes-w> texasmynsted: see lines 40-43
+06:25:35 <texasmynsted> yes, would not help there
+06:25:41 <texasmynsted> like in cabal file I think
+06:26:14 <ertes-w> there is only one case where i have punctuation at the start of a line:  arrows in type signatures
+06:26:26 <ertes-w> not because i like it, but because haddock doesn't handle it properly
+06:26:48 <ertes-w> example: lines 118-121
+06:26:51 <texasmynsted> I like your use of | and ^ in your comments.  Where is that from?
+06:26:57 <ertes-w> that's haddock
+06:27:15 <ertes-w> texasmynsted: haddock generates this: https://hackage.haskell.org/package/predictive-0.1.0/docs/Data-Predictive.html
+06:27:22 <texasmynsted> lol oh 
+06:27:24 * texasmynsted facepalm
+06:27:32 <texasmynsted> I have not used haddock
+06:28:05 <texasmynsted> wow.  
+06:28:06 <Tuplanolla> If only Haddock allowed `-- |` within type signatures.
+06:28:18 <lyxia> texasmynsted: it's pretty easy to pick up
+06:28:37 <ertes-w> '|' and '^' make haddock read your comments as documentation, and they document the thing after (|) or before (^) the comment
+06:29:26 <texasmynsted> Looks very useful
+06:30:49 <texasmynsted> Hmm I need to check into this one later --> https://github.com/esoeylemez/rapid
+06:31:26 <hexagoxel> and '*' and '#'. and potentially more. see https://github.com/haskell/haddock/issues/622
+06:31:49 <ertes-w> texasmynsted: that one's fun =)
+06:32:03 <bolver> hey, ghc-mod -- any feedback on it will be appreciated ... last time i used it (with ghc 7.10), things were not nice.  has it got better now?
+06:32:47 <texasmynsted> bolver, not sure what issue you are having with ghc-mod, and I use vim rather than emacs, so really do not think I would be of much help to you.
+06:33:45 <bolver> texasmynsted: alright, thanks  ... i am asking in general to anyone who has any feedback on it
+06:34:30 <texasmynsted> ertes-w: Do you have a talk/video or something on this?  https://hackage.haskell.org/package/rapid
+06:34:32 <ertes-w> i don't think any emacs user uses ghc-mod…  both haskell-mode and intero have GHCi integration
+06:34:45 <ertes-w> texasmynsted: nope, but there is a tutorial in the haddocks
+06:34:53 <ertes-w> texasmynsted: just look at the Rapid module
+06:35:00 <Squarism> if i want to up my game in FP the academia way - should i attend a course in advanced FP or category theory
+06:35:04 <Squarism> ?
+06:35:09 <bolver> ertes-w: intero demands stack, and i am using just cabal at the moment
+06:35:19 <texasmynsted> I can gist my .vimrc file if that is helpful
+06:35:26 <ertes-w> bolver: i use haskell-mode for that reason
+06:35:26 <merijn> Squarism: Not necessarily
+06:35:39 <bolver> ertes-w: i suppose i can use dante?
+06:35:46 <merijn> Squarism: I'd say type theory and PLT is probably more interesting/useful
+06:35:48 <bolver> ertes-w: what reason?
+06:35:50 <ertes-w> bolver: i think its GHCi integration has everything that ghc-mod offers
+06:36:01 <ertes-w> bolver: i don't use stack either
+06:36:11 <Squarism> merijn, i would like to attend a class - cause its free. Oh ok.
+06:36:13 <bolver> ertes-w: good :)
+06:36:25 <Squarism> merijn, PLT?
+06:36:32 <ertes-w> bolver: i don't have any experience with dante…  so far haskell-mode has served me well
+06:37:11 <bolver> ertes-w: dante looks a lot simpler than the ghci integration in haskell
+06:37:15 <bolver> at least to me
+06:37:37 <bolver> ertes-w: anyway, thanks for your inputs
+06:37:55 <ertes-w> you're welcome
+06:37:57 <merijn> Squarism: Programming Language Theory
+06:50:28 <madknight> i've written a small api with aeson and scotty, it serves 1000 entries (250kb) of json but eats up a lot of memory 2 GB plus, i think i have a memory leak, maybe due to laziness, whats the general recommendation regarding memory / defensive memory consumption programming techniques?
+06:50:49 <barrucadu> Have you tried a heap profile?
+06:50:53 <merijn> madknight: Have you profiled it?
+06:51:45 <madknight> no i'm relatively new to haskell, whats the stack command for profiling?
+06:52:14 <merijn> madknight: I don't use stack, but presumably something like --enable-profiling to build with profiling
+06:52:18 <barrucadu> You can build with profiling enabled like so `stack build --profile`
+06:52:36 <merijn> madknight: The GHC user guide has good docs on what kinda profiling options you have
+06:52:36 <barrucadu> Then see the GHC users' guide for heap profiling: https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/profiling.html#profiling-memory-usage
+06:53:19 <pupp> Hello. Tried running ghci.exe, it just prints "Access violation in generated code when reading 7719ffff"
+06:53:25 <pupp> Os is windows 7 64bit, compiler was downloaded from official site today, 32bit.
+06:54:34 <ertes-w> madknight: is that 250 KiB times 1000, or 250 KiB total?
+06:56:04 <madknight> ertes-w, 1 x 250 KiB per get request
+06:56:34 <ertes-w> madknight: straight from disk, or do you have the data in memory?
+06:57:22 <madknight> ertes-w, memory, i fetch data from other apis, aggregate the data and serve it
+06:57:50 <ertes-w> madknight: keep in mind that the memory representation of an aeson 'Value' is quite a bit more expensive than the JSON it eventually becomes
+06:58:01 <nicknight> hi haskell lists are fun than python lists 
+06:58:24 <ertes-w> madknight: so if you're keeping pieces of JSON in memory for service, better keep them in their serialised form
+06:58:45 <madknight> ertes-w, yes i expected that, but even if it would be 10x times higher then it would be around 2,5 MB which would be perfectly fine
+06:59:05 <ertes-w> madknight: so you aggregate per request?
+06:59:32 <nicknight> I started haskell yesterday and could write basic functions....Why internet is so liar I heard haskell toughest language and I dont feel like that
+06:59:48 <madknight> ertes-w, here you can see what i do https://github.com/madnight/grendel/blob/master/app/Main.hs#L94
+07:00:23 <madknight> ertes-w, i try to aggregate first (once) and then serve it
+07:01:27 <ertes-w> madknight: yeah, i'm pretty sure one of those values in lines 96, 97 is responsible
+07:02:22 <madknight> ertes-w, yup that's also what i think, could i make this somehow strict?
+07:02:47 <ertes-w> madknight: strictness will only make those values take the memory upfront
+07:03:45 <madknight> ertes-w, by the way stars is 1 x api call and repos is 10 x api calls so 11 api calls and aggregation upfront, then "static" serving
+07:04:52 <ertes-w> madknight: if you import Control.DeepSeq, then you can use the following action to evaluate them (given enough NFData instances):  stars `deepseq` pure ()
+07:06:20 <madknight> ertes-w, ok i'll try that and whats about my data structure, i read that "data" is lazy, should i use "newtype"?
+07:08:37 <ertes-w> madknight: i can't properly summarise that on IRC…  in any case, data and newtype are only marginally related to strictness
+07:09:07 <ertes-w> madknight: but laziness is probably not the reason why your program consumes so much memory
+07:10:15 <ertes-w> madknight: you might of course have a memory leak, but i don't think so…  my guess is that your data is simply very memory-expensive
+07:10:42 <ertes-w> you can try to reduce the amount of data that you hold, or you can switch to more memory-compact representations
+07:11:24 <merijn> This also looks like it could benefit from some form of streaming implementation
+07:12:48 <ertes-w> madknight: you're pretty much serving a static document, aren't you?  why don't you just serialise it to JSON upfront?
+07:13:04 <madknight> ertes-w, well i basically expect to have 1000 records of this https://github.com/madnight/grendel/blob/master/src/Data/Grendy/GraphQL.hs#L21 so a few Strings and Maybe Strings
+07:13:50 <ertes-w> i.e. after aggregation just encode it to a ByteString and serve that one
+07:14:07 <ertes-w> (you'll have to set the content-type header explicitly in that case)
+07:14:29 <kuribas> I wonder why it's so hard to prove the advantages of static types.  From my experience in a dynamic language, having to run the program every time just to find small errors, it seems that simple type errors give a big boost in productivity.
+07:15:11 <kuribas> Although I am skeptical for the claim that it brings less bugs.
+07:15:30 <kuribas> It certainly makes maintenance and refactoring easier and faster.
+07:16:11 <madknight> ertes-w, okay but i can expect that everything that i write before the `scotty` function is already evaluated upfront
+07:17:07 <ertes-w> madknight: to an expensive representation
+07:17:53 <ertes-w> madknight: my suggestion is to go to the cheap ByteString not for each request, but upfront
+07:19:35 <madknight> ertes-w, alright i'll compile it down to bytestring upfront and serve that raw byestring with scotty, i'll report later if that solution worked out
+07:20:41 <ertes-w> madknight: be sure to use a strict ByteString, and to force it before you enter scotty, so that GC can kick in early
+07:21:17 <ertes-w> like this: let !jsonStr = encode…
+07:22:18 <ertes-w> or rather:  let !jsonStr = Bl.toStrict (encode …)
+07:22:49 <ertes-w> aeson gives you a lazy ByteString, which is rather pointless in this case
+07:24:32 <madknight> by the way here is the profiling report https://raw.githubusercontent.com/madnight/grendel/master/grendel-exe.prof
+07:36:03 <pupp> I'm trying to type "cabal list", but it prints:
+07:36:12 <pupp> The program 'ghc-pkg' is required but the version of
+07:36:12 <pupp> D:\ghc-8.2.1-i386-unknown-mingw32\ghc-8.2.1\bin\ghc-pkg.exe could not be
+07:36:12 <pupp> determined.
+07:39:00 <pupp> I need to install Control.Monad.State package somehow
+07:55:01 <hexagoxel> pupp: package 'mtl'. you can determine by looking at https://hayoo.fh-wedel.de/?query=Control.Monad.State
+08:01:11 <pupp> "cabal install mtl" says "the version of <full path to ghc-pkg.exe> could not be determined"
+08:01:29 <pupp> I downloaded both just today, I think I should be fine
+08:01:31 <merijn> Sounds like your ghc install is broken
+08:03:32 <pupp> Downloaded them from here
+08:03:34 <pupp> https://www.haskell.org/ghc/download_ghc_8_2_1.html
+08:03:37 <pupp> https://www.haskell.org/cabal/download.html
+08:03:57 <pupp> 32bit versions, even though os and computer is 64bit.
+08:06:10 <pupp> ghc-pkg --version
+08:06:10 <pupp> GHC package manager version 8.2.1
+08:06:18 <pupp> cabal --version
+08:06:18 <pupp> cabal-install version 2.0.0.0
+08:06:19 <pupp> compiled using version 2.0.0.2 of the Cabal library
+08:06:37 <pupp> --version works for both
+08:08:17 <pupp> os is windows 7
+08:09:41 <pupp> maybe that ghc build is 4 years old by now, I'm not sure how old 8.2.1 is.
+08:10:10 <merijn> 8.2.1 is less than a week old
+08:10:22 <merijn> Which, incidentally, might be the problem :p
+08:11:40 <pupp> should I file a bug or something?
+08:12:49 <hexagoxel> merijn: you have long weeks
+08:13:38 <hexagoxel> or is this specific to the windows release or something?
+08:14:11 <merijn> hexagoxel: afaik 8.2.1 isn't even officially out?
+08:14:19 <merijn> hexagoxel: Last I heard was 8.2.1-rc1
+08:14:25 <hexagoxel> that's 8.2.2
+08:14:30 <merijn> hmm
+08:14:32 <merijn> Could be
+08:14:47 <merijn> I lag by one release anyway
+08:14:54 <hexagoxel> "22 Jul 2017 GHC 8.2.1 Released!"
+08:16:04 <cocreature> merijn: we even have rc1 for 8.2.2 by now ;)
+08:16:59 <merijn> cocreature: Yeah, I was confusing 8.2.2 and 8.2.1 I think
+08:20:42 <MUWA> testing ...
+08:21:31 <cocreature> MUWA: test passed
+08:21:49 <MUWA> OK
+08:21:56 <shapr> test graded at 70%
+08:22:34 <MUWA> well, i enjoy this daily test :)
+08:24:20 <MUWA> why is so silent in here. i tough this channel is popular ???
+08:24:53 <shapr> we're busy writing Haskell code
+08:24:55 <barrucadu> Sometimes there is quiet
+08:25:04 <shapr> MUWA: I also heard this channel was popular
+08:25:08 <merijn> shapr: I'm not, I'm making slides :\
+08:25:17 <merijn> shapr: You probably heard that before anyone else :p
+08:25:19 <shapr> merijn: but you're using beamer and org-mode, right?
+08:25:50 <shapr> MUWA: are you learning Haskell?
+08:26:00 <merijn> shapr: Just beamer, no org-mode
+08:26:06 <merijn> Since I don't do emacs
+08:26:07 <MUWA> shapr: what's the point ? this is irc not compiler :)
+08:26:41 <shapr> > let factorial n = product [1..n] in factorial 25
+08:26:44 <lambdabot>  15511210043330985984000000
+08:27:06 <shapr> MUWA: there's an interpreter!
+08:27:36 <pupp> do you have a forum anywhere? I'm gonna go soon.
+08:27:46 <pupp> or bug tracker?
+08:28:03 <merijn> pupp: Also, you might wanna try installing via stack
+08:28:13 <pupp> stack?
+08:28:29 <MUWA> shapr: so, what's different between haskell and other programming language ?
+08:28:33 <merijn> pupp: https://docs.haskellstack.org/en/stable/README/
+08:28:43 <shapr> MUWA: haskell far more awesome
+08:28:56 <MUWA> shapr: i mean there is something unique about haskell
+08:28:57 <wollw> haskell is math
+08:29:21 <glguy> pupp: If ghc.exe isn't in your path you can add it to your path, or you can specify the path to GHC for cabal with the -w flag
+08:29:24 <MUWA> shapr: for geek ?
+08:29:33 <wollw> MUWA: for art too
+08:29:36 <shapr> MUWA: yeah, Haskell is the only production language that has purity and non-strictness by default.
+08:29:42 <pupp> glguy, already added
+08:30:19 <glguy> pupp: so typing "ghc-pkg list" prints out the package list now?
+08:30:33 <pupp> yep
+08:30:55 <pupp> it's that cabal can't work with ghc-pkg for some reason
+08:32:40 <MUWA> shapr: how difficult haskell, is the command like assembly ?
+08:32:47 <shapr> MUWA: http://tryhaskell.org/
+08:33:02 <shapr> MUWA: haskell is about as far away from assembly as you can get
+08:33:15 <shapr> I find it easy to teach Haskell because of the equational reasoning
+08:33:48 <glguy> pupp: Have you pasted the command output to a pastebin?
+08:33:50 <maerwald> MUWA: the only thing haskell has really taught me compared to other programming languages is how I think about effects of my functions. You can apply that reasoning everywhere, so that is really useful. Most programmers don't do that.
+08:34:44 <maerwald> effects as in: changing state, reading files, doing network calls... or all at once
+08:34:59 <wollw> Haskell helped me care about my real world side effects too. * goes back to hiding in a monad *
+08:35:11 <pupp> glguy, "cabal install mtl" results in  "the version of <full path to ghc-pkg.exe> could not be determined"
+08:36:48 <nicknight> hi shapr  I am into haskell now 
+08:37:55 <glguy> pupp: Do you get any extra output with -v -v2 or -v3?
+08:38:12 <shapr> nicknight: awesome! how are you liking it?
+08:38:43 <MUWA> shapr: this is amazing!, but I've fallen in love with c# already
+08:39:02 <shapr> MUWA: fair enough, come back when you're done with C#
+08:39:20 <nicknight> shapr:  I like haskell lists than python lists as far as now but I need to study more 
+08:39:29 <shapr> I did C# for a living for just over two years, it's not a terrible language.
+08:40:01 <pupp> glguy, yes, post it on pastebin?
+08:40:11 <glguy> pupp: That's a good idea.
+08:40:44 <nicknight> shapr:  I mean to say functions like take drop etc are reall cool though not important I guess
+08:40:53 <MUWA> shapr: what programming languages ​​you've learned ?
+08:41:15 <shapr> nicknight: they're important sometimes
+08:41:51 <nicknight> shapr:  ok  
+08:41:52 <shapr> MUWA: many, but the ones I've been paid to write that immediately come to mind include Python, Haskell, Java, C#, SQL
+08:41:59 <pupp> glguy, https://pastebin.com/qe6TUyXj
+08:42:23 <shapr> I've also written Ruby, shell scripts, Go, C, C++ and other languages at my jobs, but those weren't 'primary' languages. 
+08:43:02 <MUWA> shapr: good for u :)
+08:43:03 <nicknight> shapr:  your primary languages are python and haskell as you told yesterday...but what do you do ? backend developer etc?
+08:43:06 <glguy> pupp: and does this command work when you run it manually? "D:\ghc-8.2.1-i386-unknown-mingw32\ghc-8.2.1\bin\ghc-pkg.exe --version"
+08:44:00 <pupp> prints this:
+08:44:02 <pupp> GHC package manager version 8.2.1
+08:45:57 <glguy> > base 16 # (-1073741819)
+08:46:01 <lambdabot>  "-3ffffffb"
+08:46:21 <pupp> > 5 + 5
+08:46:25 <lambdabot>  10
+08:49:30 <pupp> glguy, actually, it prints an extra newline, if that's important
+08:49:41 <nicknight> >
+08:50:01 <nicknight> > take 10 [2,4..]
+08:50:04 <lambdabot>  [2,4,6,8,10,12,14,16,18,20]
+08:50:13 <nicknight> ok cool lambdabot 
+08:50:39 <glguy> pupp: I don't know what's causing the problem; I'm just trying to think about what could be relevant. You said this was 64-bit Windows 7?
+08:50:53 <pupp> yes
+08:51:09 <glguy> Have you tried using the 64-bit versions of things?
+08:51:26 <pupp> not yet.
+09:01:35 <MUWA> shapr: hey dude, do u know about channel that discust about computer stuff ?
+09:04:24 <pupp> guys, do you see captcha here? https://ghc.haskell.org/trac/ghc/register
+09:04:33 <pupp> I don't
+09:07:37 <Cale> I don't see one either.
+09:20:37 <Skimmer> :join
+09:27:49 <fryguybob> pupp: Maybe not seeing the captcha *is* the captcha.
+09:28:16 <pupp> either way, it doesn't let me register
+09:28:56 <yellowj> why is (*) made left associative in Prelude?
+09:32:09 <madknight> ertes, i made a programming mistake in somehow incorrectly using the function `sequence`
+09:33:41 <Cale> yellowj: Why not?
+09:34:25 <byorgey> yellowj: no particular reason other than that it is fairly standard to think of arithmetic operators like +, -, *, / as left associative
+09:34:36 <byorgey> i.e. you perform the operations "from left to right"
+09:35:13 <Cale> The reason for the infixl declaration is moreso to set the precedence
+09:36:30 * byorgey wonders whether yellowj is asking (1) why it is made LEFT associative as opposed to right, (2) why it is made left associative in PRELUDE as opposed to somewhere else, (3) why the associativity is declared at all, (4) something else
+09:37:43 <monochrom> Heh.
+09:39:23 <monochrom> Disjunction elimination comes to the rescue. The answer "because the Haskell committee made it so" covers all 4 cases. :)
+09:49:51 <byorgey> monochrom++
+09:57:13 <monad_cat> I have a large cost centre that is space leaking. I know exactly where it's leaking but no amount of deepseqs stops the leak? Any pointers?
+09:59:05 <monochrom> Sometimes it is too many seqs and deepseqs that cause "space leak".
+10:00:06 <monad_cat> unfortunately it still exists without any strictness annotations 
+10:01:10 <monochrom> Learn lazy evaluation. Read my http://www.vex.net/~trebla/haskell/lazy.xhtml .
+10:10:10 <EvanR> i do not understand why there is supposedly a inexhaustive pattern match here http://lpaste.net/358997
+10:11:00 <EvanR> maybe 40 is a red herring
+10:11:44 <Tuplanolla> Nope.
+10:11:52 <EvanR> :S
+10:11:52 <Tuplanolla> Capitalize your `k`.
+10:12:02 <EvanR> OMG
+10:12:08 <Tuplanolla> Then install a better font.
+10:12:58 <EvanR> i  renamed OK several times throuough the file because i cant tell if its Ok or OK
+10:13:19 <EvanR> i mean, what it should be. and that was even worse, since its not a compile error
+10:13:47 <Tuplanolla> How about "valid"? I think "ok" is a terrible word.
+10:13:53 <pikajude> i love ok
+10:13:55 <lyxia> you could have gotten a warning about one function not having a signature
+10:14:18 <EvanR> oh right... i need to enable Wall
+10:14:20 <victor_> hi guys! can someone help me to instal HsOpenSSL on win 64 bit?
+10:14:20 <lyxia> and one more warning about OK
+10:14:41 <lyxia> I mean there should be two nonexhaustive pattern warnings
+10:14:56 <EvanR> the ops are valid in isolation
+10:15:28 <Tuplanolla> Dubious.
+10:17:32 <EvanR> the validity is dependent on the context
+10:19:18 <amf> if i have a toEnum which can fail with out of bounds, what is the best way to catch those pure function exceptions?
+10:19:20 <MarcelineVQ> what a terrifying collection of words
+10:19:21 <jp_rider> How do I use head.hackage? I added the repository to ~/.cabal/config and updated, but I still get SemiGroup errors.
+10:19:32 <amf> i get that it would be Control.Exception for IO
+10:22:28 <nshepperd> amf: the best way is don't, and check the bounds first. the second best way is to do it in IO, using 'evaluate'
+10:23:37 <nshepperd> toEnum is an evil function anyway
+10:24:02 <hexagoxel> or `spoon`, which uses unsafePerformIO internally.
+10:24:30 <hexagoxel> spoon (toEnum 2 :: Bool)  ->  Nothing
+10:29:54 <EvanR> you can also use safeEnum package
+10:30:08 <EvanR> but its probably better to check the bounds first
+10:37:16 <amf> nshepperd: thanks, went with a simple guard bounds check
+10:42:56 <nub_> @pl foldr combiner base tree = foldMap combiner tree base
+10:42:56 <lambdabot> foldr = flip . foldMap
+10:44:37 <cocreature> please don’t use this
+11:12:16 <eschnett> can i apply Either to a type constructor instead of a type, as in “Either [] (Int,) a”?
+11:15:34 <monochrom> No, cannot.
+11:15:53 <monochrom> Perhaps write the full "Either [a] (Int,a)"
+11:16:23 <monochrom> I think I also know another way.
+11:17:40 <monochrom> base has Data.Functor.Sum has "Sum", you can use it as "Sum [] ((,) Int) a" and of course just "Sum [] ((,) Int)" if you need * -> *
+11:21:13 <glguy> eschnett: Yes, you can apply Either to a type constructor, e.g.  Either Int
+11:21:22 <monochrom> haha
+11:22:21 <glguy> Type constructor is a class of names, the capitalized ones
+11:22:50 <glguy> You can also apply Either to a type variable:  Either a,   or any other type expression    Either (Maybe Bool)
+11:22:58 <glguy> (as long as the kinds check out)
+11:25:29 <glguy> The reason you can't write   Either [], is that the kind of the type Either is (* -> * -> *), but that * left of the -> doesn't match the kind of the type [], which was * -> *
+11:25:58 <eschnett> monochrom: thanks!
+11:32:18 <monochrom> Ooooohhhhh! cabal-install can do shared sandbox!
+11:49:29 <mz> yo
+11:49:40 <shapr> howdy mz
+11:49:43 <shapr> grussgott
+11:49:56 <mz> how are u guys?
+11:50:22 <shapr> I'm learning about 802.3 ethernet frames, what are you doing?
+11:50:51 <mz> i just began learning haskell for college
+11:51:00 <shapr> having fun with that?
+11:51:02 <mz> next week i got my first exercise and i want to be prepared
+11:51:27 <shapr> lambda lifting is good exercise.
+11:51:36 <shapr> lambdabot: do you even lift?
+11:51:49 <mz> haskell looks wired, and well... spent the whole afternoon to get my dev environment runnning
+11:52:04 <mz> windows is a bad platform for programming, especially with vim :D
+11:52:07 <shapr> are you using stack wrapped around cabal? or straight up cabal?
+11:52:15 <mz> nono, everything is set up
+11:52:50 <dmwit> That is an odd reply to "are you using stack or cabal?".
+11:52:51 <mz> got troubles with gvim on windows... ghc-mod.. errors
+11:52:59 <mz> cabal
+11:53:09 <mz> straight cabal
+11:53:21 <dmwit> I like cabal, too.
+11:53:37 <mz> with stack i couldnt install ghc-mod on windows
+11:53:45 <mz> "permission denied"... so wth?!
+11:53:50 <mz> cabal worked without problem
+11:53:56 <Xandaros> Does Lens have a makePrisms equivalent of makeFields? (Fields are prefixed with the type name, lenses (prisms) are the same name without the prefix)
+11:54:44 <Xandaros> There is makeClassyPrisms, but not makeFieldsPrisms. Makes me wonder if there may be a very good reason for that...
+11:55:18 <glguy> Xandaros: The reason is that makeFields was submitted as a patch at one point and it was added
+11:55:18 <shapr> mz: sounds good, so you want to know how to get started?
+11:56:07 <mz> i have college slides and http://learnyouahaskell.com . What  do u recommend for beginning?
+11:56:48 <shapr> mz: that's a good way to start
+11:57:24 <Xandaros> glguy: Whoever did that has my thanks, then, since that is what I always use :D Still, I want to generate... optics(?) for a type with multiple constructors now and would like to do this without the risk of name clashes, but while also avoiding ridiculous names...
+11:58:39 <shapr> mz: and when you have questions, ask here
+11:59:35 <mz> yeah, i do, thank you :)
+12:02:26 <Xandaros> This may be me not understanding prisms, actually. I have a sum type where each constructor is a record. Can I have a lens for each field that is shared among all of them and a prism for the rest?
+12:04:07 <Xandaros> Ok, ignore everything I said. `makeFields ''A` instead of `makeFields 'A` is the solution...
+12:05:05 <shapr> mz: lots of fun haskell puzzles on codewars if you want training exercises: https://www.codewars.com/kata/search/haskell?q=&beta=false
+12:06:10 <mz> shapr: thanks there
+12:06:55 <mz> ill try it after 1 or 2 weeks
+12:06:58 <shapr> ok
+12:08:25 <mz> i need to get familiar with this stuff :D
+12:08:53 <mz> shapr: when did u start programming with haskell?
+12:09:19 <shapr> mz: uh, I think 2001
+12:13:07 <texasmynsted> mz, have you seen?  http://haskellbook.com and https://github.com/data61/fp-course ?
+12:14:17 <mz> texasmynsted: thank you for the links. Will read them
+12:37:13 <can_I_do_it>     boomBangs xs = [ if x < 10 then "BOOM!" else "BANG!" | x <- xs, odd x]       I am notunderstanding this line
+12:38:41 <monad_cat> when using lens setters with Traverals, is there an easy way to automatically create nonexistent keys? I'm thinking about the case where `set (key "a" . key "b" . key "c") (Bool True) ({"a": {}})` would result in an object `{"a": {"b": {"c": true } } }`. Doing it this way doesn't modify the object because the traveral fails
+12:39:21 <monad_cat> on the other hand manually modifying the object one by one in the input object is boilerplate-heavy and unreadable
+12:42:15 <can_I_do_it> hello 
+12:42:53 <can_I_do_it> what odd x doing?
+12:43:11 <geekosaur> can_I_do_it, that is a list comprehension. let x = each element of xs in turn where odd x, then make a list whose elements are computed from (if x < 10 then "BOOM" else "BANG")
+12:43:30 <can_I_do_it> geekosaur: that I understood but what odd x is doing?
+12:43:44 <fishythefish> tests if x is odd
+12:43:49 <fishythefish> > odd 4
+12:43:52 <lambdabot>  False
+12:43:53 <fishythefish> > odd 5
+12:43:56 <lambdabot>  True
+12:44:02 <can_I_do_it> odd if a pre defined function?
+12:44:07 <fishythefish> yup
+12:44:18 <can_I_do_it> Ok now I understand thanks 
+12:44:43 <can_I_do_it> and in between samething not running on ghci interpreter
+12:45:06 <can_I_do_it> ghci>boomBangs xs = [ if x < 10 then "Boom!" else "Bang!" | x <- xs, odd x]  <interactive>:291:14: parse error on input ‘=’
+12:45:22 <can_I_do_it> should I save as file and load it?
+12:46:10 <fishythefish> depending on your version of ghc, you may need to say "let boomBangs xs = ..."
+12:46:19 <geekosaur> did you miss the 'where odd x'?
+12:47:15 <can_I_do_it> fishythefish:  I downloaded latest haskell platform
+12:47:30 <can_I_do_it> geekosaur:  I understood once I know odd is a function
+12:48:03 <can_I_do_it> fishythefish:  why should I use let  when creating a function?
+12:48:17 <can_I_do_it> let is for contsants isnt it?
+12:48:18 <fishythefish> can_I_do_it: that's just how ghci used to work
+12:48:28 <fishythefish> it's like you're in an IO do block
+12:48:36 <fishythefish> no, let is just a local binding
+12:48:39 <can_I_do_it> fishythefish:  what is that ?
+12:48:46 <can_I_do_it> so am I outdated?
+12:48:52 <can_I_do_it> or need to download something?
+12:48:55 <fishythefish> I dunno, check your version
+12:49:12 <Xandaros> Well, you could still argue that let is for constants. I don't expect your functions to mutate :P
+12:49:29 <fishythefish> even if your version is old, just try putting "let" at the start
+12:49:54 <can_I_do_it> my point is why shuld I keep let and makeit work without let :(
+12:50:19 <can_I_do_it> > odd 5
+12:50:23 <lambdabot>  True
+12:50:25 <fishythefish> if you don't want to use let, update to a newer ghc
+12:50:31 <fishythefish> otherwise, them's the rules
+12:50:38 <can_I_do_it> fishythefish:  I downloaded latest ghc
+12:50:47 <fishythefish> and what version is that?
+12:50:58 <can_I_do_it> version 7.10.3
+12:51:02 <fishythefish> that's not latest
+12:51:03 <fishythefish> by a long shot
+12:51:09 <Xandaros> Latest is 8.0.2 afaik
+12:51:16 <monochrom> 8.2.1
+12:51:23 <Cale> 7.10.3 is from 2015
+12:51:23 <Xandaros> oh wow
+12:51:25 <can_I_do_it> Damn :(  but I downloade from ubuntu
+12:51:28 <monochrom> But 8.0.* is good enough for omitting "let" at the REPL.
+12:51:32 <can_I_do_it> using apt command
+12:51:36 <fishythefish> your package manager won't necessarily have latest
+12:51:38 <fishythefish> just something stable
+12:51:39 <Cale> Ubuntu's Haskell related stuff is always way out of date
+12:51:41 <monochrom> But more meta-ly, why are you obsessed with this?
+12:51:54 <can_I_do_it> What is best OS for Haskell
+12:52:00 <fishythefish> nothing is stopping you from using that version; you'll just have to use let
+12:52:04 <can_I_do_it> how can I update it ?
+12:52:05 <fishythefish> OS is largely irrelevant
+12:52:05 <Cale> Anything, just install GHC yourself.
+12:52:11 <monochrom> If you don't want to use "let" at the REPL, put your definitions in a file and use :load.
+12:52:19 <fishythefish> you can always install ghc yourself through stack, for example
+12:52:56 <monochrom> 5 seconds of typing "let" can be saved by 2 hours of looking for "another OS"
+12:53:09 <can_I_do_it> ok and last doubt this ghc version will be a problem in production ?
+12:53:17 <Cale> But yeah, the real answer is "don't define things at the ghci prompt at all"
+12:53:18 <monochrom> Sometimes I don't understand how programmers set their priorities.
+12:53:22 <can_I_do_it> ideally ghc version can be anything right?
+12:53:29 <Cale> Put all your definitions in a file, and load it with ghci
+12:53:37 <Cale> then test *expressions* using ghci
+12:53:54 <fishythefish> many relevant xkcds: https://xkcd.com/1445/ https://xkcd.com/974/ https://xkcd.com/1205/ https://xkcd.com/1319/
+12:53:59 <can_I_do_it> Cale:  Ok I m doing that and also ghci to test
+12:54:06 <can_I_do_it> and I noticed this
+12:54:36 <can_I_do_it> Basically I am learning and in very initial chapter of a book
+12:54:50 <can_I_do_it> Haskell my first langauge and I dont know what is ghci prelude
+12:54:51 <can_I_do_it> etc
+12:55:32 <fishythefish> what book are you using? if it's for beginners, i'd expect it to have installation instructions consistent with its examples
+12:55:50 <can_I_do_it> The first book that was mentioned in haskell website
+12:56:13 <fishythefish> a title would suffice
+12:56:15 <can_I_do_it> its name learn you haskell for a great good
+12:56:43 <can_I_do_it> http://learnyouahaskell.com/starting-out  
+12:57:34 <fishythefish> the boombangs example isn't at a ghci> prompt
+12:57:44 <fishythefish> so to use as written, you're expected to save the definition in a file and load it
+12:58:42 <can_I_do_it> fishythefish:  That is ok, I understood but I want to understand what is ghci prelude
+12:58:48 <can_I_do_it> and how does they mtter
+12:58:51 <can_I_do_it> matter*
+12:58:58 <fishythefish> prelude is the standard set of definitions loaded into scope by default
+12:59:16 <fishythefish> definitions that are not in the prelude will have to be specifically imported for you to use them
+12:59:50 <can_I_do_it> so on file i need to use import prelude
+12:59:57 <fishythefish> nope
+13:00:01 <fishythefish> that's done automatically
+13:00:19 <can_I_do_it> Ok and now ghci it is just a compiler right? like gcc
+13:00:26 <fishythefish> ghci is an interpreter
+13:00:33 <fishythefish> a repl, specifically
+13:00:35 <fishythefish> ghc is the compiler
+13:01:27 <can_I_do_it> I haven;t faced ghc so far and very interested to know their versions really matter for stability like java8 java 9 ?
+13:01:41 <can_I_do_it> I mean syntax in haskell will change etc?
+13:02:19 <fishythefish> changes are generally backward-compatible, with a few exceptions
+13:02:26 <fishythefish> since you're a beginner, this is irrelevant
+13:03:34 <can_I_do_it> fishythefish: okay, I am curious to know any specific version of haskell or something like that....I don't know but heard python2,3 java8,9 etc and in haskell website I didnt see anything like that
+13:05:34 <fishythefish> are you looking for the haskell 2010 language report, or do you mean compiler versions?
+13:05:53 <can_I_do_it> both
+13:06:25 <fishythefish> language report: https://www.haskell.org/onlinereport/haskell2010/
+13:06:43 <fishythefish> i recommend just using the latest version of ghc
+13:06:52 <fishythefish> but sticking with 7.10.3 won't prevent you from learning
+13:07:54 <can_I_do_it> ok thankk you fishythefish 
+13:07:55 <Tuplanolla> The language has two versions, 1998 and 2010, while the compiler gets new releases quite frequently, like the 8 series this year, can_I_do_it.
+13:08:38 <geekosaur> mm, few more versions than that, actually. 1.0 through 1.4 preceded '98
+13:09:15 <can_I_do_it> Ok thanks all
+13:09:19 <fishythefish> plus language extensions make the idea of language versions somewhat more nebulous
+13:14:00 <Ero> Hi team
+13:14:23 <Ero> can someone confirm for me: https://en.wikibooks.org/wiki/Haskell/GADT
+13:15:15 <Ero> there is an example given to the reader to implement a function eval :: Expr -> Maybe (Either Int Bool)
+13:15:26 <Ero> but the prior definition of eval is recursive
+13:15:42 <Ero> is it possible for eval to be recursive, with that type signature?
+13:16:38 <Ero> i would paste the data structure for Expr but i dont want to brick the chat
+13:18:24 <lyxia> Ero:  you can use lpaste.net
+13:18:33 <Ero> thank lyxia i will do that
+13:18:35 <geekosaur> it can certainly be recursive, you just have to handle the various result cases. you will have a number of places where you have to produce Nothing, or having gotten that pass it on, because of illegal combinations; but that's what the article is leading toward fixing
+13:19:16 <geekosaur> 'Despite our goal, it may still be instructional to implement the eval function' --- it will be less than perfect, but it's a step on the journey
+13:19:45 <Ero> geekosaur, but eval is expecting an argument of type :: Expr, which is not a Maybe (Either Int Bool) ?
+13:20:01 <fishythefish> and what can an Expr be?
+13:20:06 <geekosaur> yes. you are not passing it that
+13:20:10 <Ero> i assume the excersize then eexpects me to modify the definition of Expr
+13:20:17 <fishythefish> you don't need to modify it
+13:20:25 <geekosaur> you are checking what a recursive call returns and either shortcircuiting out or extracting the part you need
+13:20:47 <geekosaur> recursion does not necessarily mean 'eval (eval (eval (...)))
+13:20:49 <Ero> this means im doing lots of case expressions within the body of eval?
+13:20:57 <geekosaur> it just means that somwhere in processing, your eval calls itself again
+13:20:59 <Ero> is that correct?
+13:21:03 <geekosaur> yes
+13:21:05 <Ero> ok
+13:21:07 <Ero> thanks ;0
+13:21:09 <Ero> :)
+13:21:19 <Ero> time to make an ugly baby
+13:21:21 <geekosaur> (and that's what the later stuff will help relieve, by showing you how to move it into the types instead)
+13:21:33 <Ero> cheers dudes
+13:42:31 <monochrom> Oh w00t new cabal point release will happen for GHC 8.2.2
+14:05:53 <mz> does anyone have experience with hugs? (i know it isnt in development anymore)
+14:06:03 <mz> how can i define a list in hugs?
+14:06:07 <Zemyla> For some reason, :set prompt2 "GHCi| " no longer works in 8.2.1.
+14:06:18 <mz> the keyword ¨let¨ does not work
+14:06:18 <Railalis> Yo
+14:06:26 <Tuplanolla> They renamed it to something else, Zemyla.
+14:07:21 <Zemyla> What is it now?
+14:07:30 <geekosaur> the whole prompt setup is more complex now, actually
+14:09:03 <Railalis> how do you use 'all' with a custom equality function?
+14:09:03 <geekosaur> https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/ghci.html#ghci-cmd-:set prompt and following
+14:11:36 <mz> ok nvm, for some reason, i declare lists inside the hugs prompt
+14:11:56 <mz> when i do it in a seperate file like abc = [1,2,3] it works
+14:12:09 <mz> *i cant declare lists inside hugs
+14:13:01 <Tuplanolla> Why are you using Hugs, mz?
+14:13:28 <mz> Tuplanolle: our lecture dude says our programs need to run on hugs
+14:13:40 <Railalis> weird.
+14:13:40 <Tuplanolla> That's like using Borland Turbo C.
+14:13:43 <mz> haha
+14:13:56 <ystael> what are you talking about, Turbo C was awesome
+14:14:04 <ystael> (in 1992)
+14:14:09 <Railalis> haha
+14:15:27 <geekosaur> and hugs was awesome in 2004
+14:15:59 <geekosaur> have to wonder if they;re planning to take over hugs support when everyone else gives up
+14:17:03 <jakehehrlich> There is this strange thing that happens when you first go read about learning Haskell. You hear "hugs is best for beginners" but that's really not even remotely close to true anymore
+14:17:06 <Railalis> thought the only large difference between hugs and ghci was the error messages..
+14:17:33 <jakehehrlich> And it causes a lot of confusion and issues when people do things in the repl and aren't familiar with the differences
+14:18:02 <barrucadu> Where do people hear that?  I don't think I came across hugs until I was fairly familiar with Haskell: basically nothing modern recommends it
+14:19:19 <LysergicDreams> Is there a common function for `flip either id`?
+14:19:42 <Railalis> Can I get some help with this error? I think it might have something to do with syntax :/ http://lpaste.net/3073255451991736320
+14:19:58 <geekosaur> Railalis, indentation
+14:20:33 <geekosaur> lines 16-19 have to be indented to the column that 'newRoom =' starts in
+14:20:34 <Railalis> What's the required indentation then?
+14:20:44 <Railalis> ok
+14:21:47 <Railalis> woo now a slog of new errors haha.. brb
+14:21:51 <Xandaros> I have a record polymorphic in multiple fields. Is there any way I can use lenses or record update syntax to change it, or do I have to use the entire incantation? (I mean records like this: `data Test a = Test {x :: a, y :: a}`)
+14:22:34 <Xandaros> This seems to work fine if it's only one field, but as many as two and it complains :(
+14:24:18 <Xandaros> GHCi session: http://tcpst.net/q0vd. I did expect the first update to fail, but not the second
+14:25:20 <barrucadu> Xandaros: Check the type of `foo`.  I don't think it is what you think it is.
+14:26:27 <Xandaros> You are right! Why did I decide to put a tuple there? o_O
+14:26:59 <Xandaros> Well, this works. So much for my MWE... I'll keep digging why my actual problem exists, then :/
+14:27:42 <AWizzArd> I have the unicode in Hex, for example for the „function composition” symbol, for which the hex is 2218. How can I produce a string that contains this char, by providing the hex?
+14:28:08 <geekosaur> > text "\x2218"
+14:28:11 <lambdabot>  ∘
+14:28:27 <Tuplanolla> > text "\2218" -- ?
+14:28:30 <lambdabot>  ࢪ
+14:28:48 <geekosaur> ("text" is a hack for lambdabot; you just need to make sure you use putStr or putStrLn to output it and not something that goes through show)
+14:28:57 <geekosaur> Tuplanolla, that will be decimal
+14:29:08 <Ero> geekosaur, fishythefish. I managed to implement eval for that excersize. As expected its simple but horrible code lol. Thanks for helping me along
+14:29:17 <AWizzArd> thx
+14:51:25 <dmwit> % putStrLn "\x2218"
+14:51:26 <yahb> dmwit: ∘
+14:55:40 <Railalis> Stupid question, are constants set in a module accessible in function definitions?
+14:58:16 <hpc> constants as in
+14:58:18 <hpc> x = 5
+14:58:24 <hpc> f y = do stuff with x and y?
+15:01:22 <hpc> oh, he left
+15:02:05 <pupp> >The 8.2.1 platform release is for 64 bit Windows only, due to issues with GHC 8.2.1 on 32 bit Windows.
+15:02:10 <pupp> >https://www.haskell.org/platform/
+15:02:14 <pupp> oh, I see now
+15:09:51 <fishythefish> hpc: I never quite know how to respond to a question about "constants" in Haskell
+15:10:09 <hpc> heh, yeah
+15:10:29 <hpc> the trick for me is that in my brain, stuff in haskell are all "definitions"
+15:10:42 <hpc> i reserve "function", "constant", and "variable" for mutable imperative languages
+15:10:45 <hpc> for the most part
+15:10:46 <fishythefish> exactly
+15:11:20 <fishythefish> i think in terms of definitions, but i'll still use "function" and "variable" when discussing haskell because they are syntactic elements
+15:12:03 <hpc> i usually say "expression" or "identifier" for "variable"
+15:13:02 <fishythefish> math takes priority in my head over code, so the use of "function" and "variable" isn't problematic for me
+15:13:09 <fishythefish> they don't have anything to do with execution in math either
+15:13:18 <hpc> that's fair
+15:13:30 <fishythefish> "constant", of course, means something different in math
+15:13:46 <hpc> i try to translate as many ideas to "programmer brain" as i can, since that's where i spend most of my time
+15:14:02 <xplat> does the curl binding for haskell still work?
+15:14:04 <xplat> seems to have had 5 years since the last release to bitrot
+15:16:18 <fishythefish> true, but assuming curl has stayed pretty much the same, it's not like the haskell binding would have had to update, right?
+15:16:22 <fishythefish> (i haven't used it personally)
+15:16:48 <geekosaur> curl (C library) doesn't change often, just the occasional bugfixes that don't change the abi or api
+15:16:59 <geekosaur> so bindings shouldn't need to change much
+15:17:09 <xplat> well, curl isn't too unstable, but it's had i think 6 single-point releases in the meantime?
+15:17:20 <xplat> maybe more
+15:17:29 <fishythefish> but those generally change curl internals
+15:17:39 <fishythefish> the output for existing commands shouldn't change
+15:20:50 <monochrom> In GHC parlance (and STG too), "constant applicative form" refers to things like "xs = [True, False, True]", so it's alright, "constant" still refers to that kind of definitions. :)
+15:33:09 <Volt_> Yes, the curl bindings still work.
+15:43:27 <Zemyla> So question: If We have an RApplicative with rfmap :: Acceptable f b => (a -> b) -> f a -> f b, rpure :: Acceptable f a => a -> f a, and rliftA2 :: Acceptable f c => (a -> b -> c) -> f a -> f b -> f c, then can a function be written: rtraverse :: (RApplicative f, Traversable t, Acceptable f b, Acceptable f (t b)) => (a -> f b) -> t a -> f (t b) ?
+15:44:39 <Zemyla> Because the issue I'm running into is that there's no way to write, say, rliftA3 :: (RApplicative f, Acceptable f d) => (a -> b -> c -> d) -> f a -> f b -> f c -> f d
+15:46:17 <lyxia> that looks just like Applicative
+15:47:43 <Tuplanolla> You have `unit = rpure ()` and `zipA = uncurry (rliftA2 (,)) :: (f a, f b) -> f (a, b)`, Zemyla.
+15:47:56 <lyxia> ah I see you need Acceptable f (c -> d) or something like that
+15:48:01 <Tuplanolla> This is just the zip formulation of `Applicative`.
+15:48:14 <Zemyla> Tuplanolla: That's assuming Acceptable f a and Acceptable f b implies Acceptable f (a, b).
+15:49:44 <Tuplanolla> Ah, the constraint is on `c`.
+15:51:24 <Tuplanolla> I can't see myself traversing it.
+15:53:14 <xplat> thanks Volt_ 
+15:59:30 <Zemyla> One could traverse it with a monadic structure, rbind :: Acceptable f b => f a -> (a -> f b) -> f b, by simply wrapping it in a Codensity-style newtype: newtype RCo f a = RCo { runRCo :: forall r. Acceptable f r => (a -> f r) -> f r }
+16:03:28 <josh123> anyone have time for an openvpn question?
+16:03:53 <geekosaur> not sure anyone here can help with that...
+16:05:18 <Tuplanolla> I see what you're doing, but have no clue why.
+16:05:30 <Tuplanolla> It's nap time anyway.
+16:25:52 <Railalis> When using random integers do you have to specify every int to be io int?
+16:28:38 <sxz> tets
+17:19:10 <dmj`> tets yes
+18:50:34 <Alovenom> Hello !
+18:51:11 <Alovenom> Does anyone have noticed that the Data.Ringbuffer module's toList doesn't actually perform as described ? 
+18:51:21 <Alovenom> I have to this this to get it to work correctly 
+18:54:23 <Alovenom> http://lpaste.net/185732669554819072
+18:54:37 <Alovenom> every time I paste on lpaste I realize how horrible my code is :') oh well
+18:55:32 <Alovenom> >does anyone have noticed  
+18:55:36 <Alovenom> could I be more french today ?
+18:55:45 <Alovenom> Anyway, I wonder if it's really not performing as described
+18:55:57 <Alovenom> or if I have misunderstood
+18:56:19 <rotaerk> Alovenom, what's horrible about itt?
+18:56:23 <Alovenom> "Get the entire contents of the ring, with the most recently added element at the head. Note that this is rather inefficient."
+18:56:49 <Alovenom> redundant do; use when; etc..
+18:57:25 <Alovenom> mostly everything that has to do with with monads I'm really babbling around 
+18:59:04 <Alovenom> but yeah, I want to know if the function is indeed flawed or if it's just me 
+18:59:14 <Alovenom> that didn't get it
+18:59:33 <Alovenom> and if it IS flawed, what's a better  way to fix it than what I did
+19:02:02 <Alovenom> (the flatten function here is the one that's rolling the list correctly, as in; it's making the ring into a list of objects with the most recent at the head and the last one at the tail)
+19:03:30 <Alovenom> if I just use RB.toList it "rolls in" instead of doing this. I guess I'll get an example to show what I mean 
+19:07:35 <adjofun> So, I've written a Fisher-Yates shuffle function, wikipedia's paper and pencil method. Its complexity is O(n), against the statement in wikipedia that naive method has complexity O(n^2). Does anyone have any suggestions, how to optimize it? https://glot.io/snippets/eub333qb9f
+19:30:37 <Alovenom> woo everyone is asleep it seems
+19:34:37 <adjofun> Alovenom, did you consider the possibility that compiler can inline your `pointer` definition?
+19:42:18 <slack1256> I am using qtah-qt5 for a gui. Can qtcreator be used with it?
+20:27:47 <nicknight> Hello after 2 days of haskell I realized rome cannot be built in a day
+20:28:35 <nicknight> hi ski  
+20:28:52 <nicknight> dsal
+20:41:13 <Alovenom> haha what do you mean
+20:44:44 <Railalis> Is there anyway to make a type that accepts a tuple of an Int or IO Int?
+20:45:13 <nicknight> Alovenom:  I mean I wanted to learn haskell in 4 days I worked almost 16 hours in last 2 days
+20:45:29 <nicknight> my neck is paining and now I cant work anymore for few hours
+20:45:44 <nicknight> so I realised to go to slow pace to have good results
+20:50:00 <dmwit> Railalis: I'm not sure that makes sense.
+20:50:46 <dmwit> Railalis: Can you describe what you're trying to do a bit more, and why you think that would be a good solution?
+20:51:15 <Railalis> I'm trying to make a game that has procedural elements.. but my types are conlicting because they are 'Int's not IO Int
+20:52:02 <Railalis> conflicting rather
+20:52:06 <dmwit> If you can cook up a minimal example (usually 5-10 lines of code is enough) that shows what you are trying and the error, we could try to help.
+20:52:28 <Railalis> I'll make a paste bin of what I'm doing. It's not that big yet.
+20:55:46 <Railalis> http://lpaste.net/4707934143881674752
+20:56:28 <Railalis> It's likely there are more errors in the last function, but the one I'm trying to deal with is Coord expects an Int rather than an IO Int, which comes from the random number generator.
+20:59:44 <dmwit> If `genRooms` needs random numbers from an `IO`-based random number generator, its type will have to indicate that it does `IO`.
+20:59:55 <dmwit> e.g. `genRooms :: [Rect] -> Int -> IO [Rect]`.
+21:00:09 <Railalis> hmm
+21:00:26 <Alovenom> this is right up my alley
+21:00:39 <Railalis> Why is it necessary to signify that everything is IO based?
+21:00:40 <Alovenom> what engine/library are you using for your game ?
+21:00:51 <Railalis> Still new to haskell and apparently this is a common beginner issue.
+21:00:54 <Alovenom> so that side effects don't escape the IO monad
+21:00:55 <Railalis> none
+21:00:55 <Alovenom> yep
+21:01:07 <dmwit> Railalis: "Tackling the Awkward Squad" has a detailed answer to that question, if you are actually interested in answering it.
+21:01:12 <Railalis> just making some small parts for now.
+21:01:25 <dmwit> In short: because laziness makes IO confusing if you don't segregate it.
+21:01:27 <Railalis> dmwit: I'll take a look.
+21:01:55 <dmwit> However, if you are just looking to make progress, then I instead recommend "The IO Monad for People Who Just Don't Care", by sigfpe.
+21:02:02 <dmwit> ?google io monad for people who just don't care
+21:02:04 <lambdabot> http://blog.sigfpe.com/2007/11/io-monad-for-people-who-simply-dont.html
+21:02:04 <lambdabot> Title: A Neighborhood of Infinity: The IO Monad for People who Simply Don't Care
+21:02:11 <dmwit> ah, s/Just/Simply/ =)
+21:02:12 <Railalis> haha
+21:02:17 <Alovenom> Hahah I never read this 
+21:02:22 <Railalis> the fact that's a thing
+21:02:45 <dmwit> Alovenom: I suspect you should. Looking at your paste from earlier... what is all this unsafePerformIO? You are nowhere near satisfying the guarantees you need to satisfy for that call to be safe.
+21:04:22 <Alovenom> dmwit, I'll read it - but in the meanwhile  : what other guarantees than the fact that I'm just using the console as a pure output should I make ?
+21:04:28 <Railalis> Alovenom: but yea, this is for a rougelike. Generating rooms, then going to run some kind of tunnel that has a percent to wind between them
+21:04:40 <Alovenom> it's my only global variable in the whole thing
+21:05:00 <Alovenom> Railalis : cool, I'm making a roguelike also. I haven't touched the room generation system yet
+21:05:33 <dmwit> The standard requirement for calling `unsafePerformIO` is that the thing you are calling it on be referentially transparent. Allocating a pointer or reference is emphatically not referentially transparent.
+21:05:48 <dmwit> Reading a reference doubly emphatically so.
+21:05:50 <Railalis> Alovenom: this guy has a few good articles on it but he is using dart http://journal.stuffwithstuff.com/2014/12/21/rooms-and-mazes/
+21:07:48 <Alovenom> dmwit : what problems do you reckon would happen with this ?
+21:08:49 <dmwit> Alovenom: For example, reading a ring buffer in the wrong order because the compiler reordered evaluation of the "where am I in the ring buffer" pointer.
+21:09:20 <Alovenom> Haha. So that's why !
+21:09:21 <dmwit> I have *absolutely* no idea if that is the cause of your problems. But it ranks high in my list of hypotheses.
+21:09:27 <Alovenom> Ok ok
+21:09:38 <Alovenom> hmmm
+21:09:54 <Alovenom> i'll try embedding the console into the game state instead of making it uIO toplevel
+21:09:57 <dmwit> (I don't think you've actually posted enough code to observe your problem, so it's very difficult for me to test a hypothesis.)
+21:10:44 <Alovenom> dmwit : I've made a post on reddit/r/haskellquestions with the code for the whole project. In the meanwhile I'll do what you suggested and report back
+21:11:23 <Alovenom> just, that would require a lot of refactoring because gloss is holding my hand when it comes to the game loop pretty tightly
+21:11:35 <Alovenom> Railalis: thanks, I'll look it up
+21:12:20 <dmwit> It's possible you cannot sanely use mutable data structures with gloss.
+21:12:30 <dmwit> I don't have much experience with gloss, though.
+21:12:46 <Alovenom> hahaha
+21:12:47 <Railalis> 80% sane 20% huh?
+21:12:50 <dmwit> No, it looks like it offers you `IO` in the right places.
+21:12:56 <dmwit> http://hackage.haskell.org/package/gloss-1.11.1.1/docs/Graphics-Gloss-Interface-IO-Game.html
+21:12:58 <Alovenom> it does; mostly
+21:13:06 <dmwit> You just need the `.IO` versions of the modules. =)
+21:13:07 <Alovenom> I'm using Graphics.Gloss.Interface.IO
+21:13:39 <Railalis> Using Ansi but I'm not worrying about it atm.
+21:13:44 <Alovenom> it's just that
+21:14:03 <Alovenom> outside of an IO function, the variable dies
+21:14:11 <Alovenom> and that the way I did my code
+21:14:20 <Alovenom> I can't store it inside the gamestate because it's all pure
+21:14:24 <Alovenom> so basically it's my fault
+21:14:33 <dmwit> As for reproducing -- giving the source for the whole project is the wrong direction. I was looking for 5-10 lines of code that makes a handful of Data.RingBuffer calls and does something you didn't expect.
+21:14:34 <Alovenom> but still a pain in the ass
+21:14:35 <Alovenom> hahaha
+21:15:04 <Railalis> welcome to programming?
+21:15:05 <Alovenom> I see, I see. here's the code that does this : 
+21:15:26 <Alovenom> https://pasteboard.co/GNLjFSe.jpg
+21:15:32 <Alovenom> to
+21:15:34 <Alovenom> https://pasteboard.co/GNLkmjy.jpg
+21:15:50 <Alovenom> instead of https://pasteboard.co/GNLk3YU.jpg
+21:18:07 <dmwit> A minimal reproducing example is always the first step in debugging.
+21:19:19 <Railalis> So if I returned IO [Rect] things would be fine? Mostly considering that the function encapsulating it is likely going to be drawing the data.
+21:19:55 <Alovenom> In all the libraries I've seen the render functions are IO so yea (except gloss.interface.pure)
+21:20:08 <Alovenom> http://lpaste.net/2082976520569094144
+21:20:26 <Alovenom> I'm out of time , gotta fluy
+21:20:34 <Alovenom> but I'll make an actual small reproducible exemple later
+21:20:39 <Alovenom> thanks for the help
+21:20:41 <Alovenom> see you
+21:21:13 <Railalis> peace
+21:22:25 <dmwit> Railalis: No, there would need to be many other changes.
+21:22:58 <dmwit> You'll need to use IO's sequencing capabilities, either in the form of `do` syntax or with `Monad`-based syntax.
+21:23:11 <dmwit> That's why I recommended an IO tutorial. =)
+21:23:17 <Railalis> Yea
+21:23:34 <Railalis> I read the Tutorial but it mostly stated that once you use IO you can't leave it.
+21:24:13 <dmwit> That is certainly true. But it should also have described the style you need to follow to write IO code: statements' returns get bound with <-, use return to turn non-IO stuff into IO stuff, etc.
+21:24:36 <dmwit> Oops, maybe it uses "commands" instead of "statements".
+21:24:38 <dmwit> I don't remember.
+21:24:47 <Railalis> yea that's correct
+21:25:29 <dmwit> Yes, the paragraph that has "Here are the rules" is the one I'm thinking of.
+21:25:38 <dmwit> You should walk through your existing code and apply those rules.
+21:26:14 <Railalis> what I'm looking at.
+21:26:15 <dmwit> (Things that return `IO X` values for some `X` are commands.)
+21:26:33 <Railalis> right..
+21:26:48 <Railalis> does where and guards still work?
+21:26:54 <dmwit> Sorry, nope.
+21:26:59 <Railalis> fun
+21:27:00 <Railalis> alright
+21:27:48 <dmwit> (...to a first approximation. As you gain experience we can talk about more complicated things that may invalidate the current rules of thumb we're talking about.)
+21:28:53 <Railalis> It's cool. Just need to learn the ropes. Point of the project anways haha
+21:29:31 <Profpatsch> Maybe strange, but:
+21:29:33 <dmwit> ?tell Alovenom For what it's worth, I agree Data.RingBuffer is buggy. The code for `latest` (and `latest'`) doesn't mention `ringHead` at all, which can't be right.
+21:29:33 <lambdabot> Consider it noted.
+21:30:07 <dmwit> bgamari: You should read that message for Alovenom, too. =P
+21:31:21 <Profpatsch> Can I get a function like (foldMap Alt), but exclusive?
+21:31:44 <dmwit> What does "exclusive" mean?
+21:31:54 <Profpatsch> As in: exactly one of the Alternatives shold be non-empty.
+21:32:29 <Profpatsch> e.g. I have three parsers and I want exactly one to succeed.
+21:33:16 <dmwit> I only know of one parser combinator library that allows `a <|> b` to have successes from both `a` and `b`.
+21:33:33 <Railalis> so quick question, how does 'all' work? Is this valid? all (customEq param1) someList -> bool?
+21:33:35 <dmwit> Are you using `ReadP` or `ReadS`? If not, `foldMap Alt` should be just fine.
+21:33:45 <Profpatsch> dmwit: I’m parsing a JSON structure, and it’s strange.
+21:33:51 <Railalis> not the -> but, it returns a bool rather..
+21:34:29 <dmwit> :t asum
+21:34:31 <lambdabot> (Alternative f, Foldable t) => t (f a) -> f a
+21:34:34 <Profpatsch> There are two fields, "bin" and "directories.bin", and at most one of them should exist.
+21:34:42 <dmwit> Profpatsch: (By the way, you might like that as an alternative to `foldMap Alt`.)
+21:35:55 <dmwit> Profpatsch: Okay. That is a bit annoying. I can see a few ways forward.
+21:36:08 <dmwit> Profpatsch: One is to start with a `guard` that both fields don't exist.
+21:36:28 <dmwit> Profpatsch: Another is to write the parser that accepts the `bin` field to use a guard that the `directories.bin` field doesn't exist, and vice versa.
+21:37:32 <dmwit> Railalis: Assuming `customEq param1 :: X -> Bool` and `someList :: T X` for some Foldable `T` and some `X`, yes, that should be fine.
+21:37:44 <dmwit> :t all (?customEq ?param1) ?someList
+21:37:46 <lambdabot> (?someList::t1 a, ?param1::t2, ?customEq::t2 -> a -> Bool, Foldable t1) => Bool
+21:37:59 <Profpatsch> Yeah, something like that.
+21:38:00 <Profpatsch> Thanks.
+21:38:37 <Railalis> cool. thanks for all the help btw.
+21:40:00 <Railalis> don't think it will work for me... since my customEq takes two params..
+21:40:16 <Railalis> customEq :: X -> X -> Bool
+21:40:44 <dmwit> I don't understand why that should prevent it from working.
+21:41:10 <dmwit> `?customEq::t2 -> a -> Bool` also takes two parameters.
+21:41:18 <ShalokShalom> Can i do all the possible programming scenario`s in functional programming?
+21:41:43 <dmwit> :t let customEq :: x -> x -> Bool; customEq = undefined in all (customEq ?param1) ?someList
+21:41:46 <lambdabot> (?someList::t x, ?param1::x, Foldable t) => Bool
+21:42:05 <dmwit> ShalokShalom: Haskell is Turing complete, if that's what you're asking.
+21:42:10 <ShalokShalom> haha
+21:42:30 <Railalis> ah it wasn't in the code you put above so I assumed it the Eq must have been implicit or something.
+21:42:36 <ShalokShalom> how much does it take to be Turing complete?
+21:42:49 <Railalis> lol
+21:42:57 <Railalis> that's a theory question
+21:43:24 <ShalokShalom> I mean scenarios similar like 'whole videogames' and 'operating systems' :D
+21:43:28 <dmwit> Not much, it turns out. The Turing tarpit is a well-known potential pitfall of complicated systems.
+21:44:15 <dmwit> Yes, there are examples of both. House was an OS project written in Haskell; Frag is a 3D first-person shooter written in Haskell.
+21:44:16 <Railalis> essentially it means it can be used to model a turing machine.
+21:44:38 <ShalokShalom> Which language cant?
+21:44:39 <Railalis> at least a finite one
+21:44:43 <Railalis> CSS
+21:44:47 <ShalokShalom> Even
+21:45:00 <ShalokShalom> Do you want to write a full OS in CSS?
+21:45:06 <Railalis> technically to be a language, I think it has to be turing complete..
+21:45:10 <ShalokShalom> This is what i mean.
+21:45:15 <dmwit> Regular expressions are a fairly canonical example; strongly-normalizing languages like Agda, Idris, and Coq are another collection of non-Turing-complete languages.
+21:45:21 <ShalokShalom> Railalis: yes, sure
+21:45:59 <dmwit> I think all of this information is also readily available on Wikipedia...
+21:46:17 <Railalis> https://en.wikipedia.org/wiki/Turing_completeness
+21:46:26 <ShalokShalom> Do you want to write a full OS in CSS?
+21:46:30 <dmwit> And no, a language need not be Turing complete to be a language.
+21:46:34 <Railalis> I don't want to write any css.
+21:46:49 <ShalokShalom> did i wrote this?
+21:47:09 <Railalis> oh? I'll have to refresh on it then. Been awhile since I took theory.
+21:47:38 <ShalokShalom> ?
+21:48:15 <jle`> ShalokShalom: to answer your original question, haskell is a general-purpose programming language
+21:48:32 <ShalokShalom> yes, i am aware 
+21:49:11 <ShalokShalom> voices in the holy space, also called Internet, suggest that you can`t do this
+21:49:24 <jle`> so does that answer your question?
+21:49:29 <ShalokShalom> since 'IO'
+21:49:35 <Railalis> the internet is a silly place.
+21:49:36 <jle`> can't do what?
+21:49:42 <dmwit> ?tell Alovenom https://github.com/bgamari/ring-buffer/issues/7
+21:49:42 <lambdabot> Consider it noted.
+21:49:43 <ShalokShalom> full IO
+21:49:50 <ShalokShalom> Railalis: yes, this is why i ask
+21:50:05 <jle`> are you asking if haskell can be used to do general programming tasks?
+21:50:08 <jle`> the answer is yes :)
+21:50:11 <ShalokShalom> fine
+21:50:11 <Railalis> ^
+21:50:19 <jle`> does that...answer your question?
+21:50:39 <ShalokShalom> including full UI and so on?
+21:50:42 <jle`> yes
+21:50:45 <dmwit> ?hackage gtk2hs
+21:50:46 <lambdabot> http://hackage.haskell.org/package/gtk2hs
+21:50:50 <ShalokShalom> and all with monads?
+21:50:55 <Railalis> welp I'm confused. Going back to my program.
+21:51:01 <ShalokShalom> fine
+21:51:05 <jle`> are you asking if it's possible to do UI with monads?
+21:51:06 <ShalokShalom> thanks 
+21:51:08 <jle`> sure i guess
+21:51:11 <dmwit> There are also bindings to wx, qt, OpenGL, and even raw X11 if those are more your thing.
+21:51:11 <jle`> it's possible to do them without monads too
+21:51:17 <ShalokShalom> how you do it otherwise?
+21:51:27 <ShalokShalom> so, you might be fully sure about that
+21:51:28 <jle`> just using normal data types
+21:51:32 <ShalokShalom> fine
+21:51:36 <jle`> monads are also just normal data types too
+21:51:41 <ShalokShalom> yes, sure
+21:51:46 <jle`> just with a certain uniform interface
+21:51:53 <jle`> but you could also just not use that uniform interface
+21:51:56 <jle`> and just work with those data types
+21:52:02 <ShalokShalom> the thing is, they assume that you HAVE to change state sometimes
+21:52:10 <jle`> do they?
+21:52:11 <ShalokShalom> otherwise, some specific tasks are impossible
+21:52:12 <ShalokShalom> yes
+21:52:16 <jle`> who is 'they'?
+21:52:16 <ShalokShalom> this is why i ask
+21:52:22 <ShalokShalom> sums of voices
+21:52:24 <jle`> who is assuming that you ahve to change state sometimes?
+21:52:27 <Railalis> can command be recursive or do they use some kind of special loop function? I'm seeing stuff like forever and forM...
+21:52:31 <ShalokShalom> i read this suggestion pretty often
+21:52:33 <jle`> well, yeah...Haskell is really good at managing state
+21:52:39 <jle`> haskell is better at working with state than any other language
+21:52:40 <dmwit> Railalis: Commands can be recursive.
+21:52:46 <jle`> because state in haskell is explicit and manageable
+21:52:50 <dmj`> @src forever
+21:52:50 <lambdabot> forever a = let a' = a >> a' in a'
+21:52:53 <jle`> state in other languages is implicit and invisible
+21:52:56 <dmwit> % let x = putStrLn "hi Railalis!" >> x in x
+21:52:56 <yahb> dmwit: hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railalis!; hi Railali
+21:53:02 <jle`> if i have to write a program with state, i'd much rather use Haskell than another language
+21:53:05 <Railalis> oh god
+21:53:24 <ShalokShalom> oh, with declarative and functional approaches?
+21:53:36 <Railalis> yea Haskell's state is really safe. The typing is just mm
+21:53:38 <ShalokShalom> this is new
+21:53:39 <dmwit> Railalis: ...and yeah, `forever` and `forM` are just functions defined in normal Haskell, not magic. =)
+21:53:39 <jle`> well usually if you're working directly with state, you're taking an imperative approach
+21:53:48 <ShalokShalom> can you show us some code?
+21:53:54 <Railalis> IO seems pretty magical atm.
+21:53:56 <jle`> but imperative programming in haskell is much easier than imperative programming in other languages
+21:53:59 <Railalis> but ok
+21:54:11 <ShalokShalom> so, there is imperative programming
+21:54:28 <jle`> well, the common example is doing something like summing a list using state
+21:54:32 <ShalokShalom> so how is Haskell considered as purely functional?
+21:54:51 <jle`> in haskell, state is not magical
+21:54:51 <ShalokShalom> imperative programming in Haskell is functional?
+21:54:54 <jle`> like it is in other languages
+21:54:56 <ShalokShalom> aha?
+21:54:59 <ShalokShalom> how this?
+21:55:00 <jle`> no, imperative programming in haskell is imperative
+21:55:04 <dmwit> Railalis: I mean, they're not "special" to the compiler or anything. They are written as library functions, with no special hooks into the compiler or runtime or anything.
+21:55:04 <ShalokShalom> aha
+21:55:09 <ShalokShalom> and looks like it?
+21:55:24 <jle`> a "functional language" is a language that makes it easy to write functional code/functional approaches
+21:55:32 <ShalokShalom> purely
+21:55:35 <jle`> state in haskell is non-magical, but state in other languages is all magical
+21:55:40 <Railalis> Magic as I don't understand it fully. It'll just take me some time.
+21:55:42 <ShalokShalom> what is a purely functional language than?
+21:55:44 <jle`> state is just a normal value you pass around
+21:55:57 <ShalokShalom> i think this term is even used on the Haskell homepage
+21:56:07 <jle`> 'pure' as in Haskell functions are all pure, perform no side effects, return the same value when given the same input
+21:56:15 <ShalokShalom> state is a value
+21:56:26 <ShalokShalom> so THIS is an expaination to me, thanks a lot
+21:56:32 <ShalokShalom> explaination
+21:56:47 <ShalokShalom> explanation :P
+21:56:52 <ShalokShalom> English is my second language
+21:56:54 <ShalokShalom> Thanks a lot
+21:56:59 <jle`> that's one way to deal with state, but haskell and other libraries let you do it in other ways too
+21:57:07 <ShalokShalom> Do you know Chapel?
+21:57:08 <jle`> but the "point" is that state is something we deal with in a non-magical way, within the language
+21:57:33 <jle`> using normal data types
+21:57:41 <ShalokShalom> https://www.youtube.com/watch?v=0DjIdRJIqRY
+21:57:50 <ShalokShalom> Does the same, i think
+21:57:59 <ShalokShalom> jle`: Yes, thanks a lot
+21:58:09 <jle`> no problem :)
+21:58:32 <ShalokShalom> So you can say: State is part of the language in Haskell
+21:58:56 <dmwit> I think that depends on what you mean by "part of the language".
+21:59:10 <ShalokShalom> This is something different from: State is part of the language by not beeing part of the language
+22:00:29 <ShalokShalom> https://wiki.haskell.org/Haskell_IO_for_Imperative_Programmers
+22:00:49 <ShalokShalom> Is this documentation still valid?
+22:00:51 <dmwit> `IO` (which can have stateful actions) is part of the language. `ST` (which can have stateful actions) is de-facto part of the language. `State` (which can have stateful actions) is a library, and not part of the language at all.
+22:01:14 <ShalokShalom> ah, this is why IO.something
+22:01:27 <dmwit> The fact that you can bolt on `State` as a library I think says something very interesting about the power of the primitives that Haskell provides.
+22:01:28 <ShalokShalom> i thought its a set of cheat sets :P
+22:01:42 <ShalokShalom> this is very fine
+22:02:32 <ShalokShalom> dmwit: Why this?
+22:02:42 <ShalokShalom> Is this also so developed in F-Sharp?
+22:02:43 <Railalis> do you define type of a do block?
+22:02:57 <dmwit> I do not like this "Haskell IO for Imperative Programmers". It is rude for no purpose, and its reasoning seems fragmented.
+22:02:58 <Railalis> I see no reason not...
+22:03:27 <ShalokShalom> You can rewrite it?
+22:03:34 <ShalokShalom> Its from 2011
+22:03:34 <Railalis> I mean... If you don't have IO for some way to change the input of a function, aren't all you making is a black box that get's hot and does nothing?
+22:03:36 <dmwit> No thank you.
+22:03:53 <ShalokShalom> Railalis: This is exactly the point. 
+22:04:06 <dmwit> Railalis: do blocks can have a type, yes. I'm not sure I understood the other parts of your question.
+22:04:29 <dmwit> ShalokShalom: You might enjoy the IO tutorial I linked Railalis to earlier.
+22:04:36 <dmwit> ?google The IO Monad for People Who Simply Don't Care
+22:04:37 <lambdabot> http://blog.sigfpe.com/2007/11/io-monad-for-people-who-simply-dont.html
+22:04:37 <lambdabot> Title: A Neighborhood of Infinity: The IO Monad for People who Simply Don't Care
+22:04:57 <Railalis> such a good title. And yes you anwered my question. 
+22:05:14 <ShalokShalom> Railalis: I feel that the confusion results from the equation of a) imperative programming and b) changig state and c) change the input of a function, as Railalis said
+22:05:30 <ShalokShalom> I am simply confused by the Syntax here in Haskell
+22:05:39 <ShalokShalom> So, can i do this in F-Sharp also?
+22:05:45 <Railalis> it's very terse but it has everything necessary..
+22:05:54 <ShalokShalom> thanks a lot
+22:07:32 <dmwit> Railalis: (By the way, I also really like sigfpe's other monad tutorial. But it has a very different goal. At some point you might enjoy it, so I'm going to plant this seed here, but please don't feel rushed to cultivate it into a tree just yet if you don't feel like it.)
+22:07:43 <dmwit> ?google You Could Have Invented Monads (And Maybe You Already Have)
+22:07:45 <lambdabot> http://blog.sigfpe.com/2006/08/you-could-have-invented-monads-and.html
+22:07:45 <lambdabot> Title: A Neighborhood of Infinity: You Could Have Invented Monads! (And Maybe You Al...
+22:08:08 <Railalis> I did a lot of reading on Monads earlier.
+22:08:20 <ShalokShalom> there is now something new, can this help?  https://docs.microsoft.com/en-us/dotnet/fsharp/language-reference/fixed
+22:08:22 <Railalis> It kind of comes along with using System.Random
+22:08:40 <dmwit> ShalokShalom: This isn't really the right place for F# questions.
+22:08:47 <ShalokShalom> ok, thanks a lot
+22:09:40 <ShalokShalom> is it true, from your perspective, that someone can say, Monads are basically FlatMaps?
+22:10:07 <dmwit> I don't know. What are FlatMaps?
+22:10:09 <ShalokShalom> https://www.youtube.com/watch?v=9QveBbn7t_c
+22:10:17 <Railalis> So I tried to refactor still having issues with my function typing though. Anything obviously wrong and direction as to what to refactor next? http://lpaste.net/8320970760533311488
+22:10:36 <ShalokShalom> he says, there is some more, while its more or less the complete story
+22:11:16 <dmwit> (Completely independently: why is it useful to give Monads another name like FlatMaps?)
+22:11:44 <dmwit> Railalis: Nice, you're definitely moving in the right direction!
+22:11:45 <ShalokShalom> idk if this is, whats the case
+22:11:51 <ShalokShalom> he decribes it like this
+22:12:03 <dmwit> Railalis: You probably meant `not (all (...) rooms)`.
+22:12:10 <ShalokShalom> and its the by far most easy to understand tutorial to me
+22:12:18 <ShalokShalom> thanks a lot
+22:12:20 <Railalis> probably. It isn't even running yet so
+22:12:23 <dmwit> Railalis: Otherwise no obvious errors jump out at me. What's the error?
+22:12:28 <Profpatsch> dmwit: I solved it by manually trying to access the JSON fields with (optional $ value .: "field") and doing a giant pattern match.
+22:12:31 <Railalis> uh 
+22:12:34 <Profpatsch> So much legwork. :)
+22:13:08 <Railalis>  a lot of them actually..
+22:13:18 <Railalis> let me try to clean it up first
+22:14:37 <Railalis> some variables aren't in scope.. do those have to be params or is there a way to reference vars globally
+22:14:39 <Railalis> ?
+22:14:54 <dmwit> params
+22:15:03 <Railalis> fun
+22:15:06 <dmwit> Of course you can define constants.
+22:15:12 <Railalis> they are constants.
+22:15:18 <dmwit> No problem, then!
+22:15:25 <dmwit> `stageW = 3` will do the trick.
+22:15:27 <Railalis> says they are out of scope though?
+22:15:35 <dmwit> (or whatever)
+22:15:42 <Railalis> right. I have those up above.
+22:15:52 <Railalis> do they need to be in the do block?
+22:15:54 <dmwit> Can you show the whole file you're trying to load?
+22:16:01 <dmwit> (or compile)
+22:16:01 <Railalis> sure
+22:17:53 <Railalis> haven't refactored most of it, hence type errors. and some of the constants are for future variables. http://lpaste.net/8320970760533311488
+22:19:24 <dmwit> What does it say is out of scope?
+22:19:30 <Railalis> stageW
+22:19:51 <Railalis> wait hold on
+22:19:55 <Railalis> might be a typo..
+22:20:26 <Railalis> well derp. Yea I wrote stageY not stageH
+22:21:34 <Railalis> errors are all types now, IO [Rect] and [Rect] -> Bool 
+22:21:58 <Railalis> does everything get touched with IO?
+22:22:20 <dmwit> Yep. Once you're in IO, you can never, ever get out.
+22:22:54 <Railalis> guess haskell games are kind of riddled with it then
+22:22:57 <dmwit> Okay, but.
+22:23:07 <dmwit> I think the actual problem here is that you have too many `return`s.
+22:23:15 <Railalis> oh?
+22:23:26 <dmwit> In your `else` branches, `genRooms blah blah` is already a command. You don't need a `return` to turn it into one.
+22:23:53 <dmwit> Also I suspect you just want to take a normal `[Rect]` as an argument rather than an `IO [Rect]`.
+22:24:00 <Railalis> yes
+22:24:28 <dmwit> No, I mean, like, independently of what you want, you should be writing `genRooms :: [Rect] -> ...`.
+22:24:45 <Railalis> no I understood what you mean
+22:24:51 <dmwit> ok =P
+22:25:16 <Railalis> since it only finishes on the first step, that's what returns the IO [Rect] while the other function calls aren't returned just called
+22:25:34 <dmwit> basically, yes
+22:25:47 <Railalis> my only worry then is that this isn't tail recursion but is that even a concern?
+22:26:56 <dmwit> So, generally tail recursion isn't as big of a thing in Haskell as it is in other languages.
+22:27:17 <dmwit> But that's mostly a statement about pure computations.
+22:27:19 <Railalis> well I figured haskell with do it automatically if the functions are pure
+22:27:25 <Railalis> would* do it
+22:27:30 <dmwit> In the imperative fragment of Haskell, this looks like the analog of tail recursion to me.
+22:27:43 <dmwit> What is "it"?
+22:27:54 <Railalis> tail recursion
+22:28:14 <dmwit> At a guess: "it" is "tail-call optimization". Which, yeah, is completely not a thing. Lazy evaluation works very differently than that.
+22:28:28 <Railalis> oh interesting
+22:28:58 <Railalis> omg! it compiles
+22:29:35 <dmwit> (Don't confuse "tail recursion", which is a property of code, and "tail-call optimization", which is a property of an execution of code.)
+22:29:58 <Railalis> I'm thinking of the optimization
+22:30:18 <Railalis> so you don't overflow your stack?
+22:30:39 <Railalis> did an euler problem once where that was a huge issue
+22:30:48 <Railalis> should try to redo it in haskell now that I think abou tit
+22:30:48 <dmwit> You don't get a new stack frame when you call a function in Haskell.
+22:30:55 <dmwit> You get a stack frame when you enter a thunk.
+22:31:08 <Railalis> thunk?
+22:31:27 <dmwit> A delayed (lazy) value that you have just discovered you need to evaluate.
+22:31:34 <Railalis> ah
+22:31:38 <Railalis> that makes sense
+22:32:26 <dmwit> So, generally, the desirable property you want of your code in Haskell is productivity rather than tail-recursiveness, that is: each recursive call is "under" a constructor for some data type.
+22:33:25 <dmwit> For IO, you can think of command sequencing as sort of like a constructor. So an IO value that does some useful work commands, then ends with a recursive call, is productive.
+22:33:44 <Railalis> hmm
+22:34:01 <dmwit> I suspect this whole discussion is a bit too advanced for now.
+22:34:12 <ShalokShalom> this reads nice https://gist.github.com/gatlin/9696088
+22:34:16 <Railalis> I understand a bit of it but probably.
+22:34:59 <Railalis> if I could stay pure functional up until main I'd love to..
+22:35:27 <dmwit> You might like
+22:35:29 <dmwit> :t randomRs
+22:35:32 <lambdabot> (RandomGen g, Random a) => (a, a) -> g -> [a]
+22:35:53 <Railalis> ok well it compiles but it isn't doing what I expected.. probably something with my bool
+22:36:13 <dmwit> or possibly randomR itself, depending on which kind of annoying code you prefer to write =P
+22:36:50 <Railalis> lol
+22:36:57 <Railalis> so just pluck one and move on essentially?
+22:37:54 <dmwit> So the rough outline would be: in `main`, use `IO` to get a random seed. Use `randomRs` to get an infinite list of random numbers, and pass that pure value to your (now pure!) `genRooms`. While executing, `genRooms` would peel off values from that list one at a time.
+22:38:05 <Railalis> or in your main you make your list of all the random numbers you need then, run commands which then get turned 
+22:38:06 <Railalis> yea.
+22:38:28 <dmwit> The trick is that then you need to manually manage your list of unused random numbers.
+22:38:42 <dmwit> That's sort of the thing `IO` is buying you: it is managing the random seed state for you.
+22:38:55 <dmwit> You can manage it yourself instead with a bit of effort, and not use `IO`.
+22:39:16 <Railalis> Already down this rabbit hole, I'll try that after I finish this.
+22:39:18 <dmwit> (And there are quite a few tricks for making that not totally painful, but most of them involve *other* monads, so for you that may not be a win.)
+22:39:19 <Railalis> make a second version
+22:39:54 <dmwit> Railalis: Right, I'm not necessarily recommending it. Just responding to "I'd love to stay pure".
+22:40:21 <Railalis> I see what you mean
+22:40:22 <dmwit> And it can be a good exercise to do it, actually; managing it yourself once will actually give you a pretty good intuition for what `IO` is doing behind the scenes.
+22:40:29 <Railalis> yea
+22:40:44 <Railalis> It kind of reminds me of dependency injection... but with random numbers.
+22:41:22 <Railalis> one big constructor vs um.. I forget the term.. containment?
+22:41:47 <Railalis> I'm probably way off base.
+22:42:12 <dmwit> Dunno. I only know of dependency injection by name, not content. =)
+22:43:24 <Railalis> Use interfaces to define your dependencies, have a big container that resolves bindings between the interfaces and concrete implementation. Inject the concrete interfaces into constructors and use their public methods...
+22:43:27 <Railalis> essentially.
+22:44:14 <dmwit> Sounds a lot like what Backpack is trying to do.
+22:44:22 <Railalis> maybe, idk backpack.
+22:44:44 <dmwit> Never mind. I'm pulling you away from awesome roguelike progress.
+22:44:52 <Railalis> haha
+22:45:18 <dmwit> http://plv.mpi-sws.org/backpack/
+22:45:34 <dmwit> In case you wanted to be pulled away. =P
+22:46:20 <Railalis> I scanned it.
+22:46:34 <Railalis> Personally interfaces scream dependency injection for me
+22:46:47 <Railalis> at least, interfaces used correctly results in dependency injection
+22:46:53 <Railalis> but I could be wrong on that.
+22:47:10 <Railalis> I have most my experience with php and a framework called laravel. (web work pays bills)
+22:47:36 <Railalis> and damn.. laravel is nice. wrong channel for discussion though.
+22:48:29 <Railalis> so it compiles but when I run it I'm getting an empty list..
+22:48:53 <dmwit> Fun!
+22:49:55 <dmwit> > all odd []
+22:49:58 <lambdabot>  True
+22:50:00 <Railalis> probably an issue with my `if not (all blah blah)` stuff.
+22:50:05 <dmwit> Yes, I think so.
+22:50:15 <Railalis> just falls through
+22:50:16 <dmwit> You start with an empty list. `all p []` is `True` for any `p`.
+22:50:25 <dmwit> So `not (all p [])` is `False`, and you never add a first room.
+22:50:32 <Railalis> hmm
+22:50:52 <Railalis> && length > 0
+22:50:57 <dmwit> Did you mean `any (rectIntersects newRoom) rooms`...?
+22:51:04 <Railalis> probably
+22:51:17 <Railalis> to add the room, it shouldn't intersect with any other room
+22:51:24 <Railalis> welp I just used the word any so
+22:51:28 <Railalis> good sign
+22:51:29 <dmwit> Oh, then `not (any (...) rooms)`.
+22:51:50 <dmwit> `not` being the "shouldn't" part of your sentence. =)
+22:52:23 <Railalis> :t any
+22:52:25 <dmwit> Or, you could write (by deMorgan's laws) `all (not . rectIntersects newRoom) rooms`.
+22:52:25 <lambdabot> Foldable t => (a -> Bool) -> t a -> Bool
+22:52:53 <Railalis> unless there is an optimization I see no reason to
+22:53:17 <Railalis> not (any blah) makes more sense imo
+22:53:42 <dmwit> Sometimes the negated version of a condition can be easier to define. So I proposed it in case `notIntersects` is easy to define.
+22:54:00 <Railalis> it technically is
+22:54:11 <Railalis> since in my definition i negate it already
+22:54:20 <Railalis> and it works!
+22:54:52 <Railalis> seems like valid output.
+22:55:27 * dmwit high fives Railalis
+22:55:41 <Railalis> feels good. 
+22:55:41 <moet> i am using HUnit's `assertEqual` function.. the `Eq a` values passed as arguments are strings with newlines.. when a test fails, HUnit ouputs the two strings using `show`, collapsing them onto one line with \n interspersed
+22:55:44 <Railalis> thank you for all the help.
+22:55:54 <moet> does anyone have any suggestions for improving the test output described above?
+22:56:26 <Railalis> isn't it a command line option to allow multi-line strings?
+22:56:29 <dmwit> I'm pretty sure HUnit provides an `assert` or similarly-named function which lets you specify the message to print precisely.
+22:57:01 <dmwit> assertBool
+22:58:23 <Railalis> brb
+22:58:26 <moet> ah, but assertBool buries the fact that i'm asserting equality..
+22:58:44 <dmwit> So write your own assertEqual, but with blackjack and hookers.
+22:58:59 <moet> :/
+22:59:00 <dmwit> assertEqual is implemented as a call to assertBool, after all.
+22:59:10 <dmwit> I don't really understand the question, I guess.
+23:00:16 <dmwit> If you don't like how assertEqual reports assertion failures, what are you hoping the answer is going to be other than "use a function that gives you more control over how assertion failures are reported"?
+23:00:38 <moet> i was just wondering if there was a hook to control the output, that's all.. or i guess alternatively, whether or not there's an assertion library that goes with HUnit which supports a variety of higher level assertions (with better output)
+23:01:01 <moet> it sounds like the "hook" is "use assertBool"
+23:01:07 <dmwit> I mean I guess you could wrap your values in a newtype to modify their `Show` instance.
+23:02:08 <dmwit> But I think I'd rather write a modified `assertEqual` that calls `assertBool` than write a modified `assertEqual` that uses a newtype wrapper. It just seems less fragile (easier to have fine-grained control over the output).
+23:03:32 <moet> righto; i'll go ahead and use the assertBool approach
+23:03:32 <moet> ty
+23:07:29 <Railalis> there a way I can like map a `render x ` over `[x]`?
+23:07:56 <Railalis> cause render is like `render :: [x] -> IO ()`
+23:08:02 <Railalis> so it feels wrong to use map
+23:08:19 <dmwit> :t mapM_ -- ?
+23:08:22 <lambdabot> (Monad m, Foldable t) => (a -> m b) -> t a -> m ()
+23:08:45 <Railalis> the monad being IO?
+23:08:55 <dmwit> yep
+23:09:04 <dmwit> And the Foldable being [].
+23:09:21 <Railalis> idk if I full get it but I'll try it.
+23:12:23 <Railalis> one thing at a time... getting ahead of myself. 
+23:16:11 <Railalis> so atm I have that `type Coord = (Int, Int)` thing
+23:16:24 <moet> Railalis: if that feels weird you could also do something like `sequence . map render $ listOfX`
+23:16:27 <moet> or so ..
+23:16:49 <Railalis> would it be better to have like `data V2 {x :: Int, y :: Int}`
+23:17:08 <Railalis> that way I can just call x and y on the vector
+23:17:21 <dmwit> I would definitely prefer it.
+23:17:23 <Railalis> than I guess fst and snd
+23:17:25 <Railalis> yea..
+23:17:30 <cocreature> Railalis: that’s a syntax error, you need "data V2 = V2 { x :: Int, y :: Int}"
+23:17:42 <Railalis> cocreature: thanks
+23:17:49 <cocreature> also consider making the fields strict, i.e., "data V2 = V2 { x :: !Int, y :: !Int }"
+23:18:12 <Railalis> trying to iterate over my Rects..
+23:18:23 <Railalis> rather each coord within a rect
+23:18:32 <dmwit> See also my discussion of the tradeoffs of using `Either` and `(,)` for all your sum/product type needs vs. making a fresh ADT for everything: https://stackoverflow.com/a/19073039/791604
+23:19:57 <Railalis> ADT?
+23:20:03 <c_wraith> data type
+23:20:13 <dmwit> Algebraic Data Type, the flavor of data types you get with `data` declarations.
+23:20:44 <c_wraith> the A is for algebraic, which really just means you can have multiple constructors and each constructor can have multiple arguments
+23:21:07 <Railalis> got it
+23:21:40 <c_wraith> There's actually a lot of math reasons for that name, but they probably aren't relevant to what you're doing right now. :)
+23:22:08 <dmwit> Railalis: You've dipped your toes into a deep pool with Haskell, I'm afraid. =)
+23:23:10 <dmwit> I just feel bad saying "this isn't quite the whole story" so many times in one night...
+23:23:19 <moet> yay my parser now outputs diffs of expected/actua
+23:23:23 <moet> :D
+23:23:25 <Railalis> I don't mind that so much, just wish I knew if I could swim or not first.
+23:23:29 <moet> thanks dmwit
+23:23:35 <Railalis> gj moet
+23:24:19 <c_wraith> Railalis: almost all of the math is opt-in.  You can ignore it and just write code.  Or you can learn it, say "that's cool", and then just write code. :)
+23:24:37 <Railalis> being a math minor I should know it -shrug-
+23:24:57 <dmwit> eh
+23:25:11 <c_wraith> Eh.  I had a math minor.  I've been out of college for like..  uh... 15 years now?  Yeah.  I've learned *far* more math since then. :)
+23:25:15 <dmwit> I definitely didn't learn any of the relevant math during my math minor.
+23:25:27 * dmwit == c_wraith
+23:25:27 <Railalis> haha
+23:25:36 <Eango> waht is difference between installing ghc-mod and hlint with stack versus apt repo
+23:26:31 <dmwit> Probably the two biggest differences are 1. the package manager will make it available to all users and 2. the package manager ain't gonna rebuild it from scratch
+23:27:00 <c_wraith> is ghc-mod tied to a specific version of ghc?  If so, that's also relevant.
+23:27:10 <Eango> aight ty im still new
+23:27:15 <dmwit> Depending on exactly how your package manager works, there may also be 3. the package manager will install some Haskell libraries to the global (GHC) package database.
+23:27:22 <Eango> i installed it from apt but saw stuff about stack and cabal
+23:27:56 <Railalis> if you guys had to name the top left point and bottom right point of a rectangle, what would you name them?
+23:28:01 <Railalis> bob? sue?
+23:28:03 <Eango> also another quick question
+23:28:08 <dmwit> Railalis: topLeft, botRight
+23:28:15 <Railalis> fine, be sensible
+23:28:20 <dmwit> imaginative, I know
+23:28:22 <Eango> is there any virtualenv like tool (python) or rvm (ruby) thing for haskell?
+23:28:24 <Railalis> better than p1, p2
+23:28:45 <dmwit> Eango: cabal sandboxes, stack itself, and to a lesser extent cabal new-* do that kind of thing.
+23:29:02 <Eango> awesome ty will look into it 
+23:29:03 <Eango> peace
+23:30:42 <c_wraith> Railalis: you should think of a math minor as nothing more than a foundation from which to approach learning math.  Err.  Same as a major, in that sense.  :)
+23:31:09 <balac> hi, is it possible to construct arbitrary ( non-looping ) data flow graphs with pipes or conduit?
+23:31:40 <c_wraith> balac: they don't play so nicely with fanout in general, but it can be done
+23:32:27 <cocreature> balac: for pipes, the usual solution to that is to use pipes-concurrent but that means leaving the nice abstractions provided by pipes
+23:32:58 <Railalis> is this correct? `forM_ [(x, y) | y <- [y $ topLeft r .. y $ botRight r], x <- [x $ topLeft r .. y $ botRight r]] $ setCursorPosition -> putStr "□"` (where r =  Rect)
+23:33:32 <cocreature> s/pipes-concurrent/pipes-concurrency/
+23:33:39 <balac> cocreature: c_wraith : thank you! are there any tutorials that you would suggest for this purpose?
+23:34:04 <balac> (not pipes-concurrency)
+23:35:48 <Railalis> c_wraith: pretty much how I've seen it. However, if I paid this much money to get one, I might as well not shy from the math.
+23:35:55 <balac> also, how is concurrency related to tees and joins ?
+23:36:34 <c_wraith> balac: I don't know of good tutorials, but I can answer how concurrency relates.
+23:37:06 <dmwit> Railalis: `x $ botRight r`, probably. And your second argument to `forM_` looks like it got mangled.
+23:37:28 <c_wraith> Most haskell materials distinguish between the concepts of parallelism and concurrency, defining the former as "things happening at the same time" and the latter as "a progamming model where things are written linearly, despite how their execution might be interleaved"
+23:37:37 <dmwit> Railalis: Try writing a command which takes a single `(x,y)` coordinate and puts a box there. Then you can supply that as the second argument to `forM_`.
+23:37:46 <balac> c_wraith: okay,
+23:38:14 <c_wraith> balac: in that sense, a tee necessarily implies concurrency.  Each of the consumers is written in a linear style, but their execution is interleaved (whether it happens in multiple threads or not)
+23:38:56 <c_wraith> balac: and a join as well, for that matter.  Each producer runs concurrently.
+23:40:50 <balac> c_wraith: okay. but wasn't that level of concurrency a part of the basic premise of pipes?
+23:41:24 <Railalis> would I have to throw in another $ or something if I wanted to do `drawChar :: (Int, Int) -> Char -> IO()`
+23:41:36 <c_wraith> balac: ok, you've got me there.  Yes, it is. :)
+23:41:41 <balac> if not, how are we having interleaved execution of effects? or is it fully deterministic?
+23:42:07 <dmwit> Railalis: ($) ain't magic, neither
+23:42:09 <dmwit> ?src ($)
+23:42:09 <lambdabot> f $ x = f x
+23:42:17 <Railalis> yea I know
+23:42:32 <Railalis> was just hopping I could make a generic
+23:42:39 <Railalis> for any coord char
+23:42:44 <Railalis> rather than for any coor
+23:42:45 <Railalis> rather than for any coord
+23:43:09 <cocreature> balac: it is deterministic, depending on which operators you use you are either using a push-based or a pull-based model and that defines which side is run when
+23:43:11 <dmwit> Yes, you should be able to do that. But "just throw in more $s" sounds like a guess-and-check approach to programming. That doesn't work very well.
+23:43:28 <Railalis> well I just didn't know where to position it
+23:43:52 <cocreature> pipes doesn’t attempt to do asynchronous processing where both sides are run simultaneously
+23:44:40 <cocreature> you can use packages like pipes-async which in some sense is just a restricted form of pipes-concurrency to get that
+23:48:35 <balac> cocreature: okay. why does it break the prettiness?
+23:50:25 <cocreature> balac: because there is no neat way to declaratively describe your graph. your pipes will all just send to channels and then you reuse the channels in the right way and to messy IO stuff to construct the graph
+23:51:02 <cocreature> machines and machines-concurrency are supposed to be better here but I’ve never used those libs
+23:51:30 <balac> i will check them out, thank you!
+23:55:30 <Railalis> Couldn't match expected type V2 with actual type (int, int)
+23:56:08 <dmwit> Sounds like you didn't complete your switch from Coord to V2.
+23:56:08 <Railalis> do I have to `(V2 x y)` vs `(x, y)` now that it's a ADT than a uh `type`?
+23:56:16 <dmwit> Yup!
+23:56:32 <Railalis> any special name for `type`?
+23:56:53 <dmwit> Or `v2` instead of `(x, y)` and use `x v2` and `y v2` instead of `x` and `y`.
+23:57:04 <dmwit> The fancy name is "type synonym".
+23:57:17 <Railalis> hm
+23:57:29 <Railalis> well I'm doing `x  <- ranomness`
+23:57:33 <Railalis> randomness
+23:58:13 <Railalis> then throwing that later into a Rect... so idk how that would really match up

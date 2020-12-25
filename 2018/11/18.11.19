@@ -1,0 +1,2226 @@
+00:08:36 <olligobber> So I'm experimenting with haskell and I tried to do `instance Identity ((->) ()) where' and I get `Illegal instance declaration', not sure why
+00:08:53 <koz_> olligobber: Full error says what?
+00:09:25 <Ferdirand> Identity is a class ?
+00:09:52 <olligobber> Illegal instance declaration for ‘Identity ((->) ())’ (All instance types must be of the form (T a1 ... an) where a1 ... an are *distinct type variables*, and each type variable appears at most once in the instance head. Use FlexibleInstances if you want to disable this.)
+00:09:56 <olligobber> Yeah, Identity is a class
+00:10:13 <koz_> The error message says to turn on FlexibleInstances.
+00:10:19 <Ferdirand> nice, what does it do ?
+00:10:23 <koz_> So stick {-# LANGUAGE FlexibleInstances #-} at the top of your file.
+00:10:44 <Ferdirand> provides (a -> T a) and (T a -> a) or something like that ?
+00:11:34 <olligobber> I wanted to group together all things equivalent to the identity monad into a class
+00:11:42 <olligobber> I dunno why, just experminting
+00:12:52 <olligobber> hmm, FlexibleInstances worked, not sure why it was necessary though
+00:13:15 <koz_> olligobber: 'All instance types must be of the form (T a1 ... an) where a1 ... an are *distinct type variables*.
+00:13:20 <olligobber> oh I see
+00:13:21 <koz_> () is _not_ a type variable.
+00:13:38 <olligobber> I thought the T was the class in that statement, not part of the type
+00:14:07 <koz_> s/()/((->) ())/
+00:14:31 <koz_> But yeah, FlexibleInstances, along with FlexibleContexts, tends to need to be turned on.
+00:14:43 <koz_> Sometimes even for _implicit_ type sigs.
+00:14:52 <koz_> (I've had that one happen a few times when using MonadState, for example)
+00:16:04 <Lears> koz_: that looks like massiv's fault rather than yours. For reasons I can't fathom, `Ix n` is a weird ad-hoc type family rather than something more homogeneous like a newtype over a length-indexed vector (for which your demote function would be easy).
+00:16:38 <koz_> Lears: Well, whoever's fault this is, I'd rather work around it. I figured that by providing base cases for 0,1,2 I should escape this problem right?
+00:17:00 <koz_> I need to somehow disambiguate the signature of the call to demoteIndex.
+00:17:48 <mniip> olligobber, you could work around this issue without using any extensions if you wanted to
+00:18:31 <olligobber> mniip, how? newtype?
+00:18:41 <mniip> class IdentityArrow a;  instance IdentityArrow a => Identity ((->) a)
+00:19:17 <olligobber> oh, interesting
+00:19:18 <mniip> where, if e.g, Identity f has method   x -> f x, IdentityArrow would have method  x -> ((->) a x)
+00:19:40 <koz_> mniip: Is FlexibleInstances really that big a concern in this case though?
+00:19:45 <mniip> koz_, probably not
+00:20:04 <mniip> now that I think of it
+00:20:13 <olligobber> it's still an interesting approach to the problem, ty
+00:20:27 <mniip> all uses of FlexibleInstances can be rewritten using extra typeclasses
+00:20:28 <koz_> Lears: Any thoughts on how I could solve this?
+00:20:45 <mniip> except for maybe   class Equals a b; instance Equals a a
+00:22:32 <koz_> Slight simplification of my issue, for the newly-visible folks: https://gist.github.com/kozross/12c9bfd0506408fc7e3d540cd304471d
+00:24:08 <olligobber> hmm, so far I've made `(->) ()', `(,) ()' and `Either Void' into instances of Identity, I wonder what else there is
+00:24:46 <koz_> Identity (the data type)?
+00:24:57 <olligobber> yeah, that's the obvious one
+00:25:18 <Lears> Not really, koz_. Maybe you could (unsafely if need be) construct and discharge some sane Dicts with the constraints GHC needs to make the leap?
+00:25:34 <koz_> Lears: Using what?
+00:25:51 <koz_> I've never written anything like this before.
+00:25:53 <mniip> olligobber, Terminal a => Identity ((->) a)
+00:26:42 <mniip> (Terminal a, Product p) => Identity (p a)
+00:26:50 <mniip> (Initial a, Coproduct p) => Identity (p a)
+00:27:08 <olligobber> mniip, woah, where are these coming from?
+00:27:14 <mniip> category theory
+00:27:26 <koz_> Yep, I recognize some of these terms, mostly from Edward talks.
+00:27:44 <olligobber> I need to study some category theory
+00:27:58 <mniip> class Terminal a where term :: b -> a -- for a given b, term must be unique
+00:28:09 <koz_> Lears: Would something like http://hackage.haskell.org/package/constraints-0.10.1
+00:28:09 <mniip> class Initial a where init :: a -> b -- for a given b, init must be unique
+00:28:11 <koz_>  do it?
+00:28:23 <mniip> you then have   instance Terminal ()
+00:28:53 <mniip> but also  instance (Identity f, Terminal a) => Terminal (f a)
+00:29:23 <mniip> though that's probably not a good instance for it overlaps everything else
+00:29:33 <mniip> Void -> Void is also Terminal
+00:29:48 <mniip> which I mean, (Initial a, Initial b) => a -> b
+00:29:49 <Lears> Yeah koz_, that has the Dicts I'm talking about. The source code for Data.Constraint is magnificently simple too.
+00:29:51 <olligobber> (Maybe Void) is terminal
+00:30:04 <mniip> Maybe is Coproduct ()
+00:30:10 <koz_> Lears: I've looked at constraints before, but I'm not sure where to start in my case.
+00:30:19 <olligobber> By Coproduct you mean Either?
+00:30:20 <koz_> Like, what constraints do I want to reify Dicts for and where?
+00:30:30 <mniip> yeah, (Coproduct p, Initial a, Terminal b) => Terminal (p a b)
+00:30:39 <olligobber> and Product is (,)
+00:30:39 <mniip> olligobber, Either is an implementation of coproduct in Prelude ye
+00:30:40 <mniip> s
+00:30:46 <olligobber> I see
+00:30:47 <mniip> cateogrically speaking,
+00:31:20 <olligobber> I will try and study some category theory soon
+00:31:21 <mniip> class Coproduct p where comediate :: (a -> x) -> (b -> x) -> p a b -> x
+00:31:39 <koz_> mniip: 'comediate' is 'either', right?
+00:31:56 <mniip> oh I forgot:   inl :: a -> p a b; inr :: b -> p a b
+00:32:27 <mniip> with the law that 'comediate f g' is the unique morphism that satisfies:   f = comediate f g . inl     g = comediate f g . inr
+00:32:42 <mniip> koz_, yes
+00:33:00 <mniip> dually,
+00:33:01 <koz_> (or maybe I guess, although Maybe b ~ Either () b)
+00:33:08 <phadej> http://hackage.haskell.org/package/boring-0.1/docs/Data-Boring.html
+00:33:15 <mniip> class Product p where mediate :: (x -> a) -> (x -> b) -> x -> p a b
+00:33:29 <mniip>   proj1 :: p a b -> a; proj2 :: p a b -> b
+00:33:47 <Lears> koz_: when GHC complains it can't deduce C2 from C1, you can remedy that if you have a `C1 :- C2` in scope and use it with (\\).
+00:33:51 <mniip> f = proj1 . mediate f g;   g = proj2 . mediate f g
+00:34:15 <Lears> Though the ambiguous type here complicates things, I'm not sure what's going on with that.
+00:34:36 <koz_> The way you solve type ambiguity is with a signature usually, but I have no idea where this signature would need to go or how I'd write it.
+00:34:52 <olligobber> phadej, nice
+00:34:52 * koz_ hasn't had to stick type signatures on pattern matches before.
+00:38:00 <geekosaur> (x :: SomeType) in the pattern, and you need ScopedTypeVariables enabled
+00:38:38 <geekosaur> (that used to eb a separate extension but got folded in back in ghc 6.6)
+00:39:44 <ski>   fg = mediate (proj1 . fg) (proj2 . fg)
+00:40:16 <koz_> OK, now I'm getting this (assuming I wrote the sig right): https://gist.github.com/kozross/12c9bfd0506408fc7e3d540cd304471d
+00:58:04 <mniip> ski, that's a consequnce of the uniqueness
+00:58:54 <mniip> perhaps, assuming proj1,proj2 are epi
+01:01:16 <mniip> that's not true in arbitrary categories but is in a category with zero objects or in Set restricted to nonempties
+01:01:39 <ski> hm, i don't think we need to know epi for this
+01:05:52 <ski> selecting `f' as `proj1 . fg' and `g' as `proj2 . fg', we have `f = proj1 . fg' and `g = proj2 . fg'. hence `fg' satisfies the condition that the unique `mediate f g' does, for given `f',`g'. hence `fg = mediate f g', iow `fg = mediate (proj1 . fg) (proj2 . fg)'
+01:06:11 <mniip> true
+01:06:35 <ski> `forall fg.  mediate f g = fg  <=>  f = proj1 . fg /\ g = proj2 . fg' is another way to express that `mediate f g' is the unique `fg' such that `f = proj1 . fg' and `g = proj2 . fg'
+01:08:12 <ski> again, selecting `f' as `proj1 . fg' and `g' as `proj2 . fg' (after picking a `fg'), and feeding the reflexivities of those on the right, we arrive at `mediate (proj1 . fg) (proj2 . fg) = fg' on the left
+01:08:32 <ski> (of course we can only do that because we have that property for all `f' and `g')
+01:09:42 <linnucks> should I download stack or haskell platform?
+01:09:42 <ski> (and for all types `a' and `b')
+01:10:25 <mniip> what does a COMPLETE pragma with a specified type look like for multiple patterns?
+01:11:23 <koz_> mniip: {-# COMPLETE Pat1, Pat2, ..., PatN #-} IIRC
+01:11:33 <mniip> /with a specified type/
+01:14:36 <mniip> I'm looking at  https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/glasgow_exts.html#complete-pragmas
+01:14:47 <mniip> I don't understand what  
+01:14:48 <mniip> {-# COMPLETE T :: [] #-}  means here
+01:14:55 <koz_> mniip: Yeah, me neither to be honest.
+01:15:15 <koz_> I didn't even know this is something you could do.
+01:15:17 <mniip> is that a weird spelling of  T @[]
+01:17:12 <mniip> these look broken to me now
+01:18:43 <dibblego> @hoogle Functor f => f (a -> b) -> a -> f b
+01:18:44 <lambdabot> Prelude fmap :: Functor f => (a -> b) -> f a -> f b
+01:18:44 <lambdabot> Prelude (<$>) :: Functor f => (a -> b) -> f a -> f b
+01:18:44 <lambdabot> Control.Monad fmap :: Functor f => (a -> b) -> f a -> f b
+01:19:47 <koz_> :t ($>)
+01:19:48 <lambdabot> error:
+01:19:49 <lambdabot>     • Variable not in scope: $>
+01:19:49 <lambdabot>     • Perhaps you meant one of these:
+01:19:55 <koz_> % :t ($>)
+01:19:56 <yahb> koz_: Functor f => f a -> b -> f b
+01:20:20 <koz_> OK, not quite.
+01:21:53 <mniip> ah, I think I get it
+01:22:21 <mniip> it is expected that all patterns have types that unify with   a -> b -> ... -> T x y ... z
+01:22:27 <ski> @type flip (fmap . flip ($))
+01:22:28 <lambdabot> Functor f => f (a -> b) -> a -> f b
+01:22:29 <ski> @type \f a -> fmap ($ a) f
+01:22:30 <lambdabot> Functor f => f (a -> b) -> a -> f b
+01:22:55 <ski> at some point, `flip' had this type, in lambdabot
+01:23:00 <mniip> {-# COMPLETE P :: T #-} fixes the T
+01:23:04 <ski> koz_ ^
+01:23:17 <mniip> the only thing that can come after the :: can be a type constructor
+01:23:30 <koz_> mniip: Ah, OK.
+01:23:32 <ski> mniip : what about GADTs ?
+01:23:41 <koz_> @pl \f a -> fmap ($ a) f
+01:23:41 <lambdabot> flip (fmap . flip id)
+01:23:51 <mniip> ski, that's pretty much exactly the context I'm considering this in
+01:25:03 <mniip> interestingly though
+01:25:27 <mniip> GHC seems to be smart enough in that it doesn't require patterns whose existential contexts reveal impossible constraints
+01:26:08 <ski> impossible equational constraints ?
+01:26:25 <mniip> data N = Z | S N
+01:26:38 <mniip> data GN (n :: N) where GZ :: GN 'Z; GS :: GN n -> GN ('S n)
+01:26:56 <mniip> pattern PZ :: () => (n ~ 'Z) => GN n; pattern PZ = GZ
+01:27:07 <mniip> pattern PS :: () => (n ~ 'S m) => GN m -> GN n; pattern PS x = GS x
+01:27:24 <ski> (why the `() =>' ?)
+01:27:28 <mniip> that's the syntax
+01:27:55 <mniip> pattern P :: k => c => t
+01:28:02 <mniip> requires k to match, introduces local c
+01:28:08 <mniip> requires c to use as a constructor
+01:28:20 <ski> oic
+01:28:41 <mniip> also  forall as. k => forall bs. c => t
+01:28:46 <mniip> bs are actually the existential
+01:28:47 <mniip> s
+01:31:35 <ski> well, essentially, we're claiming `<patsyn> :: forall a.. . ..a.. => (exists b.. . ..b.. *> ..a..b..) -> T a..' for a single-argument pattern synonym
+01:32:01 <mniip> something like that
+01:32:10 <mniip> the arrow syntax is really poor
+01:32:39 <ski> where with a `COMPLETE' pragma, we have an iso between a sum of `(exists b.. . ..b.. *> ..a..b..)'s, and `T a..', under the context `..a..', for tyvars `a..'
+01:34:51 <linnucks> should I install stack or platform
+01:37:02 <ski> hmm .. i wonder why not automatically partition into tyvars mentioned in the result type, and ones not mentioned; and then partition the constraints into ones mentioning any of the latter tyvars, and ones which doesn't
+01:37:59 <ski> (are there potentially situations where doing that would not be what you want ?)
+01:38:59 <ski> one could also wonder whether one could say `GN ('S n)' in the result type, instead of the explicit equality constraint, hmm ..
+01:39:07 <mniip> ski, that would be even more confusing
+01:39:16 <mniip> pattern P :: Ctx => ...
+01:39:24 <mniip> Ctx would mean different things depending on the ...
+01:41:25 <ski> hm, how about `data C a => T a = forall b. D a b => MkT (F a b)' yielding `MkT :: forall a b. (C a,D a b) => F a b -> T a', representing `MkT :: forall a. C a => (exists b. D a b *> F a b) -> T a' ?
+01:42:55 <mniip> ski, this calls for an introduction of a new sort (not even kind)
+01:43:09 <ski> (or, if you prefer, `data C a => T a :: * where MkT :: forall b. D a b => F a b -> T a', though i don't recall whether the `C a =>' syntax is even allowed on a GADT-style declaration, if `DatatypeContexts' is enabled)
+01:43:36 <ski> i'm wondering to which extent this situation is parallel
+01:44:10 <devoid_> what does *> do
+01:44:46 <devoid_> it's pretty hard to search for it
+01:45:50 <koz_> % :t (*>)
+01:45:50 <yahb> koz_: Applicative f => f a -> f b -> f b
+01:45:52 <mniip> devoid_,   data c *> a = c => With a
+01:46:07 <ski> mniip : i'm not sure it would be even more confusing than being able to restate `data Foo a = forall b. D a b => MkFoo (F a b)' as `data Foo :: * -> * where MkFoo :: forall a b. D a b => F a b -> Foo a'
+01:46:12 <mniip> note that this is different from c => a
+01:46:36 <ski> mniip : here we already have the same kind of "differing" interpretations of `forall a' vs. `forall b'
+01:46:56 <mniip> ski, gimme a minute
+01:47:12 <ski> depending on whether the tyvar is mentioned in the result type or not. `forall b' gets converted into `exists b' (by "uncurrying") because `b' is not in the result type
+01:48:14 <ski> devoid_ : `*>' (as well as `exists') is pseudo-Haskell, imaginary syntax we use to discuss more clearly some type concepts which (currently) require encoding in a more roundabout way, in GHC, to express
+01:49:28 <ski> devoid_ : a value of type `Eq a => [a] -> [a]' is such that, *if* you can show `Eq a' holds in the current situation, *then* you can use the value as having type `[a] -> [a]'. so it's *requiring* the *user*/*caller* to provide evidence for the constraint `Eq a'
+01:51:50 <ski> (however, if you want to *implement* such a value, then you, the *callee*, is free to *assume* that `Eq a' holds, and freely make use of this evidence that the user/caller will provide to you)
+01:52:59 <ski> devoid_ : a value of type `Show a *> [a]' is such that, it *both* (itself) establishes that `Show a' holds, *and* a value of type `[a]'. so the user/caller is free to assume that `Show a' holds, can freely make use of this evidence that the implementer/producer/callee provides to you
+01:54:13 <ski> (however, if you want to *implement* such a value, then you, the *callee*/*implementor*/*producer* must make sure that `Show a' actually holds, that you can provide evidence of this to the caller/consumer/user)
+01:55:20 <ski> devoid_ : i selected the symbol `*>' to talk about this, because it's like a version of `=>', but instead of how `=>' is in a way analogous to `->', `*>' is analogous to `(,)' (product type)
+01:57:40 <ski> devoid_ : an example would be `Map String (exists a. Show a *> [a])', a "heterogenous" container (finite map), where different `String' keys can map to values being lists having *different* element types, but where we know that each such element type is an instance of `Show'
+01:58:56 <ski> (each individual list is still homogenous, all elements of it has the same (unknown/hidden/forgotten/abstract/opaque) type, of which we only know that it's an instance of `Show'. but different lists in general have different element types, can never be assumed to have compatible element types)
+01:59:09 <devoid_> oh i get it, i think
+01:59:19 <ski> devoid_ : makes any sense at all ? it help if you already have encountered existentials before
+02:00:13 <ski> anyway, typically `*>' goes just after `exists', just like `=>' typically goes just after `forall'
+02:01:25 <ski> a value of type `Eq a => [a] -> [a]' is implicitly (in the dictionary-passing implementation of class constraints) like a function that takes a dictionary providing the evidence for `Eq a', before returning a function of type `[a] -> [a]'
+02:02:07 <ski> a value of type `Show a *> [a]' is implicitly like a *pair* of a dictionary providing evidence for `Show a', and a value of type `[a]'
+02:03:24 <ski> also note that, conceptually, a value of type `forall a. [a] -> [a]' is conceptually like a function that, given a type to replace `a' with, say `Int', gives you back a value in which type `a' has been replaced by the selected type, in this case a value having type `[Int] -> [Int]'
+02:04:26 <ski> similarly, conceptually, a value of type `exists a. (a,a -> a,a -> String)' is like a pair of a type `a', and a value (a triple in this case) having type `(a,a -> a,a -> String)' for the *particular* selected type `a'
+02:04:58 <ski> a type-passing implementation could actually implement values of type `forall a. ..a..' resp. `exists a. ..a..' like this
+02:06:08 <ski> however, GHC does type-erasure, so nothing, corresponding to the type `a', is actually passed/stored at run-time
+02:08:32 <ski> (in semi-recent GHC extension, one can actually explicitly write the type passing, so that if `reverse :: forall a. [a] -> [a]', then `reverse @Int :: [Int] -> [Int]' is how we can explicitly *consume* such a value of `forall'-type (i.e. a polymorphic value). however, i'm not aware of a corresponding notation for the *produce* case)
+02:11:05 <ski> (clarification, a type-passing implementation would pass/store some run-time representation of a type. that might just be the size of values of that type, to enable polymorphism over types whose values don't all have the same uniform size. or it could be a more involved type-info structure detailing the layout of values of this type, e.g. for use in an accurate GC that knows the types of all values it traces)
+02:11:44 * ski idly wonders whether anyone is still following
+02:13:09 <mniip> ski, http://mathb.in/29245
+02:13:22 <mniip> ski, more optional http://mathb.in/29246
+02:13:39 <mniip> whoops, I didn't rename the rule, whatever
+02:14:33 <mniip> so for example
+02:15:03 <mniip> pattern MkT :: forall a. (exists b. D a b *> F a b |> square) <- T a 
+02:15:15 <mniip> <-> even
+02:16:50 <mniip> with RParam you could have something like
+02:17:06 <mniip> pattern NPlusK :: Int -> (Int <-> Int)
+02:17:44 <mniip> (the matching part of a bidirection pattern is only supposed to be a retraction of the constructor part)
+02:17:55 <mniip> (if at all)
+02:21:15 <govno> :t |>
+02:21:16 <lambdabot> error: parse error on input ‘|>’
+02:22:00 <Ariakenom> :t (|>)
+02:22:02 <lambdabot> Snoc s s a a => s -> a -> s
+02:23:23 <mniip> yeah no
+02:23:31 <mniip> that's a notation introduced in the paste
+02:24:04 * Ariakenom scrolls up
+02:24:07 <Ariakenom> oh right
+02:29:04 <ski> mniip : how's `\mathscr{R}' introduced ?
+02:29:29 <mniip> oh whoops
+02:29:32 <mniip> that's a typo
+02:29:36 <ski> ("if at all" meaning "if at all present" ?)
+02:30:00 <ski> you have three occurances of it, in the latter paste
+02:30:12 <phadej> ski:
+02:30:16 <phadej> \usepackage{mathrsfs} % mathscr
+02:30:51 <mniip> ski, http://mathb.in/29247
+02:30:57 <ski> phadej : no, i mean as introduction rules(s), in mniip's inference rules in the paste(s)
+02:31:05 <phadej> ah
+02:31:32 <mniip> ahh, still one occurence
+02:31:42 <mniip> ski, http://mathb.in/29248
+02:32:19 <phadej> TIL mathb.in
+02:32:20 <phadej> cool
+02:32:36 <mniip> P kinda stands for pattern, PR used to stand for PatRhs but then I changed the order haha
+02:33:58 <ski> ok, ty
+02:35:01 <ski> mniip : fwiw, `<-' (and `<->') is partial (in general) (in the right-to-left direction)
+02:35:34 <ski> (as i'm sure you know. just saying that i'm not convinced it makes that much sense to use the symbol `<-' here)
+02:35:35 <mniip> yes
+02:36:01 <ski> (i get what you want to express by it, of course)
+02:36:26 <mniip> ((t |> square) <- s) is like s -> Maybe t
+02:36:40 <mniip> and ((t |> square) <-> s) is like  s -> Maybe t with a retract t -> s
+02:37:37 <mniip> or is it a section?
+02:37:46 <ski> yes, or like `:- pred succ(nat,nat).', `:- mode succ(in,out) is det.', `:- mode succ(out,in) is semidet.' in Mercury, where the last mode declaration is for the backwards, possibly-failing, mode
+02:39:12 <ski> (or, one could use a function succ/1 instead of a predicate succ/2, `:- func succ(nat) = nat.', `:- mode succ(in) = out is det.', `:- mode succ(out) = in is semidet.')
+02:39:44 <mniip> I guess it should be both a retract and a section for some twisted meaning thereof
+02:40:21 <ski> well, if we go from `t' to `s', then back to `t', that will never fail
+02:40:42 <mniip> con <$> match x   is either Nothing or Just x
+02:40:47 <mniip> match (con x)  is Just x
+02:41:11 <ski> i suppose we're in a category of partial functions, or perhaps of arbitrary binary relations, there
+02:41:31 <mniip> yeah nah, category of partial functions sucks for this
+02:41:58 <ski> in the other direction, we may fail. so while we have `r . s = id', we only have `s . r =[ id', `=[' being the definedness ordering
+02:42:04 <mniip> oh!
+02:42:26 <mniip> fromMaybe <*> (fmap con . match) = id
+02:42:35 * ski . o O ( "Categories, Allegories" by Freyd,Scedrov )
+02:43:41 <mniip> Kleisli_Maybe(Hask) has Hask fully/faithfully embdedded in it
+02:43:56 <mniip> and I think it's reflective too?
+02:44:16 <mniip> kleisli lift serves as a right adjoint to the inclusion functor
+02:44:22 <mniip> coreflective!
+02:44:30 * ski hasn't learned what "reflective" (nor "coreflective") means
+02:45:08 <ski> fully ?
+02:45:15 <mniip> in short, when A is a subcategory of B, with  i : A -> B
+02:45:22 <mniip> A is a reflective subcategory when i has a left adjoint
+02:47:36 <ski> `A >--->_Kleisli_Maybe(Hask) B' contains `const Nothing', in addition to the embeddings `Just . f' of morphisms `f' in `A >--->_Hask B'
+02:48:08 <mniip> yes but Just is monic
+02:48:22 <mniip> hence  f mapsto Just . f  is injective
+02:48:24 <ski> yes, so faithful
+02:48:28 <mniip> yes
+02:48:37 <mniip> ah yes, I said full. that's incorrect
+02:48:41 <ski> but not full, unless i'm very confused
+02:48:51 <ski> ok
+02:49:33 <mniip> Hask -> Kleisli_Maybe(Hask) is faithful and essentially injective on objects
+02:49:47 <mniip> which is close enough to being a subcategory inclusion thingie
+02:50:41 <ski> "essentially injective" means injective upto iso ?
+02:51:23 <govno> _Hask it is another category?
+02:51:34 <mniip> FX = FY => X iso Y
+02:51:37 <mniip> something like that
+02:52:16 <mniip> dual to "essentially surjective on objects" where forall X, exists Y s.t.  FY iso X
+02:52:36 <ski> perhaps the group of automorphisms on `F X' should be iso to the group of automorphisms on `X', there ?
+02:53:11 <ski> mhm
+02:53:53 <mniip> equivalence functors are eso and eio
+02:53:57 <ski> govno : no, `_' is just LaTeX notation for subscript
+02:54:32 <ski> hmm, for reflective, `A >--->_Hask i B' should correspond to `r A >--->_Kleisli_Maybe(Hask) B', i suppose ?
+02:54:51 <ski> and for coreflective, `i A >--->_Hask B' should correspond to `A >--->_Kleisli_Maybe(Hask) c B' ?
+02:55:28 * ski doesn't have any good feel for what reflective and coreflective would mean
+02:55:59 <mniip> given A subcategory of B,  A(FX, Y) ~~ B(X, Y) natural in X:B, Y:A
+02:56:10 <mniip> that's reflective
+02:57:16 <ski> ok, that's what i said
+02:57:29 <ski> and i suppose coreflective is an adjunction in the other direction
+02:57:35 <mniip> consider Ab the subcategory of Grp
+02:58:02 <mniip> consider the functor that maps a group G to G/[G,G]
+02:58:44 <mniip> for any abelian Y, Grp(G, Y) ~~ Grp(G/[G, G], Y) = Ab(G/[G, G], Y)
+03:00:49 <ski> hm, right. the forgetful is faithful
+03:01:24 <ski> the factor-commutator group / abelianization
+03:03:06 <ski> ok
+03:04:01 <ski> is the abelianization functor from `Grp' to `Ab' here called a "reflector" or what, in the context of reflective subcategories ?
+03:04:15 <mniip> yes
+03:04:34 <ski> (i might have read that term somewhere, not sure)
+03:05:11 <mniip> (where's the refractor)
+03:05:29 <ski> (would that be the coreflector ?)
+03:08:00 <mniip> ski, consider functor T that sends each abelian group to its torsion subgroup
+03:08:11 <mniip> and the category produced by the image of T
+03:08:21 <mniip> that's coreflective in Ab
+03:11:10 <blackberry9900> wire-server
+03:14:04 --- mode: glguy set +v kahlil29
+03:14:49 <__monty__> blackberry9900: Is that a question or do you have a way to talk to Wire with your irc client?
+03:15:13 <kahlil29> hey, I wanted to know how to use a Prism as a constructor. Specifically http://hackage.haskell.org/package/swagger2-2.3.0.1/docs/Data-Swagger-Lens.html#v:_ParamOther
+03:15:37 <kahlil29> I just read a couple of posts and stackoverflow questions, but it's still not clear to me
+03:16:06 <__monty__> Are there rss feeds for the haskell mailing lists?
+03:16:11 <blackberry9900> i can not access wire.com
+03:16:14 <ski> mniip : hm, so `Ab(I P,A)' equivalent to `Tor(P,T A), i assume
+03:25:26 <lyxia> kahlil29: review _ParamOther paramOtherSchema
+03:25:38 <lyxia> http://hackage.haskell.org/package/lens-4.17/docs/Control-Lens-Review.html#v:review
+03:25:57 <kahlil29> lyxia: Thanks a bunch! I'll try that out! :) 
+03:28:56 <linnucks> hi
+03:28:59 <linnucks> I have a problem
+03:29:22 <linnucks> 0009.hs:6:1: error: parse error on input ‘trip’  |6 | trip 1 k = if sqrt(j^2 + k^2) mod' 1  == 0 then putStrLn j * k * sqrt(j^2 + k^2)
+03:30:27 <lyxia> did you mean "... `mod` 1"? Is there an "else" after the "then"?
+03:30:43 <linnucks> I imported a special mode
+03:30:45 <linnucks> mod
+03:30:49 <linnucks> that works with cloaks
+03:30:53 <linnucks> floats I mean'
+03:30:58 <linnucks> mod'
+03:31:09 <linnucks> import Data.Fixed
+03:31:36 <lyxia> then it would be `mod'` to use it as an infix operator, though that wouldn't be  the source of that particular error
+03:31:58 <lyxia> can you paste your code and full error in a gist
+03:32:16 <lyxia> it's difficult to see what's wrong because so much is truncated
+03:33:00 <lyxia> I can't see any reason other than the missing else though
+03:33:22 <geekosaur> if the error is in trip on that line ten the real error is on the previous line with content
+03:34:23 <linnucks> https://gist.github.com/andrewjohnroy/d038270c86bbbc1a5d99d85e99fb25ac
+03:35:09 <[exa]> linnucks: if without else?
+03:35:18 <linnucks> oh oops ahha
+03:35:21 <linnucks> I'm stoopid
+03:35:29 <linnucks> wait
+03:35:35 <linnucks> do I need else?
+03:35:42 <lyxia> always
+03:35:44 <linnucks> really
+03:35:45 <linnucks> in C
+03:35:58 <lyxia> well this is not C
+03:36:03 <geekosaur> in C if is a statement
+03:36:06 <linnucks> I can always just go if {blah}
+03:36:11 <linnucks> in C
+03:36:14 <geekosaur> in Haskell if is an expression. in Haskell everything si an expressions
+03:36:28 <linnucks> this is my first real haskell porogram btw
+03:36:33 <geekosaur> even iof it doesn't look like an expression, it will still be an expression
+03:36:54 <geekosaur> (or a declaration)
+03:37:30 <[exa]> linnucks: in C there's a good default value for else, "do nothing and return nothing", that thing doesn't exist in haskell because you need to return something so that the type is preserved
+03:37:39 <lyxia> one approximation of other languages "if with no else" is "when"
+03:38:09 <[exa]> (side hallucination: is there something for defaulting the omitted else to some kind of 'empty' ?)
+03:42:11 <linnucks> https://gist.github.com/andrewjohnroy/a8e39e0f08d2f6c2a83384ea5929534d
+03:42:17 <linnucks> I have 10 million errors
+03:43:58 <[exa]> linnucks: haskell is pure, a function that returns pure values can not do "side effects" like input/output
+03:44:45 * ski . o O ( `data Sierpinski = Terminated; whenS :: Sierpinski -> a -> a; whenS Terminated x = x; andS :: Sierpinski -> Sierpinski -> Sierpinski; andS Terminated Terminated = Terminated' )
+03:44:56 <geekosaur> @where cis194
+03:44:56 <lambdabot> http://www.seas.upenn.edu/~cis194/spring13/
+03:45:24 <lavalike> ski: why
+03:45:35 <[exa]> ski: is that the 'kindof empty' or is it unrelated?
+03:45:42 <ski> (`orS :: Sierpinski -> Sierpinski -> Sierpinski' requires some notion of concurrency, to spawn both arguments, and abort the other one as soon as one terminates)
+03:45:54 <ski> [exa] : yes
+03:46:00 <amx> I just dared to take a look at .ghc.environment.x86_64-darwin-8.4.4 in and saw that all the package names have their vowels removed. Is there any reason for this or did I stumble upon an easter egg?
+03:46:05 * [exa] starts to decipher
+03:46:10 <amx> -in
+03:47:00 <ski> (note that `falseS :: Sierpinski; falseS = falseS' is bottom/non-termination. obviously `trueS :: Sierpinski; trueS = Terminated')
+03:47:20 <ski> (and there is no `notS :: Sierpinski -> Sierpinski')
+03:48:56 <[exa]> ski: I was aiming at something simpler probably, like 'instance DefaultElse (Maybe a) {defaultElse = Nothing} ' :]
+03:49:25 <[exa]> ski: if I got it correctly the sierpinski uses non-termination as the 'other' value?
+03:49:39 <ski> (further, one may consider `apart :: T -> T -> Sierpinski' for various types `T', e.g. `Stream Bool'. we can semi-decide when two infinite streams of bits are distinct/apart. we say that `T' is an instance of `Hausdorff' if we have such an `apart' operation)
+03:51:14 <[exa]> ski: interesting, thanks
+03:51:34 <ski> (also, `forAll :: (T -> Sierpinski) -> Sierpinski' when we can semi-decide whether a semi-decidable predicate holds for all values of type `T'. we say `T' is an instance of `Compact' in this case. interestingly, this can work even if `T' is not a finite type)
+03:52:11 <ski> (there's also `forSome :: (T -> Sierpinski) -> Sierpinski', when `T' is an instance of `Overt'. but overtness isn't a concept of classical topology)
+03:52:14 <ski> @where impossible
+03:52:14 <lambdabot> <http://math.andrej.com/2007/09/28/seemingly-impossible-functional-programs/>,<http://math.andrej.com/2008/11/21/a-haskell-monad-for-infinite-search-in-finite-time/>
+03:52:18 <ski> @where topology
+03:52:18 <lambdabot> "topology in Haskell" <http://www.haskell.org/pipermail/haskell/2004-June/014134.html> and "Synthetic topology of data types and classical spaces" <http://www.cs.bham.ac.uk/~mhe/papers/entcs87.(pdf|
+03:52:18 <lambdabot> dvi|ps)> by Mart�n Escard�
+03:52:28 <ski> [exa] : yes
+03:53:46 <[exa]> ski: does it correctly remind me the diagonalization from enumerability theory?
+03:53:52 <ski> amx : perhaps ask in #ghc ?
+03:56:07 <ski> well, a predicate of type `Nat -> Sierpinski' corresponds to a recursively/computably enumerable subset of `Nat'
+03:56:30 <[exa]> goood
+03:56:36 <ski> probably one can relate it to diagonalization as well
+03:57:18 <ski> btw, in topology, continuous functions from a space `X' to `Sierpinski' corresponds exactly to open subsets of `X'
+03:57:56 <ski> (continuous corresponds to computable, and open to recursively/computably enumerable / semi-decidable)
+03:58:20 <[exa]> the `foldr1 orS' would probably be diagonalization as they name it, for list-style class
+03:58:46 <__monty__> I'm having some trouble implementing `coerce :: (Contravariant f, Functor f) => f a -> f b`. Currently I have `coerce = fmap undefined` but that seems weird and not at all a proof that something which is Contravariant and Functor must be "empty."
+03:58:53 <[exa]> yeah that would probably make sense (/me not good in topology)
+03:59:00 <ski> `Sierpinski' is the space consisting of two points, `{Terminated,_|_}', where the three open sets are `{}',`{Terminated}',`{Terminated,_|_}', not including `{_|_}'
+03:59:03 <linnucks> https://gist.github.com/andrewjohnroy/c52a79ba749b85bef72612b35dfdd86c
+03:59:10 <linnucks> I almost got rid of all the errors
+03:59:14 <linnucks> only 3 now
+03:59:45 <lyxia> linnucks: `mod'`
+03:59:54 <linnucks> may I ask why
+03:59:59 <linnucks> backticks
+04:00:14 <ski> see the guest blags by Escardó, at Bauers blag above, and Escardó's thesis
+04:00:32 <lyxia> linnucks: that's how you make an alphanumerical identifier into an infix operator
+04:00:41 <ski> > gcd 15 21
+04:00:43 <[exa]> linnucks: mod' is a function, like for (mod' 1 3); backticks make it to operator
+04:00:44 <lambdabot>  3
+04:00:49 <ski> > 15 `gcd` 21
+04:00:51 <lambdabot>  3
+04:00:53 <linnucks> ohh
+04:00:55 <[exa]> linnucks: also you want to use 'print' instead of 'putStrLn'
+04:00:58 <ski> > 2 + 3
+04:00:59 <merijn> Also, prefer guards over that if/then/else formulation
+04:01:00 <lambdabot>  5
+04:01:00 <lyxia> linnucks: otherwise that's being parsed as sqrt applied to three arguments
+04:01:02 <ski> > (+) 2 3
+04:01:04 <lambdabot>  5
+04:01:10 <ski> linnucks ^
+04:01:42 <ski> linnucks : you were missing brackets around the argument of `putStrLn', above ..
+04:03:02 <ski> linnucks : ok, you moved that mistake from `trip' to `main'
+04:03:20 <ski> before, should be
+04:03:39 <ski>   trip j 1 = if sqrt(j^2 + 1) mod' 1  == 0 then putStrLn (j * k * sqrt(j^2 + k^2)) else putStrLn 1
+04:03:49 <merijn> linnucks: Consider this approach using guards: https://hastebin.com/egaqohukik.pl
+04:03:52 <ski> (you were also missing `putStrLn' in the `else' branch)
+04:03:54 <ski> or even
+04:04:08 <ski>   trip j 1 = putStrLn  (if sqrt(j^2 + 1) mod' 1  == 0 then j * k * sqrt(j^2 + k^2) else 1)
+04:04:12 <ski> now, should be
+04:04:21 <andrevdm> @linnucks: one other thing I think its worth adding top level type sigs, I can post a working version if that helps?
+04:04:21 <lambdabot> Unknown command, try @list
+04:04:25 <ski>   main = putStrLn (trip 1000 1000)
+04:04:35 <andrevdm> linnucks: one other thing I think its worth adding top level type sigs, I can post a working version if that helps?
+04:04:37 <ski> (`do' not required, if there's just one command after it)
+04:06:12 <ski> linnucks : i would probably bind `sqrt(j^2 + 1)' and `sqrt(1 + k^2)' in `where's, rather than repeating them
+04:06:44 <ski> (ok, ditto for `sqrt(j^2 + k^2)' as well)
+04:06:58 <merijn> ski: aka, my version from 10 lines up ;)
+04:07:03 <linnucks> https://gist.github.com/andrewjohnroy/c445571aad8a9bba558741791d444096
+04:07:07 <linnucks> still 2 errors
+04:07:18 <linnucks> I will simply it once it compiles
+04:07:24 <linnucks> simplify
+04:07:34 <linnucks> Occurs check: cannot construct the infinite type: a ~ a -> a
+04:07:42 <linnucks> No instance for (Num String) arising from the literal ‘1000’
+04:08:03 <ski> merijn : yea, i didn't figure out how to get it to display the raw code (i just got an almost blank page)
+04:08:18 <merijn> ski: ah, maybe
+04:08:24 <merijn> ski: I miss lpaste :(
+04:08:48 <merijn> ski: Odd though, since I have cookies and everything disabled, so generally if it works for me it works for most people :)
+04:09:45 <lyxia> linnucks: trip j-1 k  means  (trip j) - (1 k),  you want  trip (j-1) k
+04:09:56 <[exa]> linnucks: there's a difference between (trip j-1 k) and (trip (j-1) k)
+04:09:59 <merijn> linnucks: Honestly, I would recommend simplifying and adding types before worrying about it compiling. Because things like "Num String" tend to mean "you're thinking a type is something it isn't" which is usually solved by add more type signatures :)
+04:10:11 <[exa]> linnucks: in the first case, '1' is used as  a function (usually not going to work)
+04:14:40 <linnucks> ok
+04:15:48 <merijn> linnucks: Simply adding a type signature for trip will almost certainly dramatically simplify your error messages
+04:16:15 <linnucks> ooh it compiled
+04:17:04 <merijn> linnucks: In fact, both errors in your last paste only exist because GHC is trying to make all the types fit in a way other than you expected :)
+04:19:34 <ski> linnucks : anyway, why give `0' for non-integers ?
+04:20:17 <merijn> linnucks: Specifically, the first error is due to the - issue mentioned, which it would report more sensibly if it knew what type "trip" had, and the second is from trying to pass trip's result to "putStrLn" (which wants a String). So it checks if "trip" can return a String and concludes that (since trip works for any Num instance) that the thing going wrong is the lack of Num instance for String. If 
+04:20:23 <merijn> you'd added a type signature for trip that explicitly used Fixed (which I assume from the imports is what you want) both errors would have been more clear errors of the style "Expected: String; Actual: Fixed a" which is considerably easier to understand :)
+04:26:02 <ski> wasn't there some package with an (hopefully reasonably efficient) integer square root operation ?
+04:26:14 <merijn> Probably...
+04:26:36 * ski finds integer logarithms, and other such stuff, but not integer square roots ..
+04:27:09 <ski> (is there such an operation in GMP ?)
+04:27:59 <Clint> https://gmplib.org/manual/Integer-Roots.html#Integer-Roots
+04:28:15 <linnucks> I'm trying to find abc for a^2 + b^2 = c^2 s.t a < b < c && a <1000 and b < 1000
+04:28:24 <linnucks> but I have a bug I tihnk
+04:30:18 <ski> pythagorean triples
+04:30:59 <ski> (fwiw, `a < 1000' is redundant, since `a < b' and `b < 1000')
+04:31:10 <linnucks> i know
+04:32:04 <ski> hm, so you're counting them ?
+04:33:33 <linnucks> there is only one
+04:34:06 <[exa]> certainly not
+04:34:13 <quicksilver> 3,4,5; 5,12,13
+04:34:16 <quicksilver> (but there are lots more)
+04:35:25 <opqdonut> change it to ^3 and you'll have a more fun search
+04:38:28 <[exa]> linnucks: I found 878 of them
+04:39:21 <[exa]> opqdonut: oh you!
+04:41:15 <ski> one could also ask whether one should only count "reduced" triples (ones which are coprime, have greatest common factor/divisor `1')
+04:41:47 <ski> if `(a,b,c)' is a pythagorean triple, then also `(k
+04:41:56 <ski> *a,k*b,k*c)' is one
+04:48:06 <[exa]> I always thought that there's much much more of those non-reduced even in numbers this small, but there's full 158 of the reduced <1000
+04:48:09 <[exa]> interesting.
+04:50:11 <ski> (i assume you only counted ordered triples, as it seems linnucks wanted to)
+04:52:11 <[exa]> yes
+05:07:36 <dominik> Hi, I've just got an FP question from a collegue that I didn't know how to answer: Suppose I have a string base = "some content" and two different conditions on how to add values to this string, how would you enrich `base` in idiomatic Haskell?
+05:08:02 <merijn> dominik: What sorta conditions do you mean?
+05:08:28 <linnucks> https://gist.github.com/andrewjohnroy/a40aff23a1893cc3a12d884470ed134c
+05:08:31 <dominik> What I'm thinking of is to have an enrichment function that does a pattern match case (cond1, cond2) of (True, True) => ...; (True, False) => ... and so on
+05:08:35 <linnucks> I'm getting a weird error
+05:08:36 <dominik> but this doesn't seem very elegant
+05:08:50 <dominik> Is there a more elegant way to do it?
+05:09:02 <linnucks> parse error on input ‘=’    Perhaps you need a 'let' in a 'do' block?
+05:09:03 <merijn> dominik: If this is within a function you can use a where block + guard
+05:10:00 <geekosaur> linnucks, count parentheses :)
+05:10:28 <merijn> dominik: Like https://hastebin.com/okemedabew.bash
+05:11:56 <dominik> merijn: ok, I see. Its just that if either one of the conditions doesn't apply, you don't really want to do an enrichment (or in your case, add a suffix)
+05:12:18 <merijn> dominik: Append empty string
+05:12:26 <dominik> and my collegue (coming from an IMP background) says that its much nicer to do this with partial if statements
+05:12:35 <linnucks> https://gist.github.com/andrewjohnroy/a3c3637a4f7c2604a97784ec413faa98
+05:12:43 <merijn> dominik: Well, you could use a Monoid based approach
+05:12:55 <linnucks> ooh
+05:12:57 <linnucks> brackers again
+05:13:49 <merijn> dominik: If you're willing to spelunk through way, WAY, *WAY* overly generic code I got a nice example of a Monoid based approach
+05:14:10 <linnucks> cannot construct the infinite type
+05:14:11 <linnucks> wat
+05:14:12 <linnucks> the hell
+05:14:13 <merijn> dominik: aka "generalised FizzBuzz": https://gist.github.com/merijn/cd0e7918a96fe913cf7d66833e8da354
+05:14:34 <merijn> FizzBuzz for any monoidal result :p
+05:14:59 <merijn> linnucks: "infinite type" is generally "you're trying to use a value inside itself"
+05:15:32 <merijn> linnucks: Try writing a type signature for "trip"
+05:15:40 <dominik> merijn: hmm, I also think it is maybe overkill for such a simple problem
+05:15:52 <merijn> linnucks: Oh, I see the problem
+05:16:03 <merijn> linnucks: Line 5, you're using 'a' as a function
+05:16:27 <merijn> dominik: Well, yes, this thing is overkill, that was part of the joke
+05:16:37 <dominik> I'm just trying to see if https://hastebin.com/nanuciyeha.bash
+05:16:40 <dominik> merijn: :-)
+05:16:47 <merijn> dominik: But a lot of "if without else" map to monoidal patterns
+05:16:47 <dominik> is the best we can do
+05:17:08 <linnucks> um
+05:17:12 <merijn> dominik: mempty being the identity, mapping else to mempty behaves like "if without else"
+05:17:22 <linnucks> how do I not use a as a function
+05:17:38 <merijn> dominik: So it's just a matter of mapping the issue to monoids in a convenient way
+05:17:41 <[exa]> dominik: functions on monoids are monoids, you can add them together and use 'mempty' for the else
+05:17:45 <merijn> linnucks: Remove the parenthesis around the expression
+05:18:20 <merijn> dominik: [exa] is right, functions have a Monoid instance (the best Monoid instance, even!)
+05:18:32 <[exa]> dominik: btw it easily generalizes to whole lists of conditions, not only 2
+05:18:38 <merijn> dominik: If you have lots of functions that conditionally return a String you can use that
+05:19:03 <merijn> dominik: "mappend f g = \x -> mappend (f x) (g x)"
+05:19:39 <merijn> dominik: So if 'f' and 'g' return either a fixed String or mempty, then "f <> g" will do what you want
+05:20:08 <dominik> merijn, [exa]: ok, I see. Thank you!
+05:20:10 <dominik> :-)
+05:20:11 <merijn> dominik: You can even do "mconcat [f,g,h,i,j]" to combine *lots* of such conditional augmentations into one function
+05:20:31 <merijn> dominik: Some of my recent Cabal patches heavily abuse this
+05:20:44 <dominik> merijn: and each function would return mempty in the case when the condition doesn't apply, right?
+05:21:04 <merijn> dominik: Right
+05:21:09 <merijn> dominik: Check this code: https://github.com/haskell/cabal/blob/master/Cabal/Distribution/Simple/Program/GHC.hs#L50-L294
+05:21:11 <dominik> so it would basically mean an if else per function and then `mappend` to concat all those, right?
+05:21:26 <merijn> dominik: Basically 80-90% of that code is "using monoids to conditionally do stuff"
+05:22:26 <merijn> dominik: For example, I'm trying to do "check if any of these conditions is true", so it's a huge list of "String -> Any" (where Any is a newtype of Bool which uses the OR monoid)
+05:22:48 <merijn> dominik: And I simply use mconcat to flatten "[String -> Any]" into "String -> Any"
+05:23:20 <dominik> wow, cool. Thank you! 
+05:23:37 <ski> > sortBy (comparing length <> compare) (words "The quick brown fox jumps over the lazy dog")
+05:23:39 <lambdabot>  ["The","dog","fox","the","lazy","over","brown","jumps","quick"]
+05:23:42 <ski> @where monoids
+05:23:42 <lambdabot> comment on "Monoids? In my programming language?" by Cale in 2008 (or 2009 ?) at <http://www.reddit.com/r/programming/comments/7cf4r/monoids_in_my_programming_language/c06adnx> about a use of `
+05:23:42 <lambdabot> instance Monoid a => Monoid (rho -> a)'
+05:23:46 <ski> dominik ^
+05:24:02 <merijn> dominik: Well, you can write a generalised version so instead of "if else per function" you simply have a predicate based wrapper instead to "generate" the individual predicates
+05:24:24 <merijn> dominik: For example, see "from" and "to" on line 60 and 65 in my link
+05:24:43 <merijn> dominik: Which do exactly the sorta thing you asked for
+05:24:58 <merijn> Nice bonus: from and to compose to do exactly what you need/expect
+05:25:40 <dominik> cool, I'm having a look now :-)
+05:25:47 <dominik> thanks for all the pointers
+05:25:48 <dominik> !
+05:26:13 <merijn> dominik: And the generalised FizzBuzz one (while a joke) shows a bunch of related neat tricks too
+05:27:26 <merijn> I should probably add type signatures to the function in FizzBuzz, I have to think to hard to read it :)
+05:59:44 <linnucks> https://gist.github.com/andrewjohnroy/bb59ebb525cdfff4f852b2ff564db187
+05:59:47 <linnucks> help
+05:59:53 <linnucks> I got one error
+06:00:07 <linnucks> • Occurs check: cannot construct the infinite type: t ~ t -> t
+06:00:30 <geekosaur> you're still making the same mistakes
+06:00:40 <geekosaur> 'trip a+1 b'
+06:01:17 <linnucks> hang on
+06:01:27 <linnucks> if haskell detects two conditions that are correct on the guard
+06:01:32 <linnucks> which one does it choose
+06:01:50 <geekosaur> line3s 6-8 all have the same issue where you ant it to imagine you put parenthese around things
+06:02:16 <geekosaur> it processes guards in order, takes the first that produces True
+06:16:39 <linnucks> if I have a recursive statement that calls itself with two functions
+06:16:43 <linnucks> it's going to get messyu
+06:19:13 <merijn> linnucks: Lack of spaces doesn't magically transform how expressions are grouped around operators
+06:21:01 <PragCypher> Could someone suggest a good place to look for Haskell jobs?
+06:21:16 <merijn> PragCypher: Here, haskell-cafe mailing list and /r/haskell?
+06:21:30 <merijn> PragCypher: The "Haskell Weekly" thing tends to have a jobs section too
+06:23:29 <PragCypher> @merign thanks B)  I heard the r/haskell might be a good source
+06:23:29 <lambdabot> Unknown command, try @list
+06:23:51 <merijn> PragCypher: There's also haskellers.com
+06:29:07 --- mode: glguy set +v clementine
+06:39:29 <linnucks> my program works for small inputs but fails for large inputs
+06:54:44 <Solonarv> yes, it "evaluates" the type as well
+07:10:54 <maerwald> linnucks: I have the same feeling with life. You think you got something right, then the large input hits you
+07:14:05 <Solonarv> oh, koz_ regarding your question about "list of Finite" yesterday: with Vinyl that could be: (2 :& 3 :& RNil) :: Rec '[2, 3] Finite
+07:18:31 <Shockk> hello, just a quick question; j
+07:18:40 <siraben> What's the most used Lojban parser in Hackage?
+07:18:46 <Shockk> is there a function in the standard libs with a type like this:
+07:18:48 <siraben> There seems to be multiple ones.
+07:19:09 <Shockk> a -> ([a] -> a) -> [a] -> a
+07:19:32 <Shockk> ideally similar to `maybe` from Data.Maybe, but that takes a default value, a function, a list, and a return value
+07:19:42 * Lycurgus is dubious about a hs lojban parser
+07:19:57 <siraben> Lycurgus: https://hackage.haskell.org/package/lojbanParser
+07:20:00 <Shockk> (and would return the default value if the input list is empty)?
+07:20:01 <siraben> https://hackage.haskell.org/package/tersmu
+07:20:14 <siraben> Shockk:  depends on what you want from your function
+07:20:36 <Lycurgus> siraben, i didn mean it's existence
+07:20:40 <Solonarv> :t flip (foldr . const)
+07:20:42 <lambdabot> Foldable t => b -> (b -> b) -> t a -> b
+07:20:48 <Solonarv> bah
+07:20:52 <Solonarv> something like that, anyway
+07:21:24 <Shockk> right now I have this code:   let retTy = case s of [] -> UnitType  \  xs -> typedTy (last xs)
+07:21:28 <siraben> Solonarv:  isn't it possible to ask lambdabot to construct a function with a given type?
+07:21:28 <Shockk> ideally I'd be able to write something like:
+07:21:31 <siraben> Something something genie
+07:21:36 <Solonarv> siraben: yes, actually!
+07:21:43 <geekosaur> only for some types
+07:21:46 <Lycurgus> figured, it looks bit rotten
+07:21:49 <Solonarv> @djinn a -> ([a] -> a) -> [a] -> a
+07:21:49 <lambdabot> Error: Undefined type []
+07:21:50 <Shockk> let retTy = f UnitType (typedTy . last) s
+07:21:52 <Solonarv> bah
+07:22:00 <Shockk> you see what I'm going for?
+07:22:09 <geekosaur> :exf "a -> ([a] -> a) -> [a] -> a"
+07:22:13 <siraben> What's the purpose of the `const` function?
+07:22:15 --- mode: glguy set +v exferenceBot
+07:22:21 <siraben> :t const
+07:22:23 <lambdabot> a -> b -> a
+07:22:32 <geekosaur> guess that means it got et :/
+07:22:33 <Solonarv> siraben: "plumbing", basically
+07:22:37 <siraben> :t (\x -> (\y -> x))
+07:22:38 <lambdabot> p1 -> p2 -> p1
+07:22:39 <geekosaur> :exf "a -> ([a] -> a) -> [a] -> a"
+07:22:40 <exferenceBot> \ a f2 -> f2 . (:) a
+07:22:54 <siraben> :t \a f2 -> f2 . (:) a
+07:22:55 <lambdabot> a -> ([a] -> c) -> [a] -> c
+07:22:59 <geekosaur> I don't think tatw as what you wanted though
+07:23:04 <siraben> Voilà
+07:23:18 <geekosaur> it likes free theorems
+07:23:19 <siraben> How does exferenceBot  manage to do that?
+07:23:49 <antonh> Ok, here comes the most stupid question. I am messing around with huffman coding and have a large textfile that I want to test my program on. My function takes a [Char] obviously, and now I want to read this large textfile and pass it as an argument to my function. readFile looks really nice, but I don't know how to use it here, and I can't get a clear understaning when reading on the internet. Can you people help me?
+07:23:53 <geekosaur> https://github.com/lspitzner/exference
+07:24:18 <linnucks> I'm getting a werd output from my program
+07:24:23 <linnucks> 3.1875e7
+07:24:26 <linnucks> weird
+07:24:38 <Lycurgus> word
+07:25:35 <geekosaur> @where iotut
+07:25:35 <lambdabot> https://www.vex.net/~trebla/haskell/IO.xhtml
+07:25:39 <geekosaur> ^ antonh
+07:25:50 <linnucks> https://gist.github.com/andrewjohnroy/8fe7dd47f54a5a34f1833f5006622670
+07:25:56 <antonh> geekosaur: The requested URL /~trebla/haskell/IO.xhtml was not found on this server.
+07:26:00 <linnucks> can you see any obvious bugs?
+07:26:09 <linnucks> it's for this https://projecteuler.net/problem=9
+07:26:25 <geekosaur> hm,works here
+07:26:47 <linnucks> I get 3.1875e7
+07:26:53 <linnucks> it should be something much smaller
+07:27:22 <antonh> geekosaur: I will see if archive.org has a copy of it.
+07:28:22 <Solonarv> > foldr (const id) x [a, b, c]
+07:28:24 <lambdabot>  x
+07:28:29 <Solonarv> hmm, nope
+07:32:09 <linnucks> you can achieve functional programming in C
+07:32:20 <linnucks> just only use recursion and never change variable
+07:32:55 <Solonarv> well, C has function pointers, no?
+07:33:04 <Solonarv> ;>
+07:33:15 <maerwald> linnucks: and watch your stack blow up?
+07:34:51 <linnucks> https://gist.github.com/andrewjohnroy/8fe7dd47f54a5a34f1833f5006622670
+07:35:01 <linnucks> this should return a smallish number
+07:35:07 <linnucks> it's returning a huge number
+07:35:53 <linnucks> is the squaring and sqrt not returning a whole number?
+07:36:06 <Solonarv> linnucks: floating point rounding issues, probably
+07:36:17 <Solonarv> > 3.0^2 + 4.0^2
+07:36:18 <linnucks> hmm
+07:36:19 <lambdabot>  25.0
+07:37:10 <linnucks> >sqrt(3^2 + b^2) `mod'` 1 == 0
+07:37:18 <linnucks> > sqrt(3^2 + b^2) `mod'` 1 == 0
+07:37:21 <lambdabot>  False
+07:37:35 <linnucks> > sqrt(3^2 + 4^2) `mod'` 1 == 0
+07:37:36 <Taneb> linnucks: that b looks out of place
+07:37:38 <lambdabot>  True
+07:37:55 <linnucks> > sqrt(6^2 + 8^2) `mod'` 1 == 0
+07:37:57 <lambdabot>  True
+07:38:27 <Solonarv> aaahh... what's with the 'a + b + sqrt(a^2+b^2) == 1000' part?
+07:38:36 <shiona_> :t mod'
+07:38:38 <lambdabot> Real a => a -> a -> a
+07:38:43 <linnucks> > sqrt(21390^2 + 285208^2) `mod'` 1 == 0
+07:38:45 <lambdabot>  False
+07:38:57 <linnucks> that should  be true
+07:39:07 <linnucks> wait
+07:39:44 <linnucks> > sqrt(293052^2 + 390736^2) `mod'` 1 == 0
+07:39:45 <lambdabot>  True
+07:39:50 <linnucks> ok
+07:40:20 <Solonarv> (what's this code supposed to do, anyway? it's not exactly clear)
+07:40:29 <linnucks> Solonarv, I have to return the product of a b and c
+07:40:31 <antonh> geekosaur: Thank you for the link, now I got it working!
+07:40:34 <linnucks> that is the question
+07:40:49 <linnucks> where the sum is 1000 of the sides
+07:41:04 <linnucks> my code should work
+07:41:08 <Solonarv> ah, I see
+07:41:20 <linnucks> but I'm getting 3.1875e7 as a return value
+07:42:11 <Solonarv> you might want to stick to integer math instead of messing around with floats
+07:42:25 <linnucks> > sqrt(2870205^2 + 3826940^2) `mod'` 1 == 0
+07:42:27 <Solonarv> exact equality on floats is a typical source of numeric errors
+07:42:28 <lambdabot>  True
+07:42:38 <linnucks> hmmm
+07:43:01 <Solonarv> (e.g. maybe 'a + b + sqrt(a^2+b^2)' evaluates to 1000.00000002 because of rounding errors)
+07:43:27 <linnucks> my test to see if a number is a perfect square is to square the number then take the square root then check if it is a whole number
+07:44:01 <linnucks> I mean
+07:44:05 <linnucks> square the two numbers
+07:44:20 <ski> better to square after rounding, and see whether you get back what you had before the square root
+07:44:28 <Ariakenom> > 0.1 + 0.2
+07:44:30 <lambdabot>  0.30000000000000004
+07:44:41 <linnucks> a^2 + b^2 then take the square root of that
+07:44:54 <linnucks> if it not a whole number then it's not a perfect square
+07:45:36 <dmwit> linnucks: http://hackage.haskell.org/package/arithmoi-0.8.0.0/docs/Math-NumberTheory-Powers-Squares.html#v:exactSquareRoot
+07:45:45 <dmwit> Don't use Double at all if you can avoid it. =)
+07:45:47 <Solonarv> Ideally there's be a function 'isqrt :: Int -> Maybe Int' somewhere
+07:46:00 <Solonarv> ah yes, that's what dmwit linked
+07:46:34 <linnucks> how do I install Math.NumberTheory.Powers.Squares
+07:46:40 <linnucks> I have never installed a hackage package
+07:46:41 <dmwit> cabal install arithmoi
+07:46:56 <Solonarv> nooooo don't use cabal v1 commands T_T
+07:47:22 <linnucks> wait I shouldn't use cabal/
+07:47:23 <linnucks> ?
+07:47:30 <maerwald> cabal new-install
+07:47:36 <dmwit> Making a whole cabal project for a four-line script seems... overkill-y to me.
+07:47:41 <sclv> except then you have to set up a project etc
+07:47:50 <sclv> if this is the person's first ever use of a library for their first project
+07:47:53 <sclv> let's keep it simple!
+07:48:00 <Solonarv> eh I guess
+07:48:56 <Solonarv> if you keep using 'cabal install blah' you'll /eventually/ run into issues, but it should indeed be fine for now
+07:49:46 <dmwit> linnucks: After re-hashing the careful consideration I gave to my advice in public so that others can vet it, I still think the right answer to your question is `cabal install arithmoi`.
+07:50:40 <dmwit> linnucks: (Later we will introduce you to more powerful, less dangerous, but more boilerplate-y solutions.)
+07:50:51 <maerwald> dmwit: that is incorrect
+07:50:59 <maerwald> You don't need to set up a project
+07:51:10 <maerwald> https://www.haskell.org/cabal/users-guide/nix-local-build.html#cabal-new-run
+07:51:27 --- mode: glguy set +v LukeW
+07:51:30 <maerwald> You just run your module as a script file
+07:51:55 <Solonarv> oooh cool, cabal has script files too!
+07:51:57 <Solonarv> yes do that
+07:52:27 <maerwald> internally it creates a fake package
+07:54:19 <LukeW> Hey I am trying to do the following code - sales all_sales sale = foldr(\ x acc -> new_sales) 0 all_sales     <- this function sales takes a list and string and then does the foldr stuff but doesn't work properly any chance on how to fix it?
+07:55:12 <Solonarv> LukeW: please post your /entire/ code *and* the error you're getting, preferably using some sort of pastebin-like service
+07:55:15 <geekosaur> that description looks rather incomplete to me
+07:55:53 <LukeW> the new sales is a function as well
+07:56:06 <LukeW> i don't know what pastebin is awks
+07:56:15 <MarcelineVQ> then you probably want to pass it x or acc or both
+07:56:20 <dmwit> red flags for me: sale is not used; new_sales is not defined. Depending on surrounding code, it may also be that x and acc are not used.
+07:57:46 <maerwald> Solonarv: you can also just use plain 'cabal new-repl' outside of a project dir
+07:57:52 <MarcelineVQ> LukeW: a pastebin, and there are many, is a website that lets you paste text to it and gives you a short link you can share with others so they can see the thing you pasted
+07:57:55 <maerwald> then :l your module into it
+07:58:32 <maerwald> (and you can tell new-repl to install and load deps as well)
+07:58:35 <Solonarv> maerwald: I get a "no cabal file found" error when I do that
+07:59:00 <maerwald> Solonarv: 2.4.0.0?
+07:59:17 <Solonarv> maerwald: ah, nope. apparently the cabal on my path is older (2.0)
+08:01:13 * dmwit . o O ( Sure, let's give this newcomer advice that starts with "upgrade everything in your toolchain"! That seems the most friendly way to proceed. )
+08:01:32 <maerwald> dmwit: cabal should be updated yes
+08:01:45 <maerwald> that goes for stack as well, use latest stack, use latest cabal
+08:01:52 <dmwit> For a professional: no doubts agreed.
+08:01:57 <maerwald> No, for newcomers
+08:02:02 <dmwit> eh
+08:02:02 <ski> LukeW : <https://paste.debian.net/> is one
+08:02:15 <maerwald> old cabal has lots of bugs
+08:02:42 <maerwald> And instead of telling people workarounds or "use stack", they should just update (which is not that hard)
+08:02:57 <maerwald> On ubuntu/debian there are ppas even
+08:03:04 <dmwit> I didn't mention any workarounds or stack.
+08:03:34 <maerwald> You suggested using cabal install, which will be a pain if he keeps using it :P
+08:04:01 <maerwald> And cabal now pretty much warns you even if you do that
+08:04:05 <maerwald> It's not recommended anymore
+08:04:31 <dmwit> Well, now you're the one saying incorrect things. I recommended it, which makes "It's not recommended anymore" empirically falsified. =)
+08:05:31 <maerwald> cabal - the tool - doesn't recommend the use of v1 style commands anymore and prints a warning
+08:05:35 <maerwald> which is correct
+08:06:00 <hexagoxel> wait, does that mean that v2 is considered non-experimental?
+08:06:19 <geekosaur> preferred but nto yet default; the old usage is deprecated and warns
+08:06:44 <geekosaur> it'd be kinda bad if 'cabal install' just did new-install with no warning
+08:06:49 <maerwald> Yep
+08:06:53 <geekosaur> when somene is still expectingthe old one
+08:07:37 <hexagoxel> from `cabal-2.4.0.0 --help`: "new-style projects (beta)"
+08:07:54 <hexagoxel> so cabal users have the choice between deprecated and beta?
+08:07:55 <hexagoxel> great
+08:14:14 --- mode: glguy set +v gnewtle
+08:15:59 <linnucks>  • Occurs check: cannot construct the infinite type: t ~ Maybe t
+08:16:00 <linnucks> helppp
+08:16:11 <rihardsk> hi. can haskell FFI be used to create a dll that, when called from C, maintains it's own state? there's the `stepAuto :: Auto m a b -> (a -> m (b, Auto m a b))` function from the auto package - can export something like `stepAuto . myAuto ::  a -> m (b, Auto m a b)` to be used from C?
+08:16:17 <rain1> linnucks: i can  help with that
+08:17:02 <linnucks> https://gist.github.com/andrewjohnroy/474fe54cef71cb09bad126c475e07fdb
+08:17:24 <linnucks> ohh I need brackets around a?
+08:17:38 <linnucks> these brackets are doing my head in
+08:18:59 <linnucks> https://gist.github.com/andrewjohnroy/a318558af8f4ea48115816f7551db602
+08:19:14 <lavalike> rihardsk: to the first question the answer is yes, to the second I don't know
+08:19:16 <rihardsk> to be more precise - i don't actually want `stepAuto . myAuto` as defined above. ideally i'd export something that accepts as and returns bs and hides all the auto business from the user
+08:19:45 <lavalike> rihardsk: pretty sure you need to stick to the IO monad to be C-callable, but once the IO hook is called you can do whatever the haskell you want
+08:21:19 <Solonarv> you might need to write a few wrappers to e.g. create/deref pointers, but it should certainly be doable
+08:21:58 <ski> linnucks : use `where' to avoid repeating code
+08:23:02 <rihardsk> lavalike: so i should be able to get the a values i wan't from withing the IO monad, produce bs and then give those back to the calling C code?
+08:23:54 <lavalike> rihardsk: yes
+08:23:54 <rihardsk> *from within
+08:24:17 <ski> linnucks : `exactSquareRoot (...)' doesn't compute an integer, it `Maybe' computes an integer. you need to do pattern-match on the result (and then you don't need to check `isSquare' separately)
+08:25:37 <linnucks> isSquare((a^2 + b^2)) && (a + b + exactSquareRoot((a^2 + b^2))) == 1000 = a * b * exactSquareRoot((a^2 + b^2))
+08:25:43 <linnucks> someone is wrong with this
+08:25:45 <linnucks> something
+08:25:50 <gnewtle> why on earth should any pragmatic developer care about dependent types? i see no value other than "my code is correct, compiler; i have proven it in the types", similar to haskell, but on steroids. similar haskell, but taken too far to be generally applicable, IMO (i.e. dependent types will never be mainstream because they're much more than what is generally necessary)
+08:25:55 <ski> linnucks : do you know `case ... of ...' ?
+08:26:07 <gnewtle> i admittedly only have a rudimentary understanding of them, because while reading through the Idris book, I saw no worthwhile value in them other than needlessly going deeper down the type theory rabbit hole for increased correctness not worth the conceptual overhead
+08:26:20 <Solonarv> linnucks: 'exactSquareRoot blah' is a Maybe Int, you can't add it to an Int
+08:27:12 <Solonarv> gnewtle: "if it compiles, it's correct" is a pretty useful property, and dependent types bring you closer to that ideal
+08:27:43 <Solonarv> It is true that they're rather unwieldy, but perhaps that isn't a fundamental issue and just needs work to fix
+08:28:47 <ski> sometimes you can program with dependent types, where there's a minimum of programming overhead (like having to write separate operations or excessive annotations of the "work code", to prove it correct)
+08:29:55 <hodapp> as if "mainstream" is a good compass of anything here.
+08:30:19 <MarcelineVQ> Solonarv: It's somewhat fundamental, expressing exact guarantees requires that you the programmer be sure you're being exact as well. Do what I mean, and be correct, are at odds in humans.
+08:30:20 <linnucks> how do I fix my program if it returns Maybe
+08:30:46 <linnucks> I'm trying to add Integrals to a Maybe
+08:30:55 <linnucks> and the compiler is crying
+08:32:05 <ski> <https://en.wikipedia.org/wiki/ATS_(programming_language)> is interesting, seems to be a low-level dependent programming language
+08:32:13 <MarcelineVQ> Good counter argument for that might be, well coq tactics can prove all kinds of things I've no real idea about
+08:32:48 <Taneb> MarcelineVQ: I think that's of the same sort of argument as "types in C++ are easy because I have auto"
+08:33:23 <ski> <ski> linnucks : do you know `case ... of ...' ?
+08:33:33 <ski> linnucks : can you answer my question ?
+08:34:51 <linnucks> I don't know how to pattern match
+08:34:57 <ski> ok
+08:35:18 <ski> in an earlier paste, you had something like
+08:35:23 <ski>   trip 0 b = ..b..
+08:35:28 <ski>   trip a 0 = ..a..
+08:35:37 <ski>   trip a b = ..a..b..
+08:35:41 <ski> if i don't misremember
+08:35:46 <linnucks> yes
+08:35:50 <ski> that's (basic) pattern-matching
+08:36:24 <ski> variables (formal parameters) `a' and `b', to the left of the `='s, are patterns, that match anything (and which then bind the corresponding input to that variable name)
+08:36:28 <kuribas> gnewtle: if you see how type level programming in haskell has become somewhat of a mess, dependend types will make that simpler
+08:36:38 <ski> `0' is a pattern, which only matches when the corresponding input is zero
+08:36:56 <ski> linnucks : have you seen `where' ?
+08:37:06 <linnucks> not really
+08:37:32 <ski> linnucks : let's say you define
+08:38:12 <rihardsk> lavalike: so how would the interfaces look like from the C side of things and from the Haskell side of thins? should i bee looking for something like `int myAutoFun(int a)` in C? and in Haskell - would i export something like `myAutoFunH :: IO CInt -> IO CInt` then? (or is it `myAutoFunH :: IO CInt` in haskell? i'm a bit confused about this part)
+08:38:40 <ski>   foo a b = if a*b `mod` 2 == 0 then a*b else 0
+08:38:51 <ski> or, which is just another way to say the same thing
+08:38:53 <ski>   foo a b
+08:39:04 <ski>     | a*b `mod` 2 == 0 = a*b
+08:39:18 <ski>     | otherwise        = 0
+08:39:41 <linnucks> I looked up where
+08:39:46 <ski> linnucks : then, instead of repeating (and recomputing) `a*b', you could give it a name, computing it once, and then reuse the same computed result
+08:39:51 <ski> so, that'd be
+08:40:04 <ski>   foo a b = if ab `mod` 2 == 0 then ab else 0
+08:40:06 <ski>     where
+08:40:09 <ski>     ab = a*b
+08:40:25 <ski> alternatively (using guard syntax, rather than `if'-`then'-`else')
+08:40:29 <ski>   foo a b
+08:40:42 <kuribas> gnewtle: there are a lot really nice libraries that depend on them.  For example generic-lens, which allows you to express a traversal that targets every type contained in another type.
+08:40:58 <ski>     | ab `mod` 2 == 0 = ab
+08:41:01 <ski>     | otherwise       = ab
+08:41:06 <ski>     where
+08:41:11 <ski>     ab = a*b
+08:41:16 <kuribas> gnewtle: or squeal which uses it to type sql expressions.
+08:41:18 <ski> linnucks : do you understand ?
+08:42:01 <dmwit> linnucks: `exactSquareRoot` already does the check of whether the thing is a square for you, so you shouldn't need to call `isSquare` at all.
+08:42:14 <ski> (er, in the `otherwise' case here, it should be `0', not `ab', to be consistent with the previous version)
+08:42:36 <Solonarv> rihardsk: the haskell side would be 'CInt -> IO CInt'
+08:42:37 <dmwit> linnucks: `exactSquareRoot` will either return a `Nothing` if it isn't square -- in which case you can proceed to the `b == 1000` and `a == b` checks -- or a `Just n` if `n` is the square root.
+08:43:42 <linnucks> https://gist.github.com/andrewjohnroy/c9f8c8ff2ed70f5936b4b2d9e766c129
+08:43:57 <rihardsk> Solonarv: thanks!
+08:44:03 <ski> linnucks : yes or no ? :)
+08:44:25 <lavalike> rihardsk: check this out https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/ffi-chap.html#using-foreign-export-and-foreign-import-ccall-wrapper-with-ghc
+08:44:49 <Solonarv> rihardsk: your C interface might be 'int useAuto(*automaton a, int x)', your haskell side would be (I think) 'ForeignPtr (Auto CInt CInt) -> CInt -> IO CInt'
+08:44:52 <dmwit> linnucks: I've left a comment on your gist with how I would use the facts I just stated.
+08:45:19 <lavalike> Solonarv: what is Auto from?
+08:45:35 <Solonarv> lavalike: rihardsk's original question
+08:45:44 --- mode: glguy set +v govno
+08:46:48 <lavalike> Solonarv: oh I see. unrelated, I wasn't able to find a way for the haskell code to initialize some IORefs or some such at load when used as a library, do you have any idea if that's possible? (taking "haskell library keeping its state" to an extreme)
+08:46:52 <ski> s/*automaton a/automaton *a/
+08:47:01 <linnucks> ski, I read the where docs
+08:47:22 <ski> linnucks : and did you understand my `foo' example(s) above ?
+08:47:29 <Solonarv> lavalike: maybe a global IORef would work?
+08:47:36 <Solonarv> or just a thin wrapper written in C
+08:47:41 * ski wanted to continue with some further examples ..
+08:48:34 <linnucks> I said  where
+08:48:34 <linnucks>         csq = a^2 + b^2
+08:48:52 <linnucks> so that I don't repeat myself
+08:48:54 <Solonarv> My approach would be to expose a 'LibContext* initLibContext(some parameters)', and require a LibContext argument on all the functions
+08:49:11 <ski> linnucks : yes, but then you used `csq' first, and then `squ', where you haven't defined `squ'
+08:49:29 <Solonarv> If you want you could write a small C wrapper which initializes & passes a global LibContext instead
+08:49:49 <ski> linnucks : i mentioned `where' because i wanted to show some further examples of pattern-matching, which can help with how to use `exactSquareRoot'
+08:49:51 <linnucks> oops
+08:50:20 <ski> what's `LibContext' ?
+08:50:45 <linnucks> https://gist.github.com/andrewjohnroy/9cb8971fe540e6f5cfa0d92de0ca1ba4
+08:51:07 <ski> linnucks : ok ?
+08:52:12 <dmwit> linnucks: Oh. Since it seems that each of these gists are completely independent, I should be more explicit: I left my comment on this gist. https://gist.github.com/andrewjohnroy/a318558af8f4ea48115816f7551db602
+08:53:12 * ski idly wonders whether linnucks would like to hear more about pattern-matching, or perhaps would like to tinker and try more on their own, with some intermittent questions
+08:53:29 <ski> (either way would be ok)
+08:54:05 <dmwit> linnucks: (Like the pattern `a` and `b`, the pattern `_` matches anything; but unlike the patterns `a` and `b`, it doesn't bind any new variable names to values. So in my comment linked above, `_` will match either a `Just` with a square root or a `Nothing` saying that the number passed to `exactSquareRoot` wasn't an exact square.)
+08:54:57 <dmwit> I think ski's pedagogical metaquestion is good, too.
+08:55:28 <linnucks> I know nothing about pattern matching except for basic functions and guards
+08:55:42 <ski> do you want to hear some about it ?
+08:55:52 <linnucks> ok
+08:56:33 <ski> (if so, it may help to not go back and stare at the source, and forget about the channel for a while, as soon as you think of something to try in your code. just saying ;)
+08:56:44 <rihardsk> Solonarv, lavalike: yup, i have `Auto m a b` from the auto package (Control.Auto). i'd have something like `stepAuto . myAuto :: CInt -> IO (CInt, Auto IO CInt CInt)`, where `myAuto ::  Auto IO CInt CInt`. so i'd have to make C hold on to the returned Auto and pass it into the next useAuto call by using a ForeignPtr
+08:58:02 <ski> linnucks : so, you've seen a basic example of `where', you've seen that what you define after the `where' can use the local parameters of (defining equation of) the function the `where' is attached to. in your paste `csq' depends on `a' and `b', which are parameters of `trip'
+08:58:16 <rihardsk> Solonarv, lavalike: but is having something simpler that's implicitly stateful still an option? (i'm asking to get a feel of the limits of FFI here)
+08:58:26 <ski> in your original code, where you had
+08:58:31 <ski>   trip 0 b = ..b..
+08:58:37 <ski>   trip a 0 = ..a..
+08:58:39 <Solonarv> rihardsk: I'm not very familiar with the FFI, but let me see if I can cook up a gist
+08:58:41 <ski>   trip a b = ..a..b..
+08:59:27 <lavalike> rihardsk: I think ultimately giving a handle back to C is probably a good idea, but as Solonarv suggestd before a global IORef could also do the trick in a pinch, at least whilst trying things out (:
+08:59:28 <rihardsk> Solonarv: oh, thanks. i hope it's not too much trouble
+08:59:51 <dmwit> rihardsk: https://hackage.haskell.org/package/base-4.12.0.0/docs/Foreign-StablePtr.html has details about sharing opaque Haskell objects with C
+08:59:52 <ski> linnucks : if you had wanted to attach a `where' there, you'd notice that each `where' attaches to a *single* defining equation (`trip 0 b = ..b..' is one defining equation, `trip a 0 = ..a..' is another, and so on. they're all defining equations of `trip', together they specify how `trip' is to behave, what it is to compute)
+09:00:54 <dmwit> rihardsk: In particular you can wrap any Haskell object in a StablePtr with newStablePtr; then to share with C you use castStablePtrToPtr to get something you can hand off and use castPtrToStablePtr when C hands you a pointer back.
+09:01:39 <ski> linnucks : the definitions you write after a `where' (yes, there can be several of them, not just one) are *local* to the defining equation they attach to. if you think about it, if you attached a `where blah = ..b..' to `trip 0 b = ..b..', then that definition of `blah' can depend on the parameter `b'. but that parameter doesn't exist in the next defining equation, `trip a 0 = ..a..'. therefore, it can't make sense to try to use `blah' there
+09:02:00 <rihardsk> dmwit: oh, nice. this is super useful, thanks
+09:02:07 * ski idly wonders whether linnucks is following, and whether this makes any sense to linnucks
+09:02:21 <linnucks> do I need an if statemnent
+09:03:26 <ski> you need some way to branch, to specify what to do if it isn't an exact square, and what to do if it is (and then you get the square root to play with)
+09:04:02 <ski> linnucks : anyway, here's another simple example of how one can use `where' to avoid a slightly differing kind of repetition of code
+09:04:27 <linnucks> what's the difference between Just and _
+09:04:44 <ski> i'll come to that (also dmwit already said a little about that)
+09:05:02 <ski> my previous example was
+09:05:04 <ski>   foo a b = if a*b `mod` 2 == 0 then a*b else 0
+09:05:08 <ski> where `a*b' was repeated
+09:05:23 <ski> and we could replace this by
+09:05:31 <linnucks> so I should say where ab = a*b
+09:05:35 <ski>   foo a b = if ab `mod` 2 == 0 then ab else 0
+09:05:38 <ski>     where
+09:05:40 <ski>     ab = a*b
+09:05:41 <ski> yes
+09:05:47 <ski> next example is
+09:05:55 <ski>   bar a b = a*a + b*b
+09:06:07 <ski> here the repeated pattern is the multiple squaring
+09:06:41 <linnucks> where aa = a*a
+09:06:46 <ski> but we're squaring *different* things, so we can't just do `sq = a*a' in a `where' and say `bar a b = sq + sq'
+09:06:55 <Solonarv> https://gist.github.com/Solonarv/4886ae46a3cf8ce268455d5e88bc69fe -- something like this, I guess?
+09:06:57 <ski> linnucks : right, that does *not* help here :)
+09:07:31 <rihardsk> lavalike: so having a IORef to my auto object would be the answer if i wanted to hide the auto stuff from the C caller, right?
+09:07:40 <lavalike> yeah
+09:07:41 <ski> linnucks : what we do instead is that we notice that there's a repeated "pattern" (not the technical sense of Haskell pattern, as in Haskell pattern-matching) `x*x', `x' being either `a' or `b'
+09:07:59 <ski> linnucks : so, what we can do is to define a local *function* in the `where', as follows
+09:08:07 <ski>   bar a b = square a + square b
+09:08:09 <ski>     where
+09:08:13 <ski>     square x = x*x
+09:08:30 <ski> of course, in this case, it'd probably be nicer to just say
+09:08:34 <rihardsk> Solonarv: great, thank you! :)
+09:08:36 <ski>   bar a b = a^2 + b^2
+09:09:04 <Solonarv> rihardsk: glad I could help, but please don't take this as gospel
+09:09:04 <linnucks> okk
+09:09:23 <ski> linnucks : but the point is to realize that we can not just name and reuse a repeated subexpression, like `a*b' in the `foo' example, but also a repeated subexpression "template", where some parts of the subexpression differ
+09:10:23 <ski> linnucks : now, the usual way to represent "multiple arguments" in Haskell is to write like `trip a b', separated by whitespace
+09:10:54 <ski> linnucks : but there's also another way, `tripair (a,b)', where we pass a *pair* (or more generally a tuple) of things, packed together
+09:11:00 <ski> linnucks : so, one could write
+09:11:07 <ski>   tripair (0,b) = ..b..
+09:11:12 <ski>   tripair (a,0) = ..a..
+09:11:16 <ski>   tripair (a,b) = ..a..b..
+09:11:43 <ski> and it's just like before, except that this time we need to use brackets and commas around the two "arguments", when we call `tripair'
+09:12:55 <ski> (from the point of view of Haskell, `(a,b)' is a *single* argument, a pair. we can still *think* of it as "passing multiple arguments", though. btw `trip a b' is really `(trip a) b', so there's only single arguments there as well ("one at a time"). don't worry about this for now, you'll learn more about that ("currying") later)
+09:13:35 <ski> linnucks : now, i mention this because `(a,b)' in `tripair (a,b) = ..a..b..' is also a *pattern* just like `a',`b',`0' before, with `trip'
+09:13:39 <ski> it's a pair pattern
+09:13:55 <ski> we use it to "take apart" an incoming pair argument
+09:14:01 <ski> if we wanted to, we could instead of
+09:14:04 <ski>   tripair (a,b) = ..a..b..
+09:14:06 <ski> write
+09:14:20 <ski>   tripair p = ..(fst a)..(snd b)..
+09:15:05 <rihardsk> Solonarv: sure. the problem was i wasn't sure before on the general shape of what the solution should be. this helps. lavalike, dmwit thank you also for the help :)
+09:15:07 <ski> so that `p' becomes the *whole* pair. `fst' and `snd' here are just selector functions that extract the first respectively the second component of a pair. they are defined via pattern-matching, of course
+09:15:13 <ski> @src fst
+09:15:14 <lambdabot> fst (x,_) = x
+09:15:16 <ski> @src snd
+09:15:16 <lambdabot> snd (_,y) = y
+09:15:41 <ski> these use `_' because we're not interested in the other part of the pair, and so we don't need to give a name to it
+09:15:47 <ski> linnucks : makes sense, so far ?
+09:15:50 <linnucks> errr
+09:15:51 <linnucks> ok
+09:16:10 <ski> now, i'll tell you a little bit about ("algebraic") data types
+09:16:15 <ski> first, booleans
+09:16:27 <ski> there are two values of type `Bool', written `False' and `True'
+09:16:38 <ski> the data type `Bool' is actually defined like
+09:17:00 <ski>   data Bool = False
+09:17:02 <ski>             | True
+09:17:05 <MarcelineVQ> ski: was that  tripair p = ..(fst p)..(snd p)..
+09:17:13 <ski> er, yes, sorry
+09:17:59 <ski> linnucks : so, we're here just enumerating the possible values of the type `Bool' (this is similar to an `enum' type in some other languages, if you've heard about that. otherwise, don't worry)
+09:18:17 <ski> now, if we wanted to define boolean negation, we'd write
+09:18:21 <ski>   not :: Bool -> Bool
+09:18:25 <ski>   not False = True
+09:18:29 <ski>   not True  = False
+09:18:51 <ski> defining it by cases (pattern-matching), saying what should be the output, for each possible input
+09:19:32 <ski> the type signature `not :: Bool -> Bool' is option, but is a nice reminder of what the type of input and output is (and writing type signatures can also help with faster tracking down type errors)
+09:19:44 <ski> anyway, we *could* also define `not' like
+09:19:50 <ski>   not False = True
+09:19:57 <ski>   not _     = False
+09:20:45 <ski> because Haskell tries the defining equations of a function in order, when that function is called. the first defining equation whose patterns (to the left of `=') matches the actual input arguments will be used
+09:21:13 <ski> (if there are guards, then those will also have to check/evaluate to `True', for that particular branch of the defining equation with guards to be used)
+09:21:27 <ski> linnucks : actually, in your earlier definition
+09:21:30 <ski>   trip 0 b = ..b..
+09:21:35 <ski>   trip a 0 = ..a..
+09:21:38 <ski>   trip a b = ..a..b..
+09:21:57 <ski> you already relied on pattern-matching happening in order, from first to last defining equation
+09:22:09 <ski> because `trip a b' matches anything, since `a' and `b' are variables
+09:23:10 <ski> (`_' in `not _ = ...' also matches anything. the difference is that it doesn't name the input. you can use `_' multiple times on the left of `=' in a defining equation, and it can match *different* input values each time)
+09:23:42 <ski> linnucks : .. anyway, another example of a `Bool' operation
+09:23:52 <ski>   andAlso :: Bool -> Bool -> Bool
+09:23:58 <ski>   andAlso False False = False
+09:24:03 <ski>   andAlso False True  = False
+09:24:08 <ski>   andAlso True  False = False
+09:24:16 <ski>   andAlso True  True  = True
+09:24:33 <ski> linnucks : as you can see, it can be tedious enumerating all possible combinations
+09:24:39 <ski> instead, we could here do
+09:24:45 <ski>   andAlso True True = True
+09:24:55 <ski>   andAlso _    _    = False
+09:25:04 <ski> using a "catch-all" case at the end
+09:25:27 <linnucks> haskell is pretty complicated for a functional language
+09:25:33 <ski> (`_' is btw known as a "wildcard" (or "don't know") pattern, or sometimes as an "anonymous pattern")
+09:25:44 <ski> yet another way would be
+09:25:55 <mniip> linnucks, it's gotta be comfortable to program in
+09:26:01 <mniip> it isn't some academic language is it :P
+09:26:12 <ski>   andAlso False _     = False
+09:26:12 <linnucks> I only know lisp
+09:26:13 <ski>   andAlso True  b     = b
+09:26:33 <ski> this one has the advantage that it is "short-circuiting"
+09:26:40 <linnucks> (defun x ( x + x))
+09:27:13 <ski> that means that if we call `andAlso (d /= 0) (n `div` d < 10)', then that won't blow up if `d' happens to be zero
+09:28:01 <mniip> also, patterns and guards in haskell are modeled after commonplace mathematical notation
+09:28:08 <ski> (Haskell is non-strict. arguments in general aren't evaluated before the function is called. instead the function (usually via pattern-matching) decides when to evaluate an argument, and how much of it to evaluate)
+09:28:41 <ski> linnucks : anyway, next i wanted to cover `Maybe', which is what you need, for `exactSquareRoot'
+09:28:45 <ski> linnucks : sounds ok ?
+09:28:57 <linnucks> ok thanks
+09:29:17 <ski> `Maybe' is also an "algebraic data type", just like `Bool'
+09:29:25 <ski> but it isn't an "enumerated type"
+09:30:02 <ski> in fact, we have not just a single type, but many types. `Maybe Bool' is a type, `Maybe Integer' is another type, `Maybe (Maybe Integer)' is yet another type, and so on
+09:30:35 <linnucks> oh
+09:30:36 <ski> the idea is that sometimes we want to produce a result of some type, say `T'. but for some inputs, there's no sensible output value of type `T' to compute
+09:30:55 <ski> some people use some default value, like `-1', or `0' or `[]' or somesuch here
+09:31:15 <ski> but it's commonly better to not use a value which is (or could be) a valid value of type `T'
+09:31:48 <ski> if you're looking up a name of something, in a dictionary, perhaps you can return a string `"not found"', if you don't find what you're looking for
+09:32:10 <ski> but sometimes the string `"not found"' may itself be a possible valid result. in that case, this isn't that clean an idea
+09:32:38 <ski> so, we want some way to "add a new value to `T'", one which hasn't been used before (which cannot have been used)
+09:32:52 <ski> so, `Bool' has two values, `False' and `True'
+09:33:04 <linnucks> yes
+09:33:12 <ski> we want `Maybe Bool' to have three values. one extra value for "sorry, no normal `Bool' result"
+09:33:37 <ski> however, it turns out that then we'd also like `Maybe (Maybe Bool)' to have *four* values, not just three
+09:34:00 <ski> so, every time we "wrap the type with `Maybe'" we want to "add a new value", regardless of how many times we've done that before or not
+09:34:36 <ski> now, writing `Maybe (Maybe T)' isn't that often useful, granted. but it's nice that it works as intended, no strange exceptions, when it does turn up
+09:35:10 <ski> anyway, my point here is that we can't just say that the values of `Maybe Bool' are `False',`True', and, say, `Nothing' (the extra value)
+09:35:20 <linnucks> yes
+09:35:36 <ski> because, then the values of `Maybe (Maybe Bool)' would be `False',`True',`Nothing', and ... `Nothing' again ?
+09:35:39 <ski> that doesn't work
+09:36:15 <ski> so, what Haskell opted for is that we actually also "tag"/"mark" the "good result" values, to indicate that we got a proper result
+09:36:40 <ski> so, the values of `Maybe Bool' will in fact be `Just False',`Just True' and `Nothing'
+09:37:07 <ski> while the values of `Maybe (Maybe Bool)' will be `Just (Just False)',`Just (Just True)',`Just Nothing' and `Nothing'
+09:37:23 <linnucks> i see
+09:37:38 <linnucks> can I write two things in the maybe clause
+09:37:39 <ski> and the values of `Maybe Integer' will be ...,`Just (-1)',`Just 0',`Just 1',`Just 2',... and in addition to that, `Nothing'
+09:37:52 <linnucks> I mean
+09:37:54 <ski> the definition of the `Maybe' type is as follows
+09:38:07 <ski>   data Maybe a = Nothing               | Nothing
+09:38:09 <ski> er
+09:38:10 <linnucks> can I write two things in the where clause
+09:38:15 <ski>   data Maybe a = Nothing
+09:38:15 <ski>                | Just a
+09:38:17 <ski> i meant
+09:38:29 <ski> linnucks : yes, provided they start in the same column
+09:39:10 <ski> this data type definition means : for any type `a' (like `Bool',`Integer',`Maybe Bool',...) the type `Maybe a' consists of values of the form `Nothing', and `Just x', where `x' has type `a'
+09:39:32 <ski> so `Maybe Integer' consists of the values `Nothing' and `Just x', for every possible `Integer' `x'
+09:40:20 <ski> (the syntax for algebraic data types is meant to look a little bit like BNF (Backus-Naur Form) syntax for grammars, if you have seen that before. otherwise, don't worry)
+09:40:55 <ski> also, `Maybe' is a parameterized type (a type function), since it takes a parameter `a', that can be "set" to any particular "result type" we want
+09:41:11 <ski> linnucks : now, you could probably do something like
+09:41:37 <ski>   trip a b = tripHelp (exactSquareRoot csq)
+09:41:40 <ski>     where
+09:41:43 <ski>     csq = ...
+09:41:45 <linnucks> https://gist.github.com/andrewjohnroy/42647c4ebbf7213c4ccfacdc983c33fa
+09:41:50 <linnucks> I did this
+09:41:55 <linnucks> but it stuffed up
+09:42:22 <ski>     tripHelp  Nothing  = ..a..b..
+09:42:23 <ski>     tripHelp (Just n ) = ..n..a..b..
+09:43:10 <ski> linnucks : the point is that if you define a "helper" function, and pass the result of the `exactSquareRoot' call to it, you can then inspect whether you got `Nothing' or `Just n' (a square root `n'), by pattern-matching with multiple defining equations, as usual
+09:43:49 <ski> an alternative way to do the same thing, without defining a helper, would be to use the alternative `case'-`of' syntax for pattern-matching
+09:44:38 <ski>   trip a b =
+09:44:42 <ski>       case exactSquareRoot csq of
+09:44:45 <ski>         Nothing -> ..a..b..
+09:44:50 <ski>         Just n  -> ..n..a..b..
+09:44:55 <ski>     where
+09:44:57 <ski>     csq = ..a..b..
+09:45:33 <ski> (`case ... of ...' is an expression, i just put it on the next line to not indent it as much. note that `where' can't be more indented than `case' here)
+09:45:53 <linnucks> I lost what's not written
+09:46:19 <ski> your paste is a good try, but not quite enough
+09:47:06 <ski> if you could expect to always get a square root (or, another way of saying it, if you're find with your program aborting if there was no exact square root), then you could do it like this
+09:47:36 <ski> however, if you actually want to distinguish between the two cases, then you'll need to do something like the two alternatives i suggested above
+09:47:47 <ski> (and dmwit already suggested `case' earlier, i know)
+09:48:00 <ski> linnucks : ok ?
+09:48:04 <linnucks> ok
+09:48:04 <linnucks> so
+09:48:14 <linnucks> each guard can have a variable before it
+09:48:35 <linnucks> oh wait there are not variables
+09:48:41 <linnucks> in haskell
+09:48:47 <ski> guards are the things after the `|' symbols (and before the corresponding `='s in your paste)
+09:49:04 <linnucks> I don't get Just c
+09:49:09 <linnucks> and _ before the guards
+09:49:31 <ski> `exactSquareRoot (a^2 + b^2)' *could* compute to `Just c', for some result `c' (exact square root)
+09:49:39 <ski> but it *could* just as well compute to `Nothing'
+09:50:00 <ski> and presumably you want to do something different (than aborting/crashing) in the `Nothing' case
+09:50:33 <ski> dmwit's solution combined `case' with guards
+09:50:46 <ski> (guards can not only attach to defining equations, but also to `case' branches)
+09:51:26 <linnucks> 0009.hs:7:29: error: parse error on input ‘->’
+09:51:27 <linnucks>   |
+09:51:27 <linnucks> 7 | Just c | a + b + c == 1000  ->  a * b * c
+09:51:27 <linnucks>   |  
+09:51:36 <linnucks> I'm using case
+09:51:39 <ski> their solution has two (main) `case' branches. the second of which has three guard branches
+09:52:22 <ski> an alternate way to formulate their solution, without using `case', could be
+09:52:23 <linnucks> https://gist.github.com/andrewjohnroy/f179ab2869da3920a910c25eae009222
+09:52:31 <linnucks> I'm getting a case error
+09:52:41 <mniip> you didn't indent the 'Just' enough
+09:52:57 <mniip> so it's being parsed as a separate declaration
+09:53:09 <mniip> (so it's expecting a = where you put ->)
+09:54:34 <linnucks> ok
+09:54:43 <ski>   trip a b = tripHelp (exactSquareRoot (a^2+b^2))
+09:54:48 <ski>     where
+09:54:51 <fendor> I am looking for a function of type: (a -> b -> c) -> Maybe a -> Maybe b -> Maybe c, with the semantic: foo (++) (Just [1]) Nothing == Just [1], foo (++) (Just [1]) (Just [2]) == Just [1, 2] and foo (++) Nothing Nothing == Nothing. What am i looking for?
+09:54:53 <ski>     tripHelp (Just c)
+09:54:57 <linnucks> don't really understand Just c | a + b + c == 1000  ->  a * b * c
+09:55:01 <linnucks> or
+09:55:03 <ski>       | a + b + c == 1000 = a * b * c
+09:55:08 <fendor> hayoo and hoogle do not deliver the desired results
+09:55:10 <linnucks> _ | b == 1000          -> 0
+09:55:11 <ski>     tripHelp  _
+09:55:20 <ski>       | b == 1000         = 0
+09:55:26 <ski>       | a == b            = trip 1 (b+1)
+09:55:28 <ski>       | otherwise         = trip (a+1) b
+09:55:53 <fendor> I am probably looking for `Monoid m => Maybe a -> Maybe a -> Maybe a`, right?
+09:56:19 <Solonarv> fendor: 'm' and 'a' should match, but that sounds about right
+09:56:30 <Solonarv> I think you'd want 'Option' from Data.Semigroup
+09:57:07 <fendor> Solonarv, right m ~ a, thanks Ill give it a try
+09:57:09 <linnucks> ok
+09:57:11 <linnucks> I better go
+09:57:14 <linnucks> thanks for the help
+09:58:36 <mniip> fendor, liftA2?
+09:58:50 <mniip> oh
+09:58:53 <mniip> nevermind
+09:59:14 <mniip> you could hmm
+09:59:27 <mniip> \x y -> fold (Compose [x, y])
+10:00:16 <fendor> mniip, neither liftA2 nor liftM2 behave as desired :/ 
+10:00:19 <fendor> :t Compose
+10:00:21 <lambdabot> forall k1 k (f :: k -> *) (g :: k1 -> k) (a :: k1). f (g a) -> Compose f g a
+10:00:27 <fendor> never seen tha
+10:00:32 <mniip> @src Compose
+10:00:32 <lambdabot> Source not found. Sorry about this, I know it's a bit silly.
+10:00:47 <ski> fendor : hm, `\(<>) ma0 ma1 -> (\as -> guard (not (null as)) >> Just (foldr1 (<>) as)) (catMaybes [ma0,ma1])'
+10:01:06 <mniip> newtype Compose f g a = Compose (f (g a))
+10:01:27 <mniip> actually
+10:01:44 <mniip> :t \x y -> foldMap Just (Compose [x, y])
+10:01:45 <lambdabot> (Monoid a, Foldable g) => g a -> g a -> Maybe a
+10:01:52 <ski> @type \(catMaybes -> as) -> guard (not (null as)) >> Just (mconcat as)
+10:01:53 <lambdabot> Monoid b => [Maybe b] -> Maybe b
+10:02:09 <ski> linnucks : ok ?
+10:02:11 <fendor> Solonarv, Option will be deprecated since "the Monoid instance for Maybe has been corrected to lift a Semigroup instance instead of a Monoid instance."
+10:02:26 <fendor> so, monoid should suffice
+10:02:26 <ski> yay ! :)
+10:03:42 <dmwit> :t asum
+10:03:44 <lambdabot> (Alternative f, Foldable t) => t (f a) -> f a
+10:08:45 <dminuoso> Mmm, so what exactly is `Traced` about as opposed to Reader? I feel like the true essence lies in the `duplicate` function of the Comonad instance.
+10:09:52 <dmwit> > Semi.Option (Just [3,4]) <> Sem.Option Nothing
+10:09:53 <lambdabot>  error:
+10:09:54 <lambdabot>      Not in scope: data constructor ‘Sem.Option’
+10:09:54 <lambdabot>      Perhaps you meant one of these:
+10:09:59 <dmwit> > Semi.Option (Just [3,4]) <> Semi.Option Nothing
+10:10:01 <lambdabot>  Option {getOption = Just [3,4]}
+10:10:05 <dmwit> > Semi.Option (Just [3,4]) <> Semi.Option (Just [5,6])
+10:10:07 <lambdabot>  Option {getOption = Just [3,4,5,6]}
+10:10:17 <dmwit> fendor: ^
+10:10:41 <dmwit> ...oh, Solonarv beat me to the punch.
+10:12:10 <Solonarv> although:
+10:12:19 <Solonarv> % Just [1,2] <> Nothing
+10:12:19 <yahb> Solonarv: Just [1,2]
+10:12:40 <Solonarv> > Just [1,2] <> Nothing
+10:12:41 <lambdabot>  Just [1,2]
+10:12:59 <Solonarv> % Just [1,2] <> Just [3,4]
+10:12:59 <yahb> Solonarv: Just [1,2,3,4]
+10:13:07 <Solonarv> > Just [1,2] <> Just [3,4]
+10:13:10 <lambdabot>  Just [1,2,3,4]
+10:13:18 <Solonarv> ah, they're both up to date. Good!
+10:23:06 <mniip> dminuoso, well you have a family of values {x_i} where i in M, and M is a monoid, and you're focused at x_1
+10:23:21 <mniip> extract takes the element you're focused at: x_1
+10:23:48 <mniip> duplicate makes a family of families: {{x_ij}_j in M}_i in M
+10:25:18 <fendor> > sequenceA [Nothing]
+10:25:20 <lambdabot>  Nothing
+10:26:46 <mniip> it's like at every position i in the outer family, you're looking at the original family where focus is shifted by i
+10:27:24 <mniip> duplicate f = \i -> f . mappend i
+10:27:43 <dmwit> fendor: The natural generalization of mappend to lists is mconcat, not sequenceA (in case this is a continuation of your previous question.)
+10:27:56 <mniip> this is not unlike a Store comonad
+10:29:31 <dmwit> ski++ for patience that goes above and beyond the call of duty
+10:31:50 <mniip> in fact I think the operation Store s a -> Traced s a,  \(Store f x) -> f . mappend x
+10:31:54 <mniip> is a comonad homomorphism?
+10:33:00 <fendor> > sequenceA []
+10:33:02 <lambdabot>  error:
+10:33:02 <lambdabot>      • Ambiguous type variables ‘f0’, ‘a0’ arising from a use of ‘show_M69135...
+10:33:03 <lambdabot>        prevents the constraint ‘(Show (f0 [a0]))’ from being solved.
+10:33:09 <fendor> > sequenceA [] :: Maybe Int
+10:33:11 <lambdabot>  error:
+10:33:11 <lambdabot>      • Couldn't match type ‘[a0]’ with ‘Int’
+10:33:11 <lambdabot>        Expected type: Maybe Int
+10:33:17 <fendor> > (sequenceA [] :: Maybe Int)
+10:33:19 <lambdabot>  error:
+10:33:20 <lambdabot>      • Couldn't match type ‘[a0]’ with ‘Int’
+10:33:20 <lambdabot>        Expected type: Maybe Int
+10:33:31 <fendor> > (sequenceA [] :: Maybe [Int])
+10:33:33 <lambdabot>  Just []
+10:33:37 <fendor> sorry for spamming
+10:33:59 --- mode: glguy set +v pjrt
+10:34:02 <pjrt> actually, idk if it works with lambda bot
+10:34:36 <pjrt> > sequenceA @[]
+10:34:38 <lambdabot>  error:
+10:34:38 <lambdabot>      Pattern syntax in expression context: sequenceA@[]
+10:34:38 <lambdabot>      Did you mean to enable TypeApplications?
+10:34:42 <pjrt> Nope
+10:35:36 <geekosaur> use yahb
+10:35:50 <geekosaur> % :t sequenceA @[]
+10:35:50 <yahb> geekosaur: Applicative f => [f a] -> f [a]
+10:36:15 <pjrt> Oh, nice, didn't know about that. geekosaur++
+10:37:14 <fendor> dmwit, right, but I have a  [Maybe a] -> Maybe [a]
+10:37:47 <pjrt> % :t sequenceA @[] @Maybe
+10:37:47 <yahb> pjrt: [Maybe a] -> Maybe [a]
+10:38:36 <lavalike> :t sequenceA . (id :: [Maybe a] -> [Maybe a])
+10:38:37 <lambdabot> [Maybe a] -> Maybe [a]
+11:03:39 --- mode: glguy set +v JD__
+11:07:20 <fendor> what would be a nice datastructure to represent a DAG? I'd like to query for incoming edges and outgoing edges
+11:10:33 <AndreasK> fendor: If you don't do much mutation you can just have edge lists in reverse and forward order
+11:11:57 <fendor> AndreasK, right, maybe two Maps suffice.
+11:12:44 <Solonarv> if you want to enforce the DAGness, you could even do something a bit more complicated -- I'l throw together a gist
+11:13:01 <AndreasK> They should work, if they suffice depends on your requirements :)
+11:14:58 <fendor> Solonarv, although I think this is a nice idea, I do not need to enforce the DAGness 
+11:15:02 <fendor> :) 
+11:22:12 <Solonarv> https://gist.github.com/Solonarv/d24fff46e0748670bc7b8fa2dcf71a8f -- fendor
+11:27:59 <fendor> Solonarv, children are outgoing edges and parents are incoming edges, right
+11:28:00 <fendor> ?
+11:28:12 <Solonarv> yep
+11:28:53 <Solonarv> obviously you'd have to make sure the operations to add/remove nodes don't break anything
+11:29:34 <Solonarv> and you might have to re-order indices occasionally (there are definitely flaws to this approach)
+11:30:28 <fendor> Solonarv, I think I only need fast lookup in both directions, so not reordering required
+11:30:44 <Solonarv> ah, you'd need reordering when inserting nodes, is what I mean
+11:31:19 <fendor> deletion probably too, right? 
+11:32:01 <Solonarv> nah, it's not a problem if there are gaps
+11:32:57 <fendor> i see, then I just need to add a new vertex and I shouldnt try to reuse indices
+11:33:08 <fendor> which I do not need to anyways
+11:33:48 <Solonarv> the issue comes up if you already have vertices at (say) '3' and '4', but you want to insert a new vertex between then
+11:34:18 <Solonarv> you might be better-served by something inspired by the 'algebraic-graphs' package
+11:34:23 <Solonarv> @hackage algebraic-graphs
+11:34:23 <lambdabot> http://hackage.haskell.org/package/algebraic-graphs
+11:35:57 <fendor> Solonarv, ok cool, thank you! i am gonna look at it later, now I have to go, have nice evening!
+11:53:54 <Solonarv> @tell fendor https://gist.github.com/Solonarv/3009efe0d042c50f3b80ef3498485a72 -- see '@hackage algebraic-graphs' for the idea and more functions on graphs
+11:53:54 <lambdabot> Consider it noted.
+12:14:11 <growpotkin> hey for me GHCi usually loads any language pragmas that I set. But for whatever reason it never loads OverloadedStrings. Does anybody have ideas on how to fix this?
+12:14:24 <growpotkin> It's just annoying to call :set -XOverloadedStrings repeatedly
+12:14:44 <boj> add it to your .ghci
+12:14:54 <pjrt> yeah, it should. How are u adding it?
+12:15:14 <pjrt> You mentioned it usually loads "any pragmas that I set", so all others work?
+12:15:34 <growpotkin> Yeah most other pragmas get set automatically in GHCi as long as they are in my file
+12:15:54 <growpotkin> so i never need to do :set -XArrows or :set -XRankNTypes
+12:16:04 <pjrt> In your file? As in, in `.ghci` or in a file you are loading with GHCi?
+12:16:05 <growpotkin> but for whatever reason I do need to manually set OverloadedStrings
+12:16:31 <growpotkin> sorry to clarify, if my Foo.hs file has pragmas, GHCi usually notices them and sets them for me. 
+12:16:46 <growpotkin> I don't have any settings for pragmas in my .ghci file
+12:18:52 <boj> are you expecting pragmas ghci slurps up to be universal to your ghci shell?
+12:19:23 <MarcelineVQ> ghci does not load Language programs from source files into the interactive sesssion, though they apply to the code in your file
+12:19:35 <MarcelineVQ> *pragmas from
+12:22:00 <growpotkin> Oh I was under the impression that GHCi could detect pragmas
+12:23:12 <growpotkin> just because I was use things like Arrows in GHCi just because they were in my source files. I think I have a more fundamental misunderstanding of how GHCi settings are done.
+12:25:37 <geekosaur> it can and does detect them, while compiling. the problem is, it would have to change them if you switch what source file you're looking at
+12:26:44 <growpotkin> thank you 
+12:27:02 <geekosaur> take a look at :set vs. :seti
+12:27:34 <geekosaur> https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/ghci.html#the-set-and-seti-commands
+12:47:50 <mniip> related
+12:48:09 <mniip> I remember at some point in the past ghci would automatically enable extensions that are enabled in the file that is currently loaded
+12:48:12 <mniip> and now it no longer does
+12:51:33 --- mode: glguy set +v Darwin226
+12:52:17 <Darwin226> So I have this class for which I'm writing a generic implementation. If I omit the instance for V1, then the class can't be derived for types with no constructors
+12:52:28 <Darwin226> this is what I want. However the error isn't really useful.
+12:52:54 <Darwin226> So I want to write an instance but put a custom type error in the context. I did that, but now the class derives successfully!
+12:53:23 <deltasquared> not totally related to haskell, but tried to read about dependent types in idris today... that fell into the "things I know so little about that it bounced off my head" bucket.
+12:53:32 <Darwin226> Inspecting the info for my type in GHCi I can see this "instance (TypeError ...) => MyClass Test"
+12:53:39 <Darwin226> What gives
+12:54:07 <MarcelineVQ> deltasquared: originally that's what haskell was to you too though, I would expect
+12:54:08 <Darwin226> Of course, using any of the classes methods results in that type error but that's way too late
+12:54:26 <deltasquared> MarcelineVQ: not in the same way though
+12:54:42 <deltasquared> there's a special brand of "I don't get this" that has never been touched by imperative programming languages
+12:54:46 <geekosaur> Darwin226, what gives is that the context doesn't determine whether an instance matches. the type error is raised on use
+12:54:47 <MarcelineVQ> deltasquared: so keep on reading, there's lot of interesting things about all that, between idris and agda, cod an isabell, lots of fun
+12:54:55 <deltasquared> that feeling of standing before a monolith of computer science and being unable to comprehend
+12:54:56 <MarcelineVQ> *coq
+12:55:35 <MarcelineVQ> You're allowed to play in the shadow still
+12:55:42 <deltasquared> *real* computer science, not just what I got taught at university to get a job (UK system, a bit different from comp sci in the US I'm told)
+12:55:53 <MarcelineVQ> Eventually you'll notice little cracks and handholds in its cyclopean form
+12:56:00 <deltasquared> MarcelineVQ: oh, I don't deny that. just one of those "oh dear, here we go again" moments
+12:56:02 <MarcelineVQ> And start to climb
+12:56:05 <Darwin226> geekosaur: That's not always the case though. In fact, it's hard to produce a minimal example that demonstrates my problem because usually the deriving fails with my nice custom error
+12:56:38 <MarcelineVQ> deltasquared: check out ##dependent if you like, there's a lot of resources there and people willing to help if you find you have a interest
+12:57:30 <geekosaur> Isuspect it'll depend on whether and/or how the instance is actually used in the derivationa nd you'd ahve to use -ddump-deriv to see what's going on
+12:57:59 <MarcelineVQ> deltasquared: http://purelytheoretical.com/sywtltt.html is often linked for example, dunno if that's the best place to start if you don't know if you're interested yet though ehe
+12:58:05 <Solonarv> yup - IIUC you'll get the error iff that instance is actually used
+12:58:12 <Darwin226> geekosaur: -ddump-deriv just shows a call to my default function
+12:59:20 <deltasquared> MarcelineVQ: not going to lie though, I think my brain is feeling like the curry-howard correspondence could start to make sense.
+12:59:33 <deltasquared> partly because I find it such an awesome idea
+12:59:41 <deltasquared> even if I don't grasp it very deeply
+13:00:01 <Darwin226> geekosaur: It shows "myFunction = $dmyFunction @Test"
+13:00:51 <MarcelineVQ> if you want to see everything that happened I found out about -dverbose-core2core recently. not sure why that isn't called -ddump-core2core-verbose though
+13:01:00 <geekosaur> I think yu'll have to pastebin a minimal example
+13:02:15 <deltasquared> daft question, is there a general assumption of open source and free sharing within haskell when it comes to showing a problem case?
+13:02:27 <MarcelineVQ> Only if you want help :>
+13:02:29 <deltasquared> certainly I think that would very much NOT be the case with the language I use on my day job...
+13:02:48 <deltasquared> because microshaft^H^H^H^H^Hsoft
+13:03:03 <hyperisco> who's excited for ROW TYPES?!
+13:03:06 <pjrt> That's an odd question. What do you mean by "general assumption"?
+13:03:14 <MarcelineVQ> An example that reproduced the issue exactly without showing things you shouldn't show would be fine, but much time has been wasted from both sides when this is attemped generally
+13:03:14 <[exa]> deltasquared: you can guess which strategy improves software quality more directly
+13:03:24 <Darwin226> deltasquared: I'd say sharing your C# is also the norm if you have an issue with your C#
+13:03:34 <deltasquared> [exa]: alas if only that argument persuaded everyone...
+13:04:07 <hyperisco> deltasquared, are you talking about proprietary code?
+13:04:42 <deltasquared> hyperisco: alas yes... my day job isn't very ideologically pure in that respect >_>
+13:04:55 <MarcelineVQ> hyperisco: in ghc or in plugin form?
+13:05:17 <hyperisco> not at all unusual not being allowed to leak private source :P
+13:05:53 <hyperisco> but I take a sense upon myself to know the difference between trade secrets and mundane glue code
+13:05:56 <koz_> Since there's more folks here, I figured I might ask again. I've got this type ambiguity error, and I need to try and disambiguate it. However, adding a signature to the pattern match throws another weird error. Here's the code plus errors: https://gist.github.com/kozross/12c9bfd0506408fc7e3d540cd304471d Could someone help me figure this out?
+13:06:23 <hyperisco> don't think the enterprise is going belly up because the competitors figured out our bash script to backup the database
+13:06:26 <deltasquared> hyperisco: indeed. though when I see C# questions on stackoverflow I've seen a few cases where no sauce is given; with haskell almost all of it gives an example, I guess partly because of the prevalent attitudes within the language community?
+13:06:47 <deltasquared> hyperisco: probably not, but I'd probably still be in trouble. :P
+13:07:08 <pjrt> Well Haskell, having a source-compile build community, means there's a lot more OSS code out there
+13:07:20 <deltasquared> pjrt: a very good point.
+13:07:36 <geekosaur> it may also be more necessary to have complete examles, because haskell has more moving parts
+13:07:45 <geekosaur> type inference, etc.
+13:07:48 <pjrt> Hard to keep stuff secret when everything in Hackage is src code :D
+13:07:52 <deltasquared> actually, I wanted to ask about that, is there any technical reason with haskell not to prefer precompiled shared libs or the other way around?
+13:08:17 <deltasquared> I imagine something to do with optimisations
+13:08:20 <[exa]> deltasquared: abi problems, linkage trouble, ...
+13:08:31 <[exa]> optimizations are quite minor
+13:08:32 <mniip> yeah haskell doesn't have a stable ABI
+13:08:45 <mniip> /due/ to the optimizations in the compiler constantly changing
+13:08:52 <Solonarv> also, cross-module inlining
+13:09:28 <deltasquared> oh dear, koz_ is using type families... I'm in for a bad time, haven't gotten the hang of these yet
+13:09:30 <pjrt> deltasquared: Unn, not sure, maybe the academic origins?
+13:09:49 <pjrt> deltasquared: Though nowadays, other langs are moving in the directon of src-compile
+13:09:54 <Solonarv> pjrt: that's not a /technical/ reason
+13:09:55 <pjrt> Like Go
+13:10:02 <koz_> deltasquared: Oh, type families in and of themselves aren't that tough a concept. It's what they do with _everything else_ that gets tricky.
+13:10:14 <hyperisco> deltasquared, several possible reasons. Experience may be predominant.
+13:10:49 <[exa]> Solonarv: very technical in fact, you often have to publish your stuff to get published (and journals are getting picky about oss-style licenses, which I like)
+13:10:56 <deltasquared> blinking heck, is that type variable of a type-level list kind? yep. I'm definitely in for a bad time xD
+13:10:59 <Solonarv> ah, fair point
+13:11:26 <deltasquared> [exa]: about time really, otherwise we'd have reproduction issues
+13:11:31 <pjrt> Another techninical advantage (which some ppl in Scala are now exploring to avoid): bincompact
+13:11:36 <mniip> koz_, here's the problem
+13:11:40 <geekosaur> yeh. I did wonder if Massiv assumes you're using natnormalise or etc.
+13:11:56 <mniip> koz_, you have a pattern that looks like  (p :: T) where p looks like (AndThen x y)
+13:12:02 <deltasquared> pjrt: what is this bincompact you speek of
+13:12:10 <pjrt> binary compatability issues 
+13:12:12 <pjrt> sorry
+13:12:16 <koz_> deltasquared: If you're interesting in this stuff, check out jle`'s 'Introduction to Singletons', and Sandy's book 'Thinking With Types'.
+13:12:16 <mniip> until the 'AndThen' constructor is matched, the equality contained in the GADT is not extracted
+13:12:27 <[exa]> deltasquared: it waited for newer reviewers getting in who understand that publishing a program is a lot more useful than publishing an algorithm description in a page-limited article
+13:12:27 <mniip> and one cannot assume  ds ~ n : ns
+13:12:32 <deltasquared> koz_: a book? that'd be great when I have money... xD
+13:12:35 <mniip> if however you said
+13:12:51 <koz_> deltasquared: Introduction to Singletons is a blog post series.
+13:12:53 <pjrt> deltasquared: This is an issue in Scala (which I do by trade) and the JVM in general. 
+13:12:59 <mniip> (AndThen (i :: Finite n) (is :: NatIndex ns))
+13:13:05 <koz_> (I'd start with that because it's very accessible and jle` is a good writer)
+13:13:10 <koz_> mniip: Ah, OK.
+13:13:13 <koz_> Let me try that.
+13:13:14 <mniip> then indeed  ds ~ n : ns  on the rhs
+13:13:35 <deltasquared> pjrt: binary compatibility issues on the jvm of all places... welp
+13:13:39 <Solonarv> deltasquared: a lot of "books" in haskell-land are published for free online (e.g. the haskell wikibook, bartosz milewski's category theory series, ...)
+13:13:43 <pjrt> deltasquared: Well, no, not really the JVM in general, it can be avoided, but not if u want to interface with Java, which every JVM lang wants to do
+13:14:10 <trcc> How do I go from Int to CInt?
+13:14:12 <deltasquared> so much for compile once run everywhere eh...
+13:14:32 <koz_> trcc: If CInt is an instance of Num, fromIntegral shoudl work I think.
+13:14:48 <Solonarv> (it is Num, yes)
+13:15:02 <trcc> Thanks koz_
+13:15:10 <koz_> mniip: OK, I've added that signature in the way you suggested, and it now accepts it. However, I'm still getting the other two errors. How do I disambiguate in this case?
+13:15:47 <koz_> A heuristic for answering any question of the form 'how do I convert [numeric-ish type A] to [numeric-ish type B]?': 'Use fromIntegral.' Works a lot of the time. :P
+13:16:29 <koz_> mniip: Let me update the paste.
+13:16:31 <Darwin226> geekosaur: Ok, I've got a relatively minimal example
+13:16:34 <Darwin226> https://gist.github.com/LukaHorvat/9c1bd6a40d40c6fcbe72237772d98f3a
+13:16:41 <Solonarv> well, as long as A is integer-ish; if it's fractional-ish you'll need realToFrac instead
+13:16:45 <Darwin226> this doesn't compile because Num Bool doesn't exist
+13:16:55 <Darwin226> But if you comment out that instance and uncomment the other one, it compiles
+13:17:30 <deltasquared> koz_: so.... daft question, what was it you were trying to achieve btw
+13:17:35 <koz_> mniip: https://gist.github.com/kozross/12c9bfd0506408fc7e3d540cd304471d
+13:17:52 <koz_> deltasquared: I wanna wrap massiv in a similar way to how vector-sized wraps vector.
+13:17:58 <koz_> (that is, with type-level lengths)
+13:17:58 <pjrt> deltasquared: well u do compile "once", and run everywhere, but no where in that statement does it say you don't "crach at runtime" anywhere :)
+13:18:10 <pjrt> crash*
+13:18:28 <koz_> However, this requires me to do some shenanigans to convert indices that are acceptable in type-level-sized-land to indices that are acceptable in massiv-land.
+13:18:40 <koz_> This is what I'm trying to resolve right now, and I'm a bit confused as to how.
+13:18:42 <koz_> Hence my questions.
+13:19:09 <deltasquared> does the bot have a package search facility
+13:19:23 <koz_> % :info Contravariant
+13:19:24 <yahb> koz_: class Contravariant (f :: * -> *) where; contramap :: (a -> b) -> f b -> f a; (>$) :: b -> f b -> f a; {-# MINIMAL contramap #-}; -- Defined in `Data.Functor.Contravariant'; instance [safe] Contravariant m => Contravariant (WriterT w m) -- Defined in `Control.Monad.Trans.Writer.Lazy'; instance [safe] Contravariant m => Contravariant (StateT s m) -- Defined in `Control.Monad.Trans.State.Lazy'; in
+13:19:29 <koz_> ^
+13:20:03 <mniip> koz_, as the error message says, how do you know  Ix (1 + Len ns) ~ A.IxN n0  for some n0?
+13:20:19 <mniip> Ix is a type family
+13:20:25 <koz_> mniip: Because massiv defines IxN n ~ Ix n as far as I can tell.
+13:20:32 <mniip> no
+13:20:41 <mniip> take a closer look
+13:20:47 <koz_> Definitions here for reference: http://hackage.haskell.org/package/massiv-0.2.0.0/docs/Data-Massiv-Array.html#t:Ix
+13:20:52 <mniip> I know
+13:21:16 <mniip> do you think that definition implies that unconditionally   IxN n ~ Ix n ?
+13:21:27 <koz_> Ah, wait, that's right.
+13:21:30 <koz_> It doesn't.
+13:22:03 <koz_> Ix and IxN are different things, since Ix is a type family but IxN is a datatype.
+13:22:16 <mniip> Ix is one of those "bad" type families that code like yours should avoid if at all possible
+13:22:32 <mniip> it's handy when n is constant
+13:22:35 <mniip> nightmareish if not
+13:22:46 <koz_> mniip: It's hard for me to avoid though.
+13:22:48 <koz_> (in this case)
+13:23:17 <koz_> w
+13:23:21 <Darwin226> geekosaur: Hmm, if I do something like "Num (TypeError ('Test "err"))" then it fails. That just might work
+13:24:22 <koz_> mniip: Is there anything I can do in this case?
+13:24:59 <mniip> koz_, I don't see any massiv functions actually using 'Ix n'
+13:25:09 <mniip> oh wait
+13:25:12 <koz_> They all work via the Index instances.
+13:25:12 <mniip> the :> constructor
+13:25:16 <mniip> you're screwed mate
+13:25:24 * koz_ sighs.
+13:25:34 <mniip> to get this working you need something like singletons
+13:25:37 <c_wraith> mniip, what's bad about Ix?
+13:25:41 <koz_> I thought as much.
+13:25:49 <koz_> (was hoping it wouldn't be necessary)
+13:25:50 <mniip> c_wraith, lowering it down to gadts/values is a pain
+13:26:08 <mniip> you have to evidence that n ~/~ 0 and n ~/~ 1 and n ~/~ 2 for it to reduce to IxN
+13:26:21 <c_wraith> well, OK, yeah that's going to be bad. I see where you're coming from now.
+13:26:22 <koz_> Yeah, and the prior pattern matches aren't evidence enough.
+13:26:39 <mniip> sadly they aren't
+13:26:50 <mniip> GHC has almost no mechanism for inequality handling
+13:27:00 <mniip> singletons provides some
+13:27:14 <mniip> the If family for example and its singletonization
+13:27:32 <koz_> Would jle`'s decidable library be of use here?
+13:27:44 <mniip> I don't know what that is. link?
+13:27:49 <koz_> It seems that what I want to do is construct a proof of, well, that n ~/- any of 0,1,2.
+13:28:04 <koz_> https://hackage.haskell.org/package/decidable-0.1.4.0
+13:28:08 <w1n5t0n> Is there something like the Writer monad that is only parameterised by the logging value? I only care about adding a value to a logging list, some I'm using a "Writer [Value] ()". Is there something better I could use?
+13:28:43 <deltasquared> w1n5t0n: daft question, could you not define a type alias of some kind to that effect
+13:28:59 <deltasquared> or did you want to avoid Writer entirely
+13:29:02 <koz_> w1n5t0n: So, you're logging a bunch of actions that return ()? Or do you just not care about what they return?
+13:29:20 <w1n5t0n> I don't care about what they return, all that those functions need to do is take something and log it
+13:29:30 <w1n5t0n> so I want the code to reflect that
+13:29:36 <c_wraith> w1n5t0n, isn't that just... the monoid
+13:30:06 <mniip> koz_, I don't immediately see how
+13:30:35 <w1n5t0n> c_wraith, I'm a relative beginner so I haven't looked into that yet, what would the type signature look like?
+13:30:59 <deltasquared> c_wraith: lazy evaluation of the (a, b) monad perhaps? (IIRC it requires one element to be monoidal to combine them?)
+13:31:40 <koz_> mniip: Alrighty, I shall drag in singletons and see what it can give me.
+13:31:42 <deltasquared> hey anyone know how I can get ghci to show me instances for a given data constructor real quick
+13:31:50 <glguy> Using :info
+13:31:56 <c_wraith> w1n5t0n, instead of (Writer Foo ()), just use Foo?  I don't really know if that's what you want, but it kind of sounds like it.
+13:31:58 * koz_ would roll this myself, but I don't fully get massiv's internals.
+13:32:49 <koz_> I can't _ever_ get my grammar right with uses of /me ...
+13:33:11 * mniip . o O ( . o O ( ) )
+13:33:27 <[exa]> mniip: join on you
+13:33:30 <koz_> mniip: What was that in respose to?
+13:33:30 <mpickering> Is there a way to just turn off safe haskell checks?
+13:34:00 <deltasquared> something -XUnsafe? I swear I saw that in -list-options the other day
+13:34:22 <deltasquared> * --show-options rather
+13:34:52 <deltasquared> oh, exactly that apparently, but not sure if it's what you're looking for.
+13:34:59 <w1n5t0n> c_wraith, so does the Monoid class allow a bunch of functions that return a Foo to be combined into a [Foo] at the end of a do block?
+13:35:35 <deltasquared> w1n5t0n: there is an instance of monad that uses monoids (within tuples as it turns out), if that's what you mean.
+13:35:49 * deltasquared scrambles to find docs
+13:36:10 <deltasquared> the "side effect" of this monad is to combine monoidal values
+13:36:19 <deltasquared> e.g. for a list that's concatenate
+13:36:21 <[exa]> w1n5t0n: yes, functions are monoids and can be combined using <> to produce that exact effect
+13:36:50 <geekosaur> deltasquared, mpickering: -XUnsafe doesn;t do that, it declares the current module explicitly unsafe
+13:37:10 <mpickering> -XNoSafe?
+13:37:33 <mpickering> The problem is that I add a plugin to all modules but one is marked as Safe and the plugin makes one of the import Unsafe
+13:37:34 <[exa]> w1n5t0n: (except some very simple wrapping)
+13:37:47 <mpickering> You can't turn on Unsafe and Safe at the same time as well
+13:37:54 <geekosaur> I don't see a way to completely disable it aside from explcicit -trust options for all packages where it matters
+13:38:09 <mpickering> that's... bad
+13:38:19 <[exa]> w1n5t0n: btw what's the use case?
+13:38:23 <deltasquared> ack, got to run
+13:38:28 <deltasquared> blackout time
+13:38:33 <deltasquared> have a good evening y'all
+13:40:56 <w1n5t0n> [exa]: I see, thanks! It's for a music live coding eDSL I'm trying to write, where a "session" function takes a do block with various "synth" functions that basically register the instruments used in that session
+13:41:49 <geekosaur> this sounds like a Writer(T)?
+13:41:55 <w1n5t0n> so something like "session $ do {synth "first synth" (someSynth); synth "second synth" (someOtherSynth);}" etc
+13:42:07 <[exa]> so you want to write something like 'do {effect1; effect2;} and get output like effect1++effect2 ?
+13:42:37 <w1n5t0n> yes, where the ++ operator just appends to a list
+13:43:52 <w1n5t0n> what I'm using now is "session :: Writer [SynthWithID] () -> IO ()", "synth :: SynthID -> Writer [ParamSignal] () -> Writer [SynthWithID] ()" and "param :: Param -> Signal Value -> Writer [ParamSignal] ()"
+13:44:00 <[exa]> why not just write mconcat [ effect1, effect2 ] instead of do {effect1, effect2} ?  (and well rename mconcat to something like doMusic)
+13:45:01 <w1n5t0n> because that requires writing the list brackets and using commas and that's a bit of a pain to do when writing code infront of an audience
+13:46:01 <[exa]> what should it do when someone tries:   do {a <- effect1WithResult; effect2 a}
+13:46:27 <geekosaur> there's ways to do it, back in the day oen fo the xml libs did that by overridi8ng (>>) ... and threw an exception if you did what [exa] said
+13:46:33 <geekosaur> which is kinda poor
+13:47:56 <tauoverpi[m]> varargs to construct a list would work as long as you don't mind it being inline. Does require a new typeclass though which is ugly
+13:48:02 <w1n5t0n> [exa]: that's not part of the expected workflow, here's an example of how I'm using the DSL: https://www.youtube.com/watch?v=5-T0diyNsdY
+13:50:00 <w1n5t0n> [exa]: the only workflow that should be supported would be to add more synths to the session. In this example the "synth" function did its own IO and returned "IO ()", but now I'm trying to get all synths to log themselves to the session and then evaluate them all from a central place at the end of the session's do block
+13:50:26 <[exa]> w1n5t0n: so basically you just use 'do' notation to fill up parameters because it's the most userfriendly way to do it?
+13:50:36 <[exa]> well that's reasonable
+13:50:41 <w1n5t0n> yes, pretty much
+13:51:21 <[exa]> there's optparse-applicative which does something very similar with commandline arguments, might be a good inspiration
+13:51:36 <w1n5t0n> [exa]: here's the main bit of source code if that helps: https://github.com/lnfiniteMonkeys/TimeLines/blob/rollingWindow/Sound/TimeLines/TimeLines.hs
+13:51:50 <w1n5t0n> I'll have a look into that, thanks
+13:52:58 <[exa]> like, you've got the fish <>< everywhere, optparse-applicative just uses <>, see quickstart here https://hackage.haskell.org/package/optparse-applicative
+13:54:11 <[exa]> anyway
+13:55:05 <[exa]> putting together a law-breaking monad just for this purpose is probably justifiable :]
+13:56:02 <[exa]> btw I guess it's going to be some kind of writer on the inside anyway
+14:01:02 <w1n5t0n> [exa]: yeah the Writer way that I'm doing it now works fine, I just read that it's meant to be used with functions that have a return value AND something to log and I was wondering if there would be a benefit to using something that doesn't expect return values, just logging
+14:04:18 <[exa]> w1n5t0n: well, 'just logging' is monoids, needs <>. Making your synth configuration a monoid will allow you to use the optparse-like definitions. Monads and monad syntax basically requires the return values to make sense.
+14:04:51 <[exa]> btw how's the thing executed?
+14:08:14 <[exa]> oic, Signal is Reader Time
+14:08:33 <w1n5t0n> [exa]: yes that's clear now, I guess I shouldn't have avoided learning about monoids earlier! When I press ctrl-enter the whole block is executed and every parameter of every synth is sampled over a certain window of time, say (0, 10) seconds. All sampled values for a parameter are written as Doubles to a wav file, and then loaded on a synth server and indexed back at the right speed
+14:09:46 <[exa]> I must write myself a synth sometime
+14:10:26 <w1n5t0n> it's great fun!
+14:11:19 <[exa]> yeah, I was doing some fun stuff with trackers before (impulsetracker&screamtracker)
+14:12:58 <graftin> In the section for nonstrict evaluation on Wikipedia's evaluation strategies page, it mentions normal order eval, call by name, call by need, and call by macro expansion. Is the last one a real thing for implementing normal languages, or does it only refer to Scheme's hygienic macros? Is it related to Dybvig's expansion-passing style for Scheme implementation?
+14:13:30 <graftin> (IDK why implementation is bolded)
+14:13:45 <graftin> Oh.
+14:19:10 <Solonarv> mpickering: bit late, but might you be looking for 'Trustworthy' ?
+14:19:45 <mpickering> If a module sets `-XSafe` then you can't set `-XTrustworthy` to override it
+14:19:53 <mpickering> that just causes an error
+14:25:36 <python476> greetings fellow cats
+14:25:51 <python476> I was reading this article series about recursion schemes https://blog.sumtypeofway.com/recursion-schemes-part-2/
+14:26:03 <python476> I'd love to know if this is still a topic of discussion these days
+14:30:10 <python476> #haskell is too lazy
+14:31:05 <Solonarv> they're still *used*, but not *discussed* as much (AFAIK)
+14:31:06 <__monty__> python476: Not sure what you're referring to with "this?"
+14:31:59 <python476> recursion schemes
+14:32:15 <python476> Solonarv: thanks, no publications either then ?
+14:32:51 <Solonarv> I'm not aware of any new related publications; that said, I'm not particularly up to date on academic paper either
+14:32:55 <Peaker> python476, we used this for a while, it was excellent. but we needed diverse ASTs so we switched to https://github.com/lamdu/lamdu-calculus/blob/master/src/Data/Tree/Diverse.hs
+14:33:21 <plertrood> Hi, is there a standard place to look for documentation on various Haskell libraries?
+14:33:24 <Peaker> we have ASTs that contain other kinds of ASTs within them, and all of which have to be annotated with the given functor
+14:33:36 <plertrood> It seems to be eluding me..
+14:33:43 <python476> Peaker: composable DSLs ?
+14:33:54 <Solonarv> plertrood: hackage ?
+14:33:58 <plertrood> For example, on hackage : http://hackage.haskell.org/package/base64-bytestring. I can't find any documentation..
+14:34:21 <Peaker> python476, it's for a statically typed language, where values can embed types and types have multiple different nestable ASTs
+14:34:22 <plertrood> There seem to be a number of packages like this..
+14:34:37 <Solonarv> the documentation is in the *modules*, not (usually) the "front page"
+14:34:49 <python476> https://hackage.haskell.org/package/base64-bytestring-1.0.0.1/docs/Data-ByteString-Base64.html
+14:35:04 <python476> Solonarv is wise
+14:35:27 <plertrood> Solonarv: Ahhh... yes. Thanks.
+14:35:30 <Peaker> plertrood, https://www.stackage.org/lts-12.19/hoogle can lead you to the documentation of anything in stackage
+14:36:44 <plertrood> Oh, thats nice. Thanks.
+14:36:52 <plertrood> I knew I just wasn't looking right!
+14:37:49 <sm> plertrood: but you started in the right place (hackage page). Some packages have a readme or repo with readme or repo with wiki or home page linked there, some have just the haddocks.
+14:39:29 <Peaker> sometimes you have some big package import that re-exports lots of internals. Then the haddocks for it are empty, and you need to scan all the other modules manually :(
+14:46:55 <w1n5t0n> are Control.Monad.Writer and Control.Monad.Trans.Writer the same thing if all I care about is the "type Writer w" type?
+14:48:16 <MarcelineVQ> yes
+14:48:19 <jackdk> w1n5t0n: I think so. See https://hackage.haskell.org/package/mtl-2.2.1/docs/src/Control.Monad.Writer.Lazy.html which looks like it re-exports
+14:48:48 <geekosaur> modern mtl is built on top of the transformers library, and reexports that
+14:49:29 <geekosaur> (there's also a version based on type families, which likewise reexports and builds atop transformers)
+14:50:48 <w1n5t0n> then why do I get "expected one more argument to 'Writer [Int]'"? Doesn't Writer only have one type parameter?
+14:51:37 <c_wraith> :k Writer
+14:51:38 <lambdabot> * -> * -> *
+14:51:45 <geekosaur> the monad does, u the monad reqires a resutl type as well
+14:51:48 <c_wraith> @kind Writer
+14:51:49 <lambdabot> * -> * -> *
+14:52:02 <geekosaur> that si, the monad is Writer w, the type is Writer w a
+14:52:08 <c_wraith> err, oops. lag on my end. sorry about the spam.
+14:52:25 <geekosaur> :k Monad
+14:52:26 <lambdabot> (* -> *) -> Constraint
+14:54:13 <w1n5t0n> I'm a bit confused, when I see "type Writer w = WriterT w Identity" I understand that I can have a value of type "Writer [a]", is that wrong?
+14:55:17 <geekosaur> it is wrong. a Writer expression has both a "log" and a result; you have specified only the type of log
+14:55:29 <geekosaur> and that is a partially applied type synonym
+14:55:33 <c_wraith> yes.
+14:55:55 <c_wraith> a type synonym doesn't need to expand to something with kind *
+14:56:04 <hexagoxel> (it would be fine to write "type Optional = Maybe")
+14:56:27 <Solonarv> if you look at the definition of WriterT, it goes 'newtype WriterT w m a = ...'
+14:56:31 <zachk> so I have some code thats not working, it compiles doesnt function, I paired it down using comments when a non working version that was extended from an earlier version that worked, and still works, thing is its pared down to a very small example that looks like it should work but it doesn't, what should I do?
+14:57:05 <Solonarv> so 'Writer [Int]' expands to 'WriterT [Int] Identity' -- clearly the 'a' is missing!
+14:57:20 <w1n5t0n> Solonarv: aah that makes sense, I forgot the "m a" part!
+14:57:48 <MarcelineVQ> zachk: put it in a paste link along with the errors
+14:57:57 <Solonarv> zachk: upload it somewhere (pastebin, github gist, whatever) and post a link to that
+14:58:02 <zachk> there are no errors
+14:58:30 <Solonarv> w1n5t0n: you were only missing the 'a', the 'm' is taken care of (it's the 'Identity' in the definition of 'Writer')
+14:58:58 <MarcelineVQ> Ah, you meant something else by doesn't work, in that case include example input, the real output, and the expected output
+15:00:19 <w1n5t0n> Solonarv: yes yes I see. Is there such a thing as a "Writer w" that just logs or should I just use "type OnlyLog w = Writer w ()"?
+15:00:36 <geekosaur> the latter
+15:00:54 <geekosaur> "Writer that only logs" is Monoid
+15:01:00 <Solonarv> there is 'Const', which doesn't have a value at all, but it isn't a monad
+15:01:19 <geekosaur> but Monad requires a result type as well
+15:01:41 <Solonarv> defined as 'newtype Const w a = Const { getConst :: w }'
+15:03:00 <w1n5t0n> geekosaur: I've been trying to wrap my head around that, so is it possible to do "readLogs $ do {log 1; log 2; log3}" and output "[1, 2, 3]" with monoids?
+15:03:31 <w1n5t0n> because that's what I'm trying to do with Writers anyway, I don't need the return value
+15:03:37 <geekosaur> do notation only works with Monad (or Applicative with the appropriate extension), not Monoid
+15:03:45 <c_wraith> w1n5t0n, just give up on do notation. it's more than you need.
+15:04:16 <zachk> here's my code, it compiles just fine, needs cabal install fsnotify, most of it is commented out, it prints to the screen when run with &, used to work the other day but hasn't worked lately at all, it never notices touches to ~/.cabal/bin when it used to 
+15:04:21 <geekosaur> and as I mentioned earlier, there are ways to abuse do notation but they lead to really weird behavior if you slip
+15:04:22 <zachk> https://nopaste.linux-dev.org/?1188074
+15:04:30 <c_wraith> w1n5t0n, your code just reduces to [1,2,3] when you stop trying to cram in do notation
+15:05:22 <w1n5t0n> c_wraith: I know, but want to use it with more complicated types and avoid having to type the list brackets and commas, it's a user-interface thing
+15:06:12 <Solonarv> in that case: yes, use writer
+15:06:23 <Solonarv> you don't need to do anything fancy with the return value
+15:07:15 <jle`> v0d1ch: you can use do notation with Const with -XApplicativeDo
+15:07:21 <jle`> koz_: hey, did you ever figure out your thing from ytesterday?
+15:07:36 <koz_> jle`: I did with some help.
+15:07:38 <c_wraith> mconcat [ line 1, line 2, line 3]. no worse syntactically. doesn't even depends on whitespace, which will make some people happier. works with the exact same types as writer.
+15:07:42 <geekosaur> I think the question might be why not use a custom operator?   synth1 >.> synth2 >.> ...
+15:07:43 <MarcelineVQ> zachk: should that forever be indented to keep the withManager going?
+15:07:45 <koz_> Basically it amounts to 'singletons or GTFO', sadly.
+15:08:21 <jle`> yeah, you often need some mechanism for getting around type erasure
+15:08:22 <Solonarv> just have your functions (e.g. 'log') return 'Writer Blah ()', and give the "consumer" the type 'Writer Blah () -> whatever'
+15:08:42 <w1n5t0n> geekosaur: that's no different to using commas and wrapping the whole thing in square brackets, but I want to be able to stack the blocks vertically and have all of that implied
+15:08:43 <c_wraith> geekosaur, doesn't even need to be custom - (<>) already exists
+15:08:47 <koz_> jle`: It's _particularly_ bad in this case, due to the way massiv does indexes.
+15:08:48 <jle`> koz_: but also i don't recommend mixing inductive types like lists with non-inductive types like GHC.TypeLits Nat
+15:09:11 <zachk> MarcelineVQ, looks like that may be it :) let me try it!
+15:09:18 <jle`> it's a pretty big mismatch
+15:09:30 <koz_> jle`: Yeah, I can see that now.
+15:09:41 <jle`> and you'll often have issues unless all of your things are known at compile time
+15:09:48 <MarcelineVQ> zachk: hopefully that's part of it, I only thought of that because I've recently tried using fsnotify as well for a home-brew file server ehe
+15:10:08 <jle`> although i suppose maybe it might be possible to have a typechecker plugin to make things easier, but in general, yeah it's setting yourself up for a lot of problems
+15:10:21 <jle`> if you use lengths for lists, use an inductive Nat type like data N = Z | S N
+15:10:22 <koz_> jle`: Wrapping massiv is a bit of a design challenge then.
+15:10:31 <koz_> I guess I could do inductives all the way down.
+15:10:32 <[exa]> w1n5t0n: well, regarding the original questions, you can't use >>= if your type doesn't have the explicity type parameter. You can carry "nothing" throught though (e.g. similarly as Nothing is a perfect Maybe with whatever type inside)
+15:10:44 <zachk> I am trying to make it for my mud, that when the "core" binary gets updated the watcher shuts it down and systemd should restart it, but I need to signal to the core to save all data and do a clean exit
+15:11:06 <jle`> koz_: i've written 'tensor' libraries before that do use both inductive nats and normal nats, inductive lists and vectors
+15:11:18 <koz_> jle`: I guess that was difficult?
+15:11:25 <jle`> not too difficult, the type checker helps
+15:11:35 <zachk> MarcelineVQ, yes that was it, thank you so much :) 
+15:11:35 <jle`> you basically think about why you need nats at all, and in what situations
+15:11:39 <MarcelineVQ> zachk: awesome
+15:12:05 <jle`> koz_: having both Nat and N in your program isn't too bad, because it's rare that they "mix"
+15:12:44 <jle`> oh, and you'd also need to have inductive and non-inductive Finites, too
+15:12:53 <w1n5t0n> [exa]: what if I don't care about using (>>=) and only want to use (>>)? as I said earlier, there will never be a case where I cant to do "a <- synth", because there is nothing to extract. So, in a way, I the implicit (>>) in do notation to append to the final list, nothing more
+15:13:13 <jle`> i used to get inductive nats and finites from the type-combinators library, but the lib has suffered a bit of bitrot.  they're still a solid combination to use, though
+15:13:15 <koz_> jle`: I assume the Finites from finite-typelits are non-inductive in this case?
+15:13:21 <[exa]> w1n5t0n: btw what about 'liftSynth :: [a] -> Writer [a] b; liftSynth x = x >> return undefined' and applying to all your operators so that they lift by default?
+15:13:31 <jle`> yeah, Finite, GHC.TypeNats, vector-sized are the "non-inductive" family
+15:13:48 <jle`> and Fin, N, Vec are the "inductive" family
+15:13:51 <[exa]> you'll get electrocuted on <- because of the undefined, but that's fine for you afaik
+15:14:35 <jle`> koz_: for the most part, the two don't actually ever need to mix
+15:14:52 <jle`> but maybe i haven't used them enough to run into situations where you'd need to mix them
+15:15:19 <koz_> jle`: I'll give massiv-sized another spin with a modified design and see if I run into more weirdness.
+15:15:40 <jle`> data Fin :: N -> Type where FZ :: Fin ('S n); FS :: Fin n -> Fin ('S n)
+15:16:11 <Solonarv> w1n5t0n: turn on {-# LANGUAGE ApplicativeDo #-} and use 'Const Blah' instead of 'Writer Blah'
+15:16:48 <w1n5t0n> [exa]: I'm not sure I understand what "liftSynth" does here, mainly the "liftSynth x = x >> rturn undefined'" bit
+15:16:48 <jle`> koz_: i talk about this type here https://blog.jle.im/entry/fixed-length-vector-types-in-haskell.html#indexing-1
+15:16:50 <Solonarv> Then you'll get a compile-time error on '<-', instead of a runtime one
+15:17:06 <koz_> jle`: I might have to do a re-read of that, again.
+15:17:22 <Solonarv> [exa]: I wouldn't recommend that, see my suggestion of ApplicativeDo
+15:17:24 <jle`> yeah, it talks about the two 'families' of inductive vs non-inductive
+15:17:34 <jle`> and how you can stay sane if you stay within them
+15:17:43 <jle`> actually i need to update that section because i don't think of Fin as a magic type anymore
+15:20:05 <[exa]> Solonarv: yeah that's probably the way
+15:23:48 <jle`> yeah, every time I think i might need Writer w (), i always switch to Const instead
+15:23:52 <jle`> or at leaset try
+15:24:08 <jle`> and with ApplicativeDo, we get do notation as well
+15:26:51 * [exa] tempted to push the Const there using view
+15:26:57 <[exa]> we should have a lens-based synth.
+15:27:12 --- mode: glguy set +v tempay
+15:29:03 <jle`> i should probably be more clear, every time I think I need a Writer w (), i see if i can use just `w` itself alone instead
+15:29:28 <jle`> if there's a situation where i *need* an Applicative, then I'd see if I can use Const w instead
+15:31:55 <Solonarv> is "exposing cleaner syntax sugar" a good enough reason?
+15:32:25 <Solonarv> e.g. Hakyll or similar DSLs
+15:45:37 <koz_> jle`: In the first code section here: https://blog.jle.im/entry/introduction-to-singletons-1.html#the-singletons-library , what's the difference between using genSingletons and the $(singletons... method?
+15:46:17 --- mode: glguy set +v Gigabitten
+15:46:30 <jle`> singletons generated using genSingletons and using the quasiquoter are the same
+15:46:30 --- mode: glguy set -v Gigabitten
+15:46:39 <jle`> the difference is mainly that genSingletons can only generate singletons
+15:46:54 <jle`> and the quasiquoter promotes all things, like typeclass instances, functions, type families, etc.
+15:46:59 <Gigabitten> Solonarv: I almost forgot to ask! That rpn calculator you made, how would you modify it to work with normal pn?
+15:47:08 <koz_> jle`: OK, thanks.
+15:50:43 <Solonarv> Gigabitten: oh, I didn't look into that yet. I forgot :V
+15:51:57 <Gigabitten> that's alright lol. I'm in no hurry. I mean, obviously.
+15:53:26 <koz_> jle`: How would I use singletons to request a Nat for the length of a type-level list?
+15:54:16 <jle`> singletons are for value-level stuff, so it's not too involved with tthings that are just at the type level
+15:54:26 <koz_> jle`: So roll a type family?
+15:54:35 <jle`> unless you're talking about the singletons library in general
+15:54:43 <koz_> I meant the library in general.
+15:54:59 <koz_> I can roll my own Len type family, but I assume for something this basic, singletons (the library) already has something.
+15:55:02 <jle`> yeah, the singletons library lets you write normal functions and they get promoted into type families, but it's mostly for syntactic convenience
+15:55:32 <jle`> singletons does promote length from Prelude, I think; it'd be in Data.Singletons.Prelude.List
+15:55:46 <jle`> but that's for the GHC.TypeNats Nat, which i don't recommend for using with lists
+15:56:13 <koz_> http://hackage.haskell.org/package/singletons-2.5.1/docs/Data-Singletons-Prelude-List.html#t:Length <-- this one right?
+15:56:52 <jle`> yeah. although that one might also not necessarily work in all situations because it might be defined using foldr or foldl
+15:57:34 <jle`> honestly this is something simple enough that i *wouldn't* use singletons for it, heh
+15:57:49 <jle`> except maybe just to get better syntax for writing type families
+15:59:14 <jle`> $(singletons [d| length [] = 0; length (_:xs) = 1 + length xs|])
+16:02:04 <jle`> (that also generates defunctionalization symbols automatically too, so it can be more conveninet)
+16:02:29 <jle`> but anything defined in singletons using a fold runs into the risk of angering goldfirere/singletons#339
+16:06:47 <koz_> jle`: OK, I think I need help. I'm trying to use a typelevel list of Nat as a dimensionality indicator for my wrapper, and I've got this so far: https://gist.github.com/kozross/fe456e9e053dd3aa52511f09bdcb7414
+16:07:09 <koz_> I'm not sure if I've written the signature correctly, and if that's what's causing the errors in the pattern matches.
+16:08:54 <koz_> (as a complete aside, you may find this of interest to report: https://github.com/ndmitchell/hlint/issues/550#issuecomment-440054802)
+16:09:04 <koz_> (I can't do it myself because I'm not sure _I_ understand that pattern)
+16:12:21 <jle`> koz_: if you do fromSing, you lose the type information
+16:12:30 <jle`> try matching on the actual singleton instead, so you keep the type information
+16:12:38 <koz_> Ah, OK.
+16:12:46 <jle`> using fromSing (sing @ns) defeats the whole purpose of singletons, heh
+16:12:56 <jle`> the point is to be able to match on the singleton and use the type information
+16:13:13 <jle`> but you throw it back into a list [], then you lose it immediately
+16:13:17 <koz_> Makes sense.
+16:13:49 <jle`> fromSing is really only useful for giving values to functions that expect non-singletons
+16:14:04 <jle`> when those functions are out of your control, or you know won't need any type level information
+16:14:06 <koz_> How would I write this again?
+16:14:13 <jle`> instead of matching on [], match on SNil
+16:14:20 <koz_> Ah.
+16:14:21 <jle`> and instead of mathcing on (x:xs), match on x `SCons` xs
+16:15:08 <koz_> OK, I'm running up against massiv's Ix type limits again.
+16:15:55 <koz_> It complains that A.Ix (Length ns) ~ A.Ix0 isn't something it can prove when sing ns = SNil.
+16:16:09 <jle`> where is A.Ix defined?
+16:16:30 <koz_> http://hackage.haskell.org/package/massiv-0.2.3.0/docs/Data-Massiv-Array.html#t:Ix
+16:16:47 <koz_> It's been the cause of much grief for me for the last day or so.
+16:18:55 <jle`> try using the length i posted above, instead of singleton's built-in length
+16:19:14 <jle`> i wouldn't use singleton's length because it's susceptible to singletons#339
+16:20:47 <jle`> i'd avoid all of singletons-prelude's list functions actually, heh, since they are all prone to the same issue
+16:20:58 <jle`> except maybe head or tail
+16:20:59 <koz_> OK, let me try.
+16:23:13 <jle`> the only those bad functions wouldn't break, i think, is if you knew all of the types up-front, instead of writing polymorphic functions.
+16:27:31 <koz_> OK, the TH invocation was being weird so I decided to roll the type family manually, but now I'm getting kind errors and am confused: https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b
+16:30:31 <koz_> jle`: ^ if you're still around.
+16:32:48 <jle`> koz_: forall a. (a ~ Blah) => Something a -> ...
+16:32:54 <jle`> is the same as Something Blah -> ...
+16:33:02 <jle`> it's restricting a to be Blah
+16:33:22 <jle`> so here, the type of reifyDimensions is really reifyDimensions :: A.Ix (Len '[ Nat ])
+16:33:30 <jle`> you're calling Len on a singleton list, whose only item is the kind Nat
+16:33:48 <koz_> How do I refer to that '[ Nat] in the body of the function then?
+16:33:56 <koz_> I need to grab that singleton somehow.
+16:34:05 <jle`> you want ns to be a type-level list of nats, right?
+16:34:08 <koz_> Yes.
+16:34:13 <jle`> and not, specifically, '[Nat]
+16:34:13 <koz_> Am I mis-spelling it?
+16:34:27 <koz_> Yes, a typelevel list of Nats is what I want.
+16:34:38 <jle`> you might want reifyDimensions :: forall ns. A.Ix (Len ns)
+16:34:46 <jle`> now ns is a type variable that the user can pick to be any list they want
+16:34:56 <jle`> instead of being a list that is fixed to always being the exact list '[Nat]
+16:35:04 <koz_> But doesn't this mean ns can be a typelevel list of Bool, Int, Maybe Char ?
+16:35:17 <jle`> kind inference should help, since Len only takes a list of nats
+16:35:21 <jle`> but if you want, you can provide a kind annotation
+16:35:21 <koz_> Ah.
+16:35:29 <jle`> forall (ns :: [Nat]). A.Ix (Len ns)
+16:35:35 <koz_> OK, thanks.
+16:35:40 <koz_> I thought I had a spelling problem. :P
+16:35:43 <jle`> do you see what you were doing before?
+16:35:49 <koz_> Yeah, I get it now, I think.
+16:36:04 <jle`> you weren't saying that ns has to have kind [Nat], you were saying that it has to be the exact type-level list '[Nat], which is kind [*]
+16:36:27 <koz_> Yeah, I still have some confusion between those two concepts.
+16:36:33 <jle`> as in, ns has to be (Nat ': '[])
+16:37:07 <koz_> OK, so now it's saying there's no SingI for ns.
+16:37:22 <koz_> I guess I have to spell that constraint?
+16:37:36 <jle`> yeah, that's where the Sing has to come from
+16:37:57 <koz_> OK, got it.
+16:37:58 <jle`> either you explicitly ask for it, reifyDimensions :: Sing ns -> A.Ix (Len ns)
+16:38:07 <jle`> or you have it implicitly passed, reifyDimensions :: SingI ns => A.Ix (Len ns)
+16:38:18 <koz_> Makes sense - you mention this in your intro to singletons.
+16:38:19 <jle`> otherwise the ns is lost to type erasure
+16:39:50 <koz_> Alrighty, I think I can (hopefully) do the rest.
+16:40:49 <koz_> And this is where fromSing comes in handy.
+16:42:39 <dukedave> When using a 'smart constructor' with e.g. `newtype Foo  = Foo SomeType`, is there a way to _generate_ functions on the `Foo` for existing functions on the `SomeType`?
+16:43:02 <koz_> dukedave: What kind of functions are you seeking to generate?
+16:43:08 <koz_> Is your goal to recycle typeclass methods or something?
+16:44:48 <dukedave> koz_:  so e.g. for `GreaterThanFive` (https://markkarpov.com/post/smart-constructors-that-cannot-fail.html), could I get `(+) :: GreaterThanFive -> GreaterThanFive -> GreaterThanFive`?
+16:45:16 <dukedave> (without explicitly reimplementing it using `unGreaterThanFive`)
+16:45:31 <koz_> dukedave: You can recover it in various ways. Since you have a newtype, you can use coerce, or CoercibleUtils (which gives a bunch of helper wrappers).
+16:45:45 <koz_> For _typeclass_ methods, you can use GeneralizedNewtypeDeriving.
+16:46:12 <koz_> Which lets you derive the typeclasses on the newtype.
+16:46:37 <Solonarv> (and is the same as calling 'coerce' on every method)
+16:46:59 <koz_> Just with a lot less repetitive boilerplate.
+16:49:45 <dukedave> Okay great, this should get me going, thanks!
+16:49:49 <koz_> jle`: OK, I've gotten this far, but now I'm confused again: https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b
+16:50:00 <dmwit> dukedave: Uh... I want to be a bit more cautious that koz_ here.
+16:50:55 <dmwit> dukedave: e.g. everything they're saying *appears* to apply equally well to the (-) operation. But to me the name GreaterThanFive suggests that something sneaky should happen in the implementation of (-) :: GreaterThanFive -> GreaterThanFive -> GreaterThanFive, and coerce won't get you anything sneaky.
+16:51:38 <koz_> dmwit: I assumed the example wasn't for specifically the semantics of GreaterThanFive, since dukedave's original question was on 'newtype Foo = Foo SomeType'.
+16:51:52 <koz_> You are right though - this is an important consideration.
+16:51:54 <dukedave> dmwit: ah, yes, "wasn't for specifically the semantics of GreaterThanFive" is correct 
+16:51:59 <dmwit> My point stands, I think. Smart constructors are there because the wrapped type and the wrapping type have different semantics.
+16:52:26 <dmwit> And different semantics is exactly what I mean when I say "something sneaky".
+16:52:31 <dmwit> coerce will not get you different semantics.
+16:52:40 <koz_> Yeah, this is a very important point.
+16:52:56 <koz_> Reading up the stuff in Data.Coerce will help you see why this is.
+16:53:06 <koz_> Thanks for keeping me honest, dmwit!
+16:53:54 <dmwit> (Occasionally you do actually want another type that has exactly the same semantics but is different in the eyes of the type system. But that is definitely not the common case -- and when it is the case, it would be weird to call the constructor for that type a "smart constructor".)
+16:54:09 <koz_> Example: Semigroup/Monoid instances.
+16:54:22 <koz_> (I've had to write newtype wrappers just for this purpose quite a lot recently)
+16:54:38 <dukedave> Okay. So that leads in to my next question: Presumably if I wanted to get something which would e.g. `error` if it 'ended up' with < 5, then I'd have to implement that myself  (e.g. using `unGreaterThanFive` and a `< 5` check)?
+16:54:59 <koz_> dukedave: Yes, in this case you'd have to do this yourself, because the 'underlying' type has no such understanding.
+16:55:32 <koz_> There _are_ ways to make this less repetitive, but ultimately, the type system (unlike friendship) isn't magic.
+16:55:33 <c_wraith> though typically you'd use a Maybe type instead of error.
+16:55:51 <koz_> Or perhaps an Either Error if you have multiple failure conditions you'd like to distinguish.
+16:56:37 <jle`> koz_: note that the constructor of :> uses the type variable (n - 1)
+16:56:50 <jle`> ghc can't infer that 1 + (n - 1) ~ n
+16:56:57 <koz_> jle`: So I need to write it a proof?
+16:57:03 <koz_> (or use one of the plugins?)
+16:57:08 <jle`> maybe, or you can use a typechecker plugin like natnormalise
+16:57:14 <koz_> Let me try that.
+16:57:42 <dukedave> FWIW, I I'm hijacking  https://hackage.haskell.org/package/linear-1.20.8/docs/Linear-Matrix.html#t:M22 to be a rotation matrix, but I want to be sure that the determinant (`det`) is always > 0 (which is something a rotation matrix must uphold). I want to get all the math stuff from `Linear`, but not accidentally end up with a bad `M22` (which I did, and prompted this voyage into 'smart constructors').
+16:59:32 <koz_> jle`: I'm getting ambiguity issues. Maybe a signature on the pattern match and some type annotations might help.
+17:01:03 <jle`> mhm
+17:01:10 <koz_> Nope, that's not helping.
+17:01:14 <koz_> Assuming I did it correctly.
+17:01:19 <dukedave> Gah, foiled at the first attempt :(   https://stackoverflow.com/a/11488666/21115
+17:01:33 <koz_> It should be something like (x `SCons` xs :: Sing (m ': ms)), right?
+17:03:18 <c_wraith> dukedave, the specific issue in that question no longer exists, since Typeable was changed
+17:03:30 <jle`> koz_: maybe (x :: m) `SCons` (xs :: ms)
+17:04:16 <koz_> jle`: Isn't the thing either side of `SCons` a Sing t, not a t?
+17:04:31 <koz_> So wouldn't that mean I want (x :: Sing m) `SCons` (xs :: Sing ms)?
+17:05:49 <koz_> (If I use your sigs, I get a kind error when I write (reifyDimensions :: A.Ix (Len ms)))
+17:05:57 <jle`> ah yeah, that's right :)
+17:06:25 <koz_> But with Sing m and Sing ms, I _still_ get deduction issues.
+17:07:53 <koz_> (like, 100% identical to previous errors)
+17:09:00 <jle`> hm, can you paste it with the new code?
+17:11:01 <koz_> One sec.
+17:11:55 <koz_> jle`: https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b
+17:14:06 <jle`> hm, try calling A.:> with typeapplications
+17:14:27 <koz_> How would I even spell that?
+17:14:29 <jle`> but actually that might not do the trick.
+17:14:34 <jle`> (A.:>) @(Len ns)
+17:14:45 <koz_> Let me see if it works.
+17:15:22 <koz_> Nope, same deal.
+17:15:42 <koz_> This deduction is killing it: A.Ix (1 GHC.TypeNats.+ Len n2) ~ A.IxN (1 GHC.TypeNats.+ Len n2)
+17:16:10 <koz_> Well, and this one too: A.Ix (Len ns0) ~ A.Ix ((1 GHC.TypeNats.+ Len n2) GHC.TypeNats.- 1)
+17:17:05 <koz_> I ran into something similar earlier today, and it's to do with how Ix and IxN are defined.
+17:17:15 <Solonarv> The second one *should* be fixed with natnormalise
+17:17:35 <koz_> Solonarv: It's not quite - the key insight it's missing is ns0 ~ n2
+17:17:49 <Solonarv> oh, you're right
+17:17:57 <jle`> hm, it might that Ix only resolves to IxN if the number is not 0, 1, or 2. but just knowing that we have 1 + n doesn't let GHC know that n isn't greater than 2
+17:18:07 <jle`> er, that (1 + n) isn't greater than 2.
+17:18:38 <jle`> it's because IxN is defined in fallback-style, and not inductively
+17:18:50 <koz_> Yeah, that's the brick wall my face has been hitting
+17:19:11 <jle`> maybe you can do a triple-scons pattern on your final case
+17:19:33 <jle`> maybe natnormalise can deduce things correctly in that situation, that 1 + 1 + 1 + n is not 0, 1, or 2
+17:19:40 <koz_> So like... x `SCons` xs@(_ `SCons` (_ `Scons` _))
+17:19:49 <jle`> mhm
+17:20:05 <jle`> if not then you might just have to do something unsafe and bypass the compiler.
+17:21:00 <koz_> Nope, it's not happy with that.
+17:21:14 <koz_> Murdered by this: A.Ix (1 GHC.TypeNats.+ (1 GHC.TypeNats.+ (1 GHC.TypeNats.+ Len n7))) ~ A.IxN n0
+17:21:57 <jle`> heh. yeah, i think fallback-style type families are always a bit weird, i always run into issues with them like this.  i wonder if i ever found a solution for dealing with any of them in any circumstances
+17:22:11 <jle`> i think mniip has had some luck in certain specific situations
+17:22:33 <koz_> So what, I need to do something like unsafeCoerce, or write it a proof using decidable?
+17:23:04 <jle`> i was thinking maybe you'd ahve to unsafeCoerce something, yeah.
+17:23:12 <koz_> I've never used unsafeCoerce before.
+17:23:24 <jle`> hm, but i wonder actually if you can get away with writing a singleton mirror of A.Ix
+17:23:34 <koz_> What's a singleton mirror?
+17:23:53 <jle`> sIx :: Sing n -> Sing (A.Ix n), the type family manipulated at the value level
+17:24:17 <koz_> And then pattern match on n to look like the way Ix is defined or something?
+17:24:19 <jle`> hm, actually I don't think that would work, you still might not even be handle to deal with fallback-style type families.
+17:24:25 <buhman> my ghc can't find Prelude, but ghci can; how can I fix this?
+17:24:40 <jle`> yeah, exactly.  but you might have problems on that last case statement, where ghc can't handle the fallback
+17:24:47 <koz_> Argh.
+17:24:57 <koz_> Would a decidable-style proof work?
+17:25:06 <koz_> (heck, can it even be written?)
+17:25:44 <jle`> i think it'd have the same problems as a Sing n -> Sing (A.Ix n)
+17:26:03 <koz_> So unsafeCoerce it is then?
+17:26:19 <jle`> yeah, I think so maybe. triyng to think about how it could be done
+17:27:19 <koz_> % :info unsafeCoerce
+17:27:20 <yahb> koz_: unsafeCoerce :: a -> b -- Defined in `Unsafe.Coerce'
+17:27:38 --- mode: glguy set +v gbd_628
+17:28:02 --- mode: glguy set -v gbd_628
+17:28:15 <Solonarv> problem with that: unsafeCoerce *can* produce constraint evidence, but that evidence is bogus
+17:28:57 <koz_> Solonarv: From what I can understand, we don't have a way to produce it legitimately.
+17:29:05 <Solonarv> e.g. if you try to unsafeCoerce your way into (the equivalent of) 'KnownNat n', any used of 'natVal :: Proxy @n' will simply crash
+17:29:24 <Solonarv> err, typo in the last example. You get the idea.
+17:29:47 <koz_> Solonarv: Yeah, and I'd prefer to avoid unsafeCoerce, but I'm at a loss as to how.
+17:30:17 <Solonarv> you'd have to look at the implementation details to figure out what, exactly, to unsafeCoerce
+17:30:26 <gbd_628> Quick stack/cabal question: does stack have an equivalent to "cabal info"? Right now I just use "stack exec --no-ghc-package-path -- cabal info <pkg>", which is quite unwieldy.
+17:31:38 <Solonarv> gbd_628: I just made a bash function for 'stack exec --no-ghc-package-path <--resolver $1> -- '
+17:31:43 <koz_> Solonarv: Implementation details of massiv, right?
+17:31:48 <Solonarv> koz_: yes
+17:31:57 <koz_> Solonarv: Yeah, I was hoping to avoid that.
+17:32:11 <Solonarv> gbd_628: so for me that command would be 'sx - cabal info <pkg>'
+17:33:46 <jle`> koz_: i wonder if my comment would work
+17:33:58 <jle`> on the most recent gist
+17:34:10 <koz_> jle`: Let me give it a whirl.
+17:36:03 <koz_> jle`: Nope, still got deduction issues.
+17:36:09 <jle`> what are they?
+17:36:09 <koz_> A.Ix (Len ns0) ~ A.Ix (Len n2)
+17:36:11 <koz_> and
+17:36:12 <Solonarv> gbd_628: https://gist.github.com/Solonarv/c5ccab78674def53467a921d0dbea305 -- pasted for you
+17:36:20 <koz_> (1 <=? (1 GHC.TypeNats.+ Len n2)) ~ 'True
+17:36:27 <jle`> on what line?
+17:36:52 <Solonarv> okay, that last one *definitely* seems like something natnormalise would fix
+17:36:58 <koz_> The reifyDimensions part.
+17:37:00 <koz_> (for both)
+17:37:38 <gbd_628> Solonarv: Okay, cool, thanks. I've been trying to do something similar with a shell function that shadows "stack", but I started getting these weird errors stemming from bash-completion, so I was hoping for a more direct way. But I'll work it out (once I figure out how bash's customizable completion actually works...).
+17:37:49 <koz_> jle`: https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b#gistcomment-2763842
+17:37:54 <koz_> (exact messages, plus context)
+17:38:22 <koz_> (let me just update original a bit too)
+17:38:41 <Solonarv> gbd_628: completion doesn't really work for me anyway (git bash on windows), so that's not something I've looked into
+17:39:09 <koz_> jle`: Updated in full: https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b
+17:41:17 <jle`> koz_: oh ah, that's because you can't call reifyDimensions like that
+17:41:55 <jle`> you can't call it as reifyDimensions :: A.Ix (Len myList), because that doesn't let the typechecker know what the ns type variable is
+17:42:22 <jle`> it's trying to unify A.Ix (Len blah) ~ A.Ix (Len ns), but blah ~ ns is not a valid unification step
+17:42:38 <koz_> Where blah is something we _haven't_ spelled?
+17:42:38 <jle`> that's because there's a billion potential things that ns could possibly be, that *isn't* blah
+17:42:43 <jle`> blah is 'ms' here
+17:42:46 <koz_> Ah.
+17:42:57 <jle`> so ghc can't infer what 'ns' is, from just given that the *result* has to be A.Ix (Len blah)
+17:43:04 <koz_> But doesn't the context already inform it that ns ~ (whatever ': ms)?
+17:43:38 <jle`> it's a fresh invocation of the function
+17:43:46 <koz_> Oh, sigh.
+17:43:48 <jle`> so you have to invoke it with some ns.
+17:43:57 <jle`> so you can specify manually by doing `reifyDimensions @ms`
+17:44:24 <jle`> reifyDimenions @ms tells ghc exactly what the type variable 'ns' will be
+17:44:49 <koz_> For some ungodly reason we _still_ die to this deduction: (1 <=? (1 GHC.TypeNats.+ Len n2)) ~ 'True
+17:45:16 <jle`> it's a little weird because i always thought natnormalise took care of things like that
+17:45:37 <koz_> Is it perhaps because the plugin works with TypeLits/TypeNats and _not_ the singletons versions of said?
+17:45:52 <koz_> Since I don't think <=? is <=.
+17:48:22 <jle`> hm, okay, i think i see what's going on
+17:48:54 <lyxia> koz_: "A type checker plugin for GHC that can solve equalities" https://hackage.haskell.org/package/ghc-typelits-natnormalise
+17:49:33 <jle`> natnormalise is trying to unify Len ms with Len ns - 1, so it brings in the constraint 1 < (1 + Len n) to ensure that Len ns - 1 is not negative
+17:50:06 <lyxia> can it solve other inequalities
+17:50:48 <jle`> so i got it backwards, it doesn't *solve* those inequalities, it *introduces* those inequalities, heh
+17:51:04 <koz_> So what would be the solution then?
+17:51:36 <jle`> it's saying that it can only unify Len ms with (Len (n:ns) - 1), if 1 <= Len (n:ns),  or 1 <= (1 + Len ns)
+17:53:41 <jle`> hm, this is interesting, it looks like the latest version of ghc-typelits-natnormalise can automatically assume your inequalities are true in an unsafe way
+17:54:08 <jle`> see the "treating subtraction as addition ..." section in the documentation for the moduel
+17:54:13 <koz_> lyxia: https://hackage.haskell.org/package/ghc-typelits-natnormalise-0.6.2/changelog <-- this suggests inequalities are quite solvable.
+17:54:38 <lyxia> okay
+17:54:54 <koz_> That solves it jle`.
+17:55:20 <jle`> hooray. i guess it adds the assumption that if we do 1 <= 1 + n, that n is not negative, so it's auto-solved
+17:55:31 <koz_> In this case, it's safe.
+17:55:40 <koz_> (since n is _never_ negative in our case)
+17:56:05 <jle`> right, but that's just because of our own deduction
+17:56:15 <jle`> and incidental to how A.Ix is defined
+17:56:32 <koz_> Yeah, that's true. Thank you for all your help - this is monstrously tricky for me.
+17:56:33 <jle`> but now you can make values of type A.IxN 0, and those will 'typecheck'
+17:56:37 <jle`> i don't like it
+17:56:57 <koz_> A.IxN ~ A.Ix0.
+17:57:10 <koz_> Oh wait, no.
+17:57:16 <koz_> That's actually an impossible construction.
+17:57:18 <jle`> A.Ix guards against A.IxN 0 being ever returned, but it doesn't stop someone from just directly creating an A.IxN 0
+17:59:05 <jle`> i suppose we are already in unsafe territory already
+17:59:23 <koz_> Yeah, unsafeCoerce kinda lands us there.
+17:59:44 <koz_> OK, never mind, we prematurely celebrated...
+17:59:50 <koz_> This got accepted because I mistyped...
+18:00:08 <koz_> A.Ix (Len n2) ~ A.Ix ((1 GHC.TypeNats.+ Len n2) GHC.TypeNats.- 1)
+18:00:17 <koz_> This deduction still kills us, even with that plugin option set.
+18:01:09 <koz_> Oh wait, _still typoes on my part_ argh.
+18:01:17 <koz_> Now this is weird.
+18:01:20 <jle`> hm, that's one that i thought natnormalise is supposed to solve for sure
+18:01:22 <koz_> Let me paste everything.
+18:02:05 <koz_> jle`: https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b
+18:03:41 <jle`> oh yeah, that's because the SingI instance isn't automatically generated.
+18:04:00 <koz_> Would having an explicit Sing-passing helper help?
+18:04:09 <jle`> you can use withSingI ms, or use the Sing pattern synonym, (Sing :: Sing ms) instead of (xs :: Sing ms)
+18:04:34 <jle`> explicit Sing-passing helper would make this a lot simpler
+18:04:45 <koz_> Let me rewrite it that way then.
+18:04:47 <jle`> you wouldn't even need explicit @ms
+18:04:50 <jle`> you can just give it xs
+18:04:58 <jle`> (that would have solved our previous ambiguous type error, heh)
+18:05:06 <koz_> Lol...
+18:05:15 <koz_> Just goes to show, nothing good comes from typeclasses. :P
+18:09:05 <koz_> jle`: OK, it accepts that.
+18:20:00 <jle`> :D
+18:22:15 <koz_> OK jle`, I might need more assistance.
+18:22:58 <koz_> https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b
+18:23:10 <koz_> Similar kind of definition, but over something else.
+18:35:15 <dmj`> jle`: ping
+18:35:32 <koz_> Hi dmj`!
+18:35:37 <koz_> How're your IO woes?
+18:39:41 --- mode: glguy set +v woodson
+18:40:18 <woodson> Can anyone walk me through the type definition below?
+18:40:23 <woodson> :t fmap . fmap
+18:40:25 <lambdabot> (Functor f2, Functor f1) => (a -> b) -> f1 (f2 a) -> f1 (f2 b)
+18:40:59 <lyxia> :t map . map
+18:41:00 <lambdabot> (a -> b) -> [[a]] -> [[b]]
+18:41:04 <woodson> I don't understand how the fmap fits in the types of (.)
+18:41:07 <woodson> :t (.)
+18:41:08 <lambdabot> (b -> c) -> (a -> b) -> a -> c
+18:41:43 <Solonarv> let's look at fmap:
+18:41:46 <Solonarv> :t fmap
+18:41:47 <lambdabot> Functor f => (a -> b) -> f a -> f b
+18:42:08 <geekosaur> I think the problem is they thnk 'a', 'b', 'c' have to be simple
+18:42:22 <Solonarv> with more parentheses, that's 'Functor f => (a  -> b) -> (f a -> f b)'
+18:42:51 <woodson> Ok
+18:43:40 <Solonarv> or, renaming a bit: 'Functor f1 => (a -> b) -> (f1 a -> f1 b)'
+18:43:54 <Solonarv> do you see how this could go on the left of (.) ?
+18:44:06 <woodson> Yea
+18:44:25 <woodson> they are acting as the two functions that (.) is expecting
+18:44:52 <woodson> so we are left with a -> c
+18:45:02 <Solonarv> no, we're not
+18:45:14 <Solonarv> that fmap is *one* argument to (.)
+18:45:41 <woodson> Oh ok
+18:45:49 <Solonarv> (.)'s type, renamed: (b0 -> c0) -> (a0 -> b0) -> (a0 -> c0)
+18:46:14 <woodson> ((a -> b) -> (f a -> f b)) <- is the first argument
+18:46:19 <Solonarv> exactly
+18:46:30 <woodson> but then you work need to add
+18:46:32 <woodson> ohhh
+18:46:34 <woodson> ok 
+18:46:39 <woodson> yea you did add the constraint
+18:46:45 <Solonarv> so we need to pick:
+18:46:45 <Solonarv> b0 = (a -> b)
+18:46:45 <Solonarv> c0 = (f1 a -> f1 b)
+18:47:17 <woodson> Ok 
+18:47:34 <lyxia> woodson: https://gist.github.com/Lysxia/570f167af776dada808181c7f1bdd6d4
+18:48:54 <Solonarv> lyxia: ah, that's better than doing it through IRC ;)
+18:51:43 <lyxia> :)
+19:18:32 --- mode: glguy set +v govno
+19:44:27 <koz_> jle`: OK, tried writing it without resorting to singletons, and I still get this error: https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b
+19:50:18 <lyxia> give the whole (_ A.:> _) a type annotation
+19:51:00 <koz_> lyxia: Doesn't help any.
+19:51:12 <lyxia> the expected type of (_ A.:> _) is the only way to determine the expected type of the second argument because it's defined via a type family
+19:55:15 <koz_> OK, never mind, seem to have gotten it.
+19:55:32 <koz_> Don't love the requirement to resort to unsafeCoerce, but it's not because of anything I wrote.
+20:05:38 <koz_> % :info contramap
+20:05:39 <yahb> koz_: class Contravariant (f :: * -> *) where; contramap :: (a -> b) -> f b -> f a; ...; -- Defined in `Data.Functor.Contravariant'
+20:07:56 <MarcelineVQ> :t dimap -- cool kids club
+20:07:58 <lambdabot> Profunctor p => (a -> b) -> (c -> d) -> p b c -> p a d
+20:13:42 <ktonga> is it just me or it's not that easy to get current millis since epoc?
+20:14:49 <ktonga> is it the best way to get the SystemTime and then convert to millis with some arithmetic fu?
+20:15:21 <Solonarv> it should be really easy, actually - 'getCurrentTime' + one of the conversion functions
+20:15:24 <Solonarv> @hackage time
+20:15:24 <lambdabot> http://hackage.haskell.org/package/time
+20:17:17 <koz_> Where is Refl from?
+20:17:34 <koz_> (and ~% also)
+20:18:06 <koz_> % :info Refl
+20:18:07 <yahb> koz_: type role (:~:) nominal nominal; data (:~:) (a :: k) (b :: k) where; Refl :: forall k (a :: k). (:~:) a a; -- Defined in `Data.Type.Equality'
+20:18:20 <koz_> % :info (~%)
+20:18:20 <yahb> koz_: ; <interactive>:1:1: error: Not in scope: `~%'
+20:18:23 <koz_> Aww.
+20:18:41 <Solonarv> % :i (%~)
+20:18:41 <yahb> Solonarv: (%~) :: ASetter s t a b -> (a -> b) -> s -> t -- Defined in `Control.Lens.Setter'; infixr 4 %~
+20:18:43 <Solonarv> did you mean this?
+20:18:58 <koz_> Ah, ok. jle` used some Lens without telling me. :P
+20:19:14 <Solonarv> sneaky sneaky optics
+20:20:36 <Solonarv> (%~) :: Lens' s a -> (a -> a) -> s -> s -- specialized type
+20:21:05 <koz_> How does one actually construct Refls?
+20:21:18 <koz_> (or Maybe Refls actually)
+20:21:41 <koz_> I guess I wanna know what's happening here: https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b#gistcomment-2763842
+20:21:47 <koz_> In the first function.
+20:21:52 <Solonarv> usually, you use 'eqType' from Data.Typeabe
+20:22:48 <Solonarv> ...aaah, it looks like that might be a different '%~; 
+20:23:02 <jle`> koz_: oh no i meant %~ from Data.Singletons.Decide :)
+20:23:05 <koz_> Solonarv: I thought as much.
+20:23:08 <koz_> jle`: Ah.
+20:23:20 <koz_> It seems I have to _reflect_, rather than _reify_, indices.
+20:23:28 <jle`> it's the decision function (a :~:)
+20:23:29 <Solonarv> I'd guess it has a signature like 'Sing a -> Sing b -> Maybe (a :~: b)'
+20:23:37 <jle`> *the decison function for (a :~:)
+20:23:40 <Solonarv> er, close enough
+20:24:02 <Solonarv> 'forall a b. Sing b -> Maybe (a :~: b)'
+20:24:03 <jle`> right, it also disproves it as well, if it isn't true
+20:24:14 <koz_> The signature I _think_ I need is 'reflectIndex' :: forall d. Sing (Len d) -> A.Ix (Len d) -> IndexOf d
+20:24:15 <jle`> Sing a -> Sing b -> Decision (a :~: b)
+20:24:17 <koz_> '
+20:24:32 <koz_> And I basically need to check what Len d's singleton tells me about it.
+20:27:41 <koz_> jle`: Is there some import I'm missing? Just Refl isn't of type Decision (Len d :~: b0)
+20:29:15 <jle`> yeah, the type of (%~) is Sing a -> Sing b -> Decision (a :~: b)
+20:29:18 <jle`> not Maybe (a :~: b)
+20:35:52 <koz_> OK, this is hurting my brain again.
+20:37:19 <koz_> How do I actually write code with %~ and Decision?
+20:38:13 <jle`> case sx %~ sy of
+20:38:16 <jle`>   Proved Refl -> ...
+20:38:20 <jle`>   Disproved d -> ...
+20:38:22 <koz_> Ah, OK.
+20:38:33 <jle`> Disproved is just a normal ADT
+20:38:35 <jle`> like Maybe
+20:38:55 <jle`> so it's basically the same as using any other old vanilla haskell data type :)
+20:39:01 <jle`> pattern match on the possible constructors
+20:39:40 <koz_> OK, I get the feeling I'm doing something wrong here, let me update the paste.
+20:40:39 <koz_> jle`: https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b - the first error confuses me.
+20:40:39 <jle`> ah yeah, my original comment said it was Maybe, not Decision, sorry!
+20:41:05 <koz_> Am I being bitten by non-injectivity or something
+20:41:07 <koz_> ?
+20:41:38 <jle`> yeah, just because Len d is 0 doesn't mean that d is []
+20:41:47 <jle`> there could be another d that gives Len myOtherD ~ 0
+20:42:06 <koz_> Well, that puts in me in a helluva bind.
+20:42:12 <jle`> why don't you check d, instead of Len d ?
+20:42:21 <koz_> I guess I could do that.
+20:42:25 <jle`> Sing d -> A.Ix (Len d) -> IndexOf d
+20:43:43 <koz_> So it'll be 'case s %~ Sing @[] of ...'?
+20:44:20 <koz_> Wait no, Sing SNil?
+20:44:35 <jle`> Sing @[] is SNil
+20:44:41 <jle`> SNil is the singleton for '[]
+20:44:48 <koz_> Ah, OK.
+20:44:54 <koz_> I'm cargo-culting too much. :P
+20:45:08 <jle`> STrue is the singleton for 'True, so you could do Sing @'True, which is STrue, etc.
+20:45:20 <koz_> I guess if I wanna try multiple things, I'll end up with a 'pyramid of doom' if I wanna check multiple %~s?
+20:45:21 <jle`> i mean, Sing @'[] works as well :)  it's just an "alias" for SNil
+20:45:44 <jle`> i mean, it's the same as multiple =='s
+20:46:03 <koz_> Multiple ==s I can at least MultiWayIf away.
+20:47:13 <jle`> oh, you mean if you want to check between multiple options?
+20:47:19 <jle`> or-wise, instead of and-wise?
+20:47:19 <koz_> Yeah.
+20:47:31 <jle`> you can use MultiWayIf's or guards too
+20:47:33 <jle`> with PatternGuards
+20:47:47 <jle`> foo | Proved Refl <- x %~ y
+20:47:49 <koz_> Ah, yeah, that one.
+20:47:58 <koz_> I'll try that.
+20:47:58 <no-n> does knowing Haskell help with learning University-level maths?
+20:48:06 <koz_> no-n: Which maths?
+20:48:13 <koz_> There's a _lot_ of university-level maths out there.
+20:48:17 <no-n> Calc and Pre calc
+20:48:33 <monochrom> Yes.
+20:48:54 <monochrom> Because it helps drill it into your head that "log" means log base e.
+20:49:09 <monochrom> > exp (log 20)
+20:49:10 <lambdabot>  19.999999999999996
+20:49:41 <monochrom> And that sin and cos use radians not degrees.
+20:49:44 <monochrom> > sin (pi/2)
+20:49:46 <lambdabot>  1.0
+20:50:40 <jle`> i don't think that learning haskell would really help learn calculus and pre-calc too much.  maybe it would be fun to impelment automatic differentiation
+20:50:47 <monochrom> Throw away your programmable calculator and use ghci instead.
+20:50:49 <jle`> but it will definitely help with a lot of other university-level maths
+20:51:12 <koz_> As I'm discovering, logic. :P
+20:51:51 <monochrom> Although, if you wanted a graphing calculator, you will have to take some effort to choose and install a plotting library, it doesn't come as standard.
+20:52:02 <no-n> I guess I will learn Haskell now, while I still have the time.
+20:53:01 <monochrom> These past few days I coded up Monte Carlo integration in Haskell.
+20:54:48 <ski> @where HR
+20:54:48 <lambdabot> "The Haskell Road to Logic, Maths and Programming", by Kees Doets,Jan van Eijck, at <http://homepages.cwi.nl/~jve/HR/>
+20:56:59 <koz_> jle`: What am I doing improperly here? https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b
+21:04:30 <dmwit> koz_: The thing to the right of `<-` is just an expression. It doesn't bind anything, and in particular doesn't bind any new type variables.
+21:04:42 <koz_> dmwit: Ah.
+21:05:03 <koz_> That is something of a problem in this case.
+21:05:52 <dmwit> Perhaps write a helper that takes your Sing n and produces finite @n?
+21:05:52 <koz_> Because I actually need that type.
+21:06:19 <dmwit> err, hm. I will be quiet now, because I don't know what %~ does and it seems kind of important here.
+21:06:23 <koz_> dmwit: If I can't bind anything, how can I request the Sing n.
+21:06:28 <koz_> s/./?/
+21:06:35 <koz_> I can't really call such a helper.
+21:06:42 <dmwit> Right. That realization is why I said I will be quiet. =)
+21:07:03 <koz_> I'll wait for jle` to bestow his wisdom upon us.
+21:07:11 <koz_> (and eat my avocado)
+21:07:19 <dmwit> Are you sure you can't pattern match on s?
+21:07:33 <dmwit> I mean, you do something similar in reifyDimensions.
+21:07:40 <dmwit> reifyDimensions' I mean.
+21:07:49 <koz_> Hmm, good point.
+21:09:10 <koz_> OK, now I need to know what I can put in the hole in the pattern.
+21:09:25 <koz_> Since I now have Proved Refl <- s %~ (_ `SCons` SNil)
+21:09:28 <koz_> Which obviously isn't right.
+21:14:10 <koz_> I don't know what goes in this hole here: https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b#file-sized-hs-L68
+21:15:41 <koz_> ... never mind I feel mega-stupid now.
+21:17:06 <dmwit> ^_^
+21:26:50 <koz_> OK, I'm very close, but I still get this issue: https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b
+21:38:03 <sshine> I'd like if 'Left 42 <|> Right 43 == Right 43', or with (<>), but apparently this isn't an Alternative or a Semigroup.
+21:38:38 <sshine> is there something similar that lets me do this on Either?
+21:40:27 <benzrf> sshine: sth like this? https://hackage.haskell.org/package/base-4.12.0.0/docs/Data-Monoid.html#t:First
+21:41:34 <growpotkin> Hey I'm sure this is possible with arrows, but I am looking for to compose sT:   (\f g x y -> (x,y) f *** f >>> g) ; but without have repeated f. basicallly, apply f to x and y and combine with g
+21:41:56 <sshine> benzrf, yes!
+21:42:31 <benzrf> :)
+21:43:15 <benzrf> oh wait what it was deprecated?
+21:43:19 <benzrf> pff
+21:43:30 <sshine> :õ
+21:44:13 <sshine> but there's Data.Semigroup.First instead.
+22:12:45 <Axman6> growpotkin: that's very close on on
+22:12:49 <Axman6> :t on
+22:12:50 <lambdabot> (b -> b -> c) -> (a -> b) -> a -> a -> c
+22:13:14 <Axman6> in fact, maybe it is on? g `on` f
+22:13:32 <MarcelineVQ> I'm having trouble parsing the expression
+22:13:36 <Axman6> :t \g f x y -> (g `on` f) x y
+22:13:38 <lambdabot> (b -> b -> c) -> (a -> b) -> a -> a -> c
+22:14:10 <Axman6> yeah the expression is broken but the description seems to be `on`
+22:16:07 <Axman6> > (g `on` f) x y :: Expr
+22:16:09 <lambdabot>  error:
+22:16:09 <lambdabot>      • Ambiguous type variable ‘b0’ arising from a use of ‘g’
+22:16:09 <lambdabot>        prevents the constraint ‘(Show b0)’ from being solved.
+22:17:04 <Axman6> :t g
+22:17:05 <lambdabot> FromExpr a => a
+22:42:53 <mniip> jle`, koz_, what you might be able to do is write a type family equivalent to Ix but that uses If instead of branching
+22:43:05 <mniip> and then write a proof that the two are equivalent
+22:43:26 <mniip> and then once you have `If` you can manipulate it fairly well with singletons machinery
+22:44:19 <koz_> mniip: In order to interface with massiv, I have to be able to demote [Nat] into Ix, but I also need to be able to reflect Ix into list of Finite (with different Nat parameters).
+22:44:41 <koz_> (well, I have t demote list of Finite into Ix as well, but one problem at a time)
+22:46:48 <koz_> What would such a type family look like? I'm not seeing the connection.
+22:53:12 <mniip> Ix' n = If (n == 0) Ix0 (If (n == 1) Ix1 ... (IxN n))
+22:53:27 <koz_> mniip: Aah, I see.
+22:54:30 <mniip> ixCast :: Ix n :~: Ix' n
+22:54:35 <mniip> ixCast = unsafeCoerce Refl
+22:55:04 <mniip> that's not very nice but I'd love to see a better solution
+22:55:17 <koz_> mniip: That's the best solution so far.
+22:55:36 <koz_> At least that means there's be _one_ unsafeCoerce and I won't have to beg and plead GHC to accept obvious things. :P
+22:58:22 <koz_> Where's :~: from again?
+22:58:30 <mniip> Data.Type.Equality
+23:00:13 <koz_> (or Data.Singletons.Decide, apparently)
+23:00:44 <koz_> (but that would be unsafeCoerce (Proved Refl) I think.
+23:01:02 <koz_> Nope, was wrong.
+23:11:16 <koz_> mniip: Do I understand correctly that I define everything in terms of Ix', and use ixCast where necessary to demote/promote as required?
+23:11:37 <mniip> yes
+23:11:40 <koz_> Awesome.
+23:11:42 * koz_ tries that.
+23:15:53 <koz_> mniip: OK, I'm not ... quite sure how I work with the Ix' n type.
+23:16:10 <koz_> I'm trying to write reifyDimension' :: forall (ns :: [Nat]) . Sing ns -> Ix' (Len ns)
+23:16:34 <koz_> And I'm at the x `SCons` xs case, and I have no idea what to write there.
+23:20:12 <koz_> mniip: https://gist.github.com/kozross/50996aff731be6b8f400a9a6a75d7d2b <-- this should be a bit clearer
+23:26:27 --- mode: glguy set +v foldrm
+23:27:31 <foldrm> I'm having trouble parsing this: http://hackage.haskell.org/package/base-4.12.0.0/docs/src/Data.Foldable.html#foldrM
+23:27:49 <koz_> foldrm: What's bothering you?
+23:28:03 <foldrm> foldl f' return xs z0 looks like 4 arguments are being passed to foldl
+23:28:19 <koz_> That link you gave was to foldrM
+23:28:37 <foldrm> Yes?
+23:28:41 <foldrm> Look at the def
+23:29:07 <koz_> Ah, my bad.
+23:29:28 <koz_> Note how f' is defined just below to consume three arguments?
+23:30:47 <foldrm> Yes but the reducer for fold* takes 2 arguments.
+23:31:03 <foldrm> Can you parenthesize this expression for me so I can understand how it's parsed?
+23:31:40 <foldrm> Is it (foldl f' return xs) z0 ?
+23:32:19 <Lears> f a b c d is always (((f a) b) c) d
+23:32:29 <foldrm> Ok that's what I thought.
+23:33:19 <foldrm> I don't know why this definition is breaking my brain right now.
+23:33:28 <foldrm> I think I'm tired. And it's unnecessarily terse.
+23:33:38 <koz_> foldrm: It's OK. I only recently internalized the foldMap-foldr equivalence.
+23:33:43 <koz_> And yeah, tiredness doesn't help.
+23:33:53 <koz_> Haskell understanding occasionally hits walls.
+23:33:56 <koz_> (with your face)
+23:34:16 <foldrm> Oh, I see it.
+23:35:00 <foldrm> Well. Maybe.
+23:35:58 <foldrm> How do I run something with lambdabot again?
+23:36:03 <koz_> > 1 + 3
+23:36:05 <lambdabot>  4
+23:36:12 <koz_> You can also use yahb:
+23:36:15 <koz_> % 1 + 3
+23:36:15 <yahb> koz_: 4
+23:37:31 <foldrm> > foldrM (\x xs -> Just $ x + xs) [1, 2, 3]
+23:37:33 <lambdabot>  error:
+23:37:33 <lambdabot>      • No instance for (Num [Integer]) arising from a use of ‘e_1123’
+23:37:33 <lambdabot>      • In the expression: e_1123
+23:38:02 <koz_> foldrm: If you plan to play with lambdabot or yahb a lot, PM them and work in there.
+23:38:11 <foldrm> > foldrM (\x xs -> Just $ x + xs) [1, 2, 3] 0
+23:38:13 <lambdabot>  error:
+23:38:13 <lambdabot>      • Could not deduce (Num (t0 [a]))
+23:38:13 <lambdabot>        from the context: (Num [a], Num (t [a]), Num a, Foldable t)
+23:38:19 <foldrm> Ok, sorry.
+23:41:58 <foldrm> Would an valid implementation of foldrM be: `foldrM f xs init = foldr (\e acc -> acc >>= f e) (return init) xs` ?
+23:42:59 <foldrm> :t foldrM
+23:43:01 <lambdabot> (Monad m, Foldable t) => (a -> b -> m b) -> b -> t a -> m b
+23:43:14 <foldrm> :t foldr (\e acc -> acc >>= f e) (return init) xs
+23:43:15 <lambdabot> error:
+23:43:15 <lambdabot>     • Variable not in scope: xs :: [()]
+23:43:15 <lambdabot>     • Perhaps you meant one of these:
+23:43:24 <foldrm> Whoops.
+23:43:35 <foldrm> :t foldrM f xs init = foldr (\e acc -> acc >>= f e) (return init) xs
+23:43:37 <lambdabot> error:
+23:43:37 <lambdabot>     parse error on input ‘=’
+23:43:37 <lambdabot>     Perhaps you need a 'let' in a 'do' block?
+23:43:43 <mniip> foldrm, I don't think so
+23:43:44 <foldrm> I give up with you lambdabot :d
+23:43:48 <ab9rf> [()] is an intriguing type
+23:43:59 <foldrm> ab9rf: List of unit?
+23:44:17 <foldrm> ab9rf: aka Nat :)
+23:44:47 <mniip> > foldrM (\a b -> ([a], a+b)) 0 [1,2,3]
+23:44:49 <lambdabot>  ([3,2,1],6)
+23:45:31 <mniip> > foldr (\e acc -> acc >>= (\a b -> ([a], a+b)) e) (return 0) [1,2,3]
+23:45:34 <lambdabot>  ([3,2,1],6)
+23:45:38 <mniip> hm
+23:45:44 <foldrm> Ok I'm not crazy
+23:45:54 <foldrm> The version in the stdlib really is just annoyingly terse.
+23:46:06 <mniip> ah yes
+23:46:13 <mniip> it uses a left function fold
+23:46:17 <mniip> for a more efficient right fold
+23:46:32 <foldrm> I noticed that. And foldlM does the inverse.
+23:46:35 <foldrm> I haven't groked why.
+23:47:55 <mniip> do you know how foldr f z xs = foldl (\k x z -> k (f x z)) id xs z
+23:48:10 <foldrm> Sure.
+23:48:36 <foldrm> But I don't fully understand the efficiency gained in using one fold over the other in this context.
+23:49:03 <foldrm> Ohhhh
+23:49:06 <mniip> left folds can be done in constant spaces if the strictness analysis observes the strictness of the reducing function
+23:50:37 <foldrm> Actually wait
+23:50:47 <foldrm> Let's set the efficiency thing aside for a moment.
+23:51:12 <foldrm> What is happening that allows you to pass 4 arguments to foldl.
+23:51:45 <jedai> foldrm: he's passing two argument id and xs
+23:51:53 <foldrm> Right.
+23:52:06 <jedai> foldrm: but the result of the fold is another function, that takes the z as argument
+23:52:07 <foldrm> So does it fold 1 time and return a function waiting for z?
+23:52:14 <jedai> Right
+23:52:32 <foldrm> This is gonna sound dumb
+23:52:44 <foldrm> But how does the *next* step work, then?
+23:53:12 <jedai> The (\k x z -> k (f x z)) part ?
+23:53:45 <jedai> You can see it like that : (\k x -> (\z -> k (f x z)))
+23:55:02 <foldrm> I feel dumb for being stuck on this, but once you supply z the fold continue right?
+23:56:09 <foldrm> Basically how does the fold continue if the reducing function needs 3 parameters at each step.
+23:57:00 <jedai> foldrm: It doesn't need 3, see my reformulation, it takes two and produce a function
+23:59:44 <Lears> > foldl (\k x -> k . f x) id [a, b, c] z
+23:59:46 <lambdabot>  f a (f b (f c z))

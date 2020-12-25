@@ -1,0 +1,1206 @@
+02:12:11 * shapr bounces
+02:25:47 <shapr> hi marvin
+02:35:39 <Marvin--> morning
+02:36:12 <Marvin--> damn
+02:36:20 <BlizzNL> goodmorning Marvin--
+02:36:22 <Marvin--> morning
+02:36:39 <Marvin--> damn, my type versioning trick didn't work
+02:40:57 <shapr> what did you try?
+02:41:10 <shapr> I've been wondering how to version plugins
+02:42:50 <Marvin--> I was appending a version number to the type constructor name when instantiating Typeable
+02:43:12 <Marvin--> but since the plugins are *drumroll* dynamically linked, they will still use the same definition no matter what :)
+02:43:50 <Marvin--> maybe I should have a separate pluginApiVersion :: Int
+02:44:25 <Marvin--> And even if I could get the plugins and the main program to use different typeable instances, that would break for *valid* plugins, since the type constructor definition can only be evaluated once :(
+02:46:18 * shapr thinks about that
+02:48:16 <Marvin--> bah, I'll just decide that a plugin has to export pluginApiVersion :: Int, and plugin :: Dynamic, if they don't the behaviour is undefined :-)
+02:48:26 * Marvin-- likes the behaviour-is-undefined-catchall
+02:48:58 <Marvin--> But I'd like to talk to o3 about why he thinks Dynamic types solves this, I don't think it dores
+02:49:02 <Marvin--> does
+02:49:21 <o3> Marvin--: i'm here
+02:49:30 <shapr> hi o3!
+02:49:34 <o3> ello
+02:50:06 <Marvin--> o3: great
+02:50:10 <o3> what's up Marvin?
+02:50:39 <Marvin--> the problem is that for Dynamic types to work, there must be one-and-only-one definition of the type constructor variable
+02:50:51 <Marvin--> (I found that out the hard way)
+02:50:56 <o3> right, go on
+02:51:02 <o3> what are you trying to do?
+02:51:12 <Marvin--> My plugins are .o files
+02:51:37 <Marvin--> which means that when they are dynamically linked with the main program, they will still use the same Typeable instantiation as the main program
+02:52:09 <Marvin--> so if the 'PluginAPI' type mismatches between the plugin and the main program, the program will still segfault
+02:52:15 <Marvin--> because fromDynamic thinks all is well and good
+02:52:55 <Marvin--> Using .so plugins *may* solve this, but I'm not sure it would, since that would mean several definitions of the type constructor variable, so I think it would blow up in the other end instead -- no plugins are loadable
+02:53:12 <Marvin--> (maybe I should write this down so I'll remember it in the report)
+02:54:56 <o3> sorry, i'm not following.  can you give a concrete example?
+02:55:12 <o3> (my brain's half-dead right now thanks to fooling around with distributed algorithms)
+02:55:37 <Marvin--> heh
+02:56:08 <Marvin--> I have data HWSPlugin = HWSPlugin { pName :: String, pInit :: Maybe InitFunc, ... }
+02:56:19 <o3> yep
+02:56:23 <Marvin--> which instantiates Typeable
+02:56:48 <Marvin--> plugins export  plugin = toDyn $ HWSPlugin { pName = "foo", pInit = ... }
+02:57:11 <Marvin--> and when I load a plugin, I do  loadFunction obj "plugin" :: IO Dynamic  and then fromDynamic on that
+02:57:28 <o3> yep, i'm following
+02:57:55 <Marvin--> I tried to achieve versioning of the HWSPlugin type by letting the type constructor be called "PluginAPI.HWSPluginV1"
+02:58:05 <Marvin--> with the idea that V1 would be changed to V2 when the type changed
+02:58:42 <Marvin--> but since the plugin .o file *shares* the definition of the Typeable instance, fromDynamic will always succeed
+03:00:18 <Marvin--> and of course, if the type actually has changed, the program will crash and burn
+03:01:03 <Marvin--> so I'm thinking using Dynamic doesn't solve any problems :/
+03:01:33 <o3> okay, just to make sure i understand, you did something like 'data HWSPlugin = PluginAPI.HWSPluginV1 { pName :: String, ... }' ?
+03:01:56 <Marvin--> no, the V1 was only in the mkTyCon definition
+03:02:10 <o3> oh!  i think i understand now
+03:02:44 <o3> that mkTyCon stuff seems really evil
+03:02:46 <Marvin--> and I don't think data HWSPlugin = HWSPluginV1 { .. } would solve the problem either
+03:03:15 <Marvin--> the way I got it is that the mkTyCon stuff is fairly useless because of a bug in ghc
+03:03:26 <o3> hmm, i guess what you want to do is to be able to add things to the data type, yet still be able to load older version plugins and explicitly identify them as wrong versions?
+03:03:54 <o3> (instead of getting an error when you try to fromDyn an old-version plugin)
+03:03:59 <Marvin--> well, at least detect that a plugin I'm trying to load is faulty and abort gracefully
+03:04:12 <Marvin--> or skip it
+03:04:40 <Marvin--> but in any case, it feels like decoupling the api version from the plugin type is the best way to go
+03:04:57 <Marvin--> so plugins export 'pluginApiVersion :: Int' too
+03:05:51 <Marvin--> that means I can short-circuit before loading the plugin definition
+03:05:55 <Marvin--> wonder how apache does this
+03:05:58 <Marvin--> probably not at all
+03:08:47 <o3> hmm, let's omit the versioning for a minute
+03:08:55 <o3> (the HWSPluginV[12] stuff)
+03:09:08 <Marvin--> ok
+03:09:14 <o3> do dynamic types work for you then?  i'm still a bit fuzzy about what's going on
+03:09:50 <o3> from your code above, you should be able to do "fromDyn" in the program which loads the plugin, and it should just throw up an error if it can't convert it
+03:10:44 <Marvin--> yes, but the only thing fromDynamic does is check the typereps
+03:11:55 <o3> i'm going to skim the GHC docs again, hang a sec
+03:12:42 <Marvin--> I looked at the implementation... all fromDynamic does is unsafeCoerce and check if the typereps match
+03:16:14 <Marvin--> It's fun to hack on this, but I also want to be over and done with code + report on something I can hand in, so I'll be free to do things more leisurely
+03:19:07 <o3> sorry, i still don't really see what the problem is.
+03:19:25 <o3> you've got a plugin which exports `plugin = toDyn $ HWSPlugin { ... }'
+03:19:43 <o3> and a host program which does `loadFunction obj "plugin" :: IO Dynamic'
+03:20:13 <o3> if you run fromDynamic on that and it's a valid plugin (ie the `plugin' exported is really the HWSPlugin type), it should work, right?
+03:20:19 <o3> if not, fromDynamic will bomb
+03:21:02 <o3> i'm really hazy about typereps and tycons, i remember it took me yonks to work out how to use the dynamic stuff at all
+03:21:32 <Marvin--> the problem is that if the plugin.o was compile against one version of the HWSPlugin type, and the main program uses another, everything will crash and burn, regardless of Dynamic or not
+03:21:44 <Marvin--> because the two different types will have the same typerep
+03:22:06 <o3> oh!
+03:22:08 * o3 sees the light
+03:22:15 <o3> (ding!)
+03:22:25 <o3> right, i understand now
+03:22:33 <Marvin--> which I tried to solve with the V1 hack
+03:22:40 <o3> right, right
+03:22:44 <Marvin--> but that doesn't work since they will still use the same typerep :-)
+03:22:52 <o3> yes, i see
+03:23:46 <o3> i guess you'll have to keep the interface as stable as possible, and maybe enforce versioning by file naming or function naming
+03:24:13 <Marvin--> that's what I'm afraid of :-)
+03:24:21 <o3> the latter doesn't sound too bad -- that's what ld.so does anyway :)
+03:24:49 <Marvin--> pluginApiVersion :: Int  is fair enough IMO
+03:25:39 <o3> yeah, although i guess you want to make that a dynamic type too, so your program doesn't die if it tries to load that function and the plugin's got a completely different type :)
+03:26:04 <Marvin--> uh, why?
+03:26:15 <Marvin--> I can never guard myself against someone using another type than I expect
+03:26:42 <Marvin--> pluginApiVersion = 1 :: Int
+03:26:44 <Marvin--> or
+03:26:50 <Marvin--> pluginApiVersion = toDyn (1 :: Int)
+03:26:53 <Marvin--> *shrug*
+03:27:15 <o3> if you do `loadFunction obj "pluginApiVersion" :: IO Int' and pluginApiVersion isn't of type :: Int, i'm not sure what ghc will do
+03:27:23 <Marvin--> it will crash and burn
+03:27:30 <o3> nod, that's what i think
+03:27:42 <Marvin--> but if I do `loadFunction obj "pluginApiVersion" :: IO Dynamic' and pluginApiVersion isn't of type Dynamic, it will still crash and burn
+03:27:55 <Marvin--> same same, but different
+03:28:11 <o3> it will?  i thought it fromDynamic would exit gracefully if it encountered completely invalid data
+03:28:26 <Marvin--> no, Dynamic isn't magic
+03:28:42 <Marvin--> once you *have* a Dynamic, it's more or less safe (bar incompatible types using the same typerep)
+03:28:55 <Marvin--> but first ghc has to cast the symbol to a Dynamic, and that can fail too
+03:29:10 <Marvin--> one cast isn't safer than another :)
+03:29:24 <o3> so it doesn't even throw an exception?  doh
+03:29:28 <o3> even java does that :D
+03:29:29 <Marvin--> data Dynamic = Dynamic TypeRep Obj, I think
+03:29:48 <Marvin--> (data Obj = Obj)
+03:30:35 <Marvin--> I don't see how it can throw an exception unless it carries around type information, and the type information is in the .hi files
+03:31:12 <o3> well, on the bright side, i guess there's a verrry small chance that you'd have a .o with a function called 'pluginApiVersion' and have it of a different type than you expect :)
+03:31:13 <Marvin--> If I understand these things correctly, Java can do it because the .class files contain both type info and data
+03:31:23 <Marvin--> exactly
+03:31:45 <Marvin--> which is why I'm going with the old catchall: "If pluginApiVersion is not of type Int, the behaviour is undefined" :-)
+03:31:52 <o3> i always assumed that the type information was carried with the dynamic types (like objects in OO langs)
+03:32:16 <o3> that was just an automatic presumption i made, since they basically exhibited that behaviour :)
+03:32:36 <Marvin--> yes, type information is carried around *inside* the Dynamic type, but not *with* it, Dynamic is just another Haskell data type
+03:33:25 <Marvin--> If values carried around their types like in Python and Java (but I assume Java doesn't do it for primitive types) you wouldn't need the .hi files at all
+03:33:41 <Marvin--> i.e. Haskell isn't more suited for dynamic loading than C :-)
+03:34:06 <o3> yeah, i also thought that GHC would not look at the data until you tried to coerce it with toDyn, and that toDyn would check whether the type information inside the Dynamic type matched the type you're trying to coerce it too
+03:34:42 <Marvin--> (you mean fromDyn, right?)
+03:34:54 <o3> sorry, yes, fromDyn
+03:35:05 <Marvin--> but before fromDyn can even be called, 'a' must be coerced to 'Dynamic'
+03:35:13 <Marvin--> and my point is that THAT can crash and burn
+03:35:22 <o3> nod, i understand
+03:36:30 <o3> hmm, i wonder if making it an unboxed value will solve the problem
+03:37:05 <o3> (just random thoughts, i have no idea about the details on boxed/unboxed values)
+03:38:34 <Marvin--> me neither, and I'd prefer not to go there, especially since I have to hand in the report tomorrow evening ;)
+03:39:19 <Marvin--> ARGH, sometimes I hate the layout rules
+03:39:26 <o3> good luck :)
+03:39:42 * o3 <- brain now completely fried
+03:39:54 <o3> distributed algorithms are bad enough, distributed algorithms + GHC wizardry -> aieeee
+03:40:05 <Marvin--> hehe
+03:40:38 * Marvin-- disappears in the general direction of the kitchen to get some coffee
+03:43:06 <Marvin--> this report is going to look weird
+03:43:15 <shapr> marvin: I want to see it when you're done
+03:43:19 <shapr> very cool project
+03:43:26 <Marvin--> there'll be section after section saying "but this is a problem, here's how we try to solve it"
+03:43:36 <o3> what project is this, anyway?
+03:43:38 <shapr> those are the best kind of reports
+03:43:39 <Marvin--> and the next section will be "that would be nice, but unfortunately it doesn't work because ..."
+03:43:53 <Marvin--> o3: hws-wp :P
+03:44:00 <shapr> web-plugin?
+03:44:04 <shapr> what's the wp short for?
+03:44:19 <o3> haskell web server ... worth plugging?
+03:44:22 <shapr> heh
+03:44:47 <Marvin--> with plugins
+03:44:58 <o3> coolness
+03:45:00 <Marvin--> lame name, but I haven't had time to worry about the project name ;)
+03:45:27 <andersca> needs to have func in the name
+03:46:35 <shapr> yah, funk
+03:46:59 <shapr> hi rogon
+03:48:08 <Marvin--> o3: what I'm doing is that I'm extending simonmar's HWS with apache-style plugins
+03:48:23 <o3> nod, i figured
+03:48:33 <o3> that'll be _really_ useful for my thesis (haskell wiki)
+03:48:45 <o3> for which i intended to use HWS
+03:48:53 * shapr wants to see <<- for "do"-ing Arrows
+03:49:12 <Marvin--> http://193.11.232.159:2080/
+03:49:16 <Marvin--> yay, WikiPlugin :-)
+03:49:34 <Marvin--> there are several things that should<tm> be done before this is useful, and I don't have time to do it
+03:49:47 <Marvin--> for example, like in apache, plugins really need to be able to add config directives
+03:50:14 <o3> nod
+03:52:29 <Marvin--> haha, I complained to a friend that I have a deadline on a course project, and showed him that page
+03:52:52 <Marvin--> he was going "You don't have time for that now! ... Oh wait, THAT is the project?"
+03:54:31 <o3> laugh
+03:55:32 <o3> alrighty, time for a break until my mind stops flying around in an inconsequential kinda way
+03:56:17 <Marvin--> hehe
+03:56:39 <Marvin--> and here I was just about to ask which kind of distributed algorithms you were fiddling with ;P
+03:58:25 <Marvin--> how the heck am I going to get the time to write a decent report on this too? :(
+03:59:04 <andersca> when's it due? monday?
+03:59:40 <Marvin--> monday morning
+03:59:45 <Marvin--> which in practice means sunday evening
+04:00:21 <Marvin--> fuck, I just realized that a cgi plugin won't interact well with ghc's concurrency
+04:00:22 <Marvin--> damn them
+04:06:46 <Marvin--> I wonder if I can even use the POpen module
+04:23:24 * Marvin-- wrote his own popen
+04:33:03 <o3> Marvin--: "the distributed pairing problem
+04:33:11 <o3> http://www.cse.unsw.edu.au/~cs3151/02s2/ass/ass2
+04:33:34 <o3> it's not too hard unless you want to prove that your solution is optimal.  that's ... rather nuts
+04:35:48 <Marvin--> oh
+04:36:27 <o3> of course, since my evil lecturer decided to actually issue that challenge, i'm obliged to try
+04:36:41 <Igloo> Do the nodes have names on which there is an order?
+04:37:03 <o3> no names, but they all get assigned unique IDs
+04:37:20 <Marvin--> :)
+04:37:21 <o3> oh
+04:37:24 <Igloo> Same thing
+04:37:26 <o3> i suppose that's what you meant by "names"
+04:37:40 <o3> don't worry, i'm usually worse than this :)
+04:37:45 <Igloo> Is it possible if they don't?
+04:38:09 <Igloo> Without randomness which wouldn't be guaranteed to terminate, anyway
+04:38:23 <Marvin--> o3: when the text in question is "Andrews claims - and I'm sure he's right - that this is very hard." I usually consider that a hint at "don't do this"
+04:38:38 <o3> Igloo: see, those questions are in the area of "bugger that for a lark", as far as i'm concerned :)
+04:38:50 <Igloo> :-)
+04:39:15 <o3> Marvin--: yes, and coming from my lecturer, triply so
+04:39:25 <o3> s/my/this particular/
+04:40:26 <o3> Marvin--: but hey, i'm 75% of the way toward a solution, and i have 8 days to go.  so why not try :)
+04:41:04 <Marvin--> o3: 8 days to go, lucky you
+04:41:09 <Marvin--> yay, the cgi plugin compiled
+04:41:11 <Marvin--> wonder if it works
+04:41:52 * BlizzNL disconnected again :(
+04:42:03 <BlizzNL> I am having some major diffuculties with monads. I need to create sufficiently rich monad for some function ( infer :: StateMonad m Int => Env (Type Int) -> Term -> m (Int -> Type Int,Type Int) ). I read some papers about monads and finally on monad transformation but I can't figure out what I should do now to use the combinators to construct a correct monad. anyone who is willing to take a look at my code?
+04:42:49 <BlizzNL> I uploaded it here : http://members.chello.nl/~f.eimers/Infer.hs
+04:43:36 <Marvin--> WHOA, that's scary
+04:43:44 <Marvin--> http://193.11.232.159:2080/test.cgi
+04:44:28 <Marvin--> (also test.cgi.txt)
+04:44:40 <Heffalump> ooh.
+04:44:40 <o3> Marvin--: hey, stop that, i'll have nothing left to do for my thesis!
+04:44:43 <Heffalump> lol
+04:44:54 <Heffalump> o3: I thought you were writing a Wiki?
+04:45:14 <o3> yeah, but that was also going to involve making the webserver pluggable :)
+04:45:15 <andersca> Marvin--: what type of CGI is that?
+04:46:16 <Marvin--> http://193.11.232.159:2080/CgiPlugin.hs
+04:47:12 <andersca> wow!
+04:47:13 <andersca> man
+04:47:28 <andersca> I didn't know haskell had popen
+04:47:35 <andersca> or rather, that you could do popen in haskell
+04:47:48 <Marvin--> well, there is a POpen module in the posix package
+04:48:06 <Marvin--> but it uses a forkProcess that doesn't interact well with ghc's userspace threads
+04:48:13 <o3> Marvin--: i like it how you've got a function about 20 lines long which "implements CGI scripting functionality" :)
+04:48:24 <Marvin--> o3: well, it does :-)
+04:48:51 <Marvin--> o3: of course, the mime type translation is very kludgy since plugins can't register config directives
+04:49:05 <Marvin--> so the core plugin's mime type translation handles that
+04:49:13 <Marvin--> hmm, maybe I should just move that to the cgi plugin
+04:59:06 * Marvin-- patiently waits for the program to finish compiling
+05:00:40 <Marvin--> BlizzNL: Well, if you have a monad M to start with, then your state monad would be StateT Int M
+05:01:37 <Marvin--> There, I moved some mime handling from core to the other plugins
+05:03:10 <BlizzNL> Marvin--: first of all thnx for looking at it. I think my problem is exactly as you say. I have no idea what the M monad is. aargh
+05:03:41 <Heffalump> you'll need a "unit" monad at the bottom
+05:03:47 <Heffalump> IM identity really
+05:04:26 <Marvin--> exactly
+05:04:29 <Heffalump> -- newtype Id a = Id a
+05:04:29 <Heffalump> -- instance Monad Id where
+05:04:29 <Heffalump> --   return x = Id x
+05:04:29 <Heffalump> --   Id x >>= f = f x
+05:05:09 <BlizzNL> Heffalump: what doe you mean with at the bottom?
+05:05:24 <Heffalump> suppose you have a stack of transformers
+05:05:36 <Heffalump> FooT (BarT (... ))
+05:05:38 <Marvin--> BlizzNL: The beauty of monad transformers is that you can have as many as you like :) but you need something "in the end"
+05:05:45 <Marvin--> BlizzNL: I see you've been reading THIH :)
+05:05:53 <Heffalump> the final thing you apply the innermost transformer to has to be a monad, not a transformer
+05:05:53 <BlizzNL> Marvin--: indeed ;)
+05:06:02 <Heffalump> so use an identity monad
+05:06:38 <BlizzNL> Heffalump, Marvin--: I'll have to process all this info .. ;)
+05:09:15 <Marvin--> BlizzNL: have fun :)
+05:09:32 <Marvin--> Right. Three plugins will have to do. Now to go over the code and comment it a bit, and then the report
+05:09:48 <Heffalump> so there will be something left for o3?
+05:09:50 <Heffalump> :-)
+05:10:25 <Marvin--> well, that too, but mainly because I have to be finished tomorrow ;)
+05:11:30 <Heffalump> :-)
+05:26:31 <Marvin--> time for some lunch
+06:59:01 <shapr> marvin: does the ghc-users message from glynn clements fix your problem?
+07:00:23 <ludde> is there some built in function  killresult :: Monad m => m a -> m ()
+07:00:49 * shapr dunno
+07:02:22 <Marvin--> shapr: no, it helps complicate things :)
+07:02:29 <Marvin--> shapr: I don't think there IS a solution
+07:18:57 <Heffalump> ludde: you can just avoid binding the result
+07:19:13 <Heffalump> i.e. use do { ... ; foo ; ... } instead of do { ... ; x <- foo ; ... }
+07:19:19 <ludde> yeah
+07:19:27 <ludde> i know i can do that
+07:19:54 <Heffalump> fmap (const ()) would do it, too
+07:20:04 <Heffalump> (I think all Monads are Functors...)
+07:20:16 <o3> http://thesurrealist.co.uk/priorart.cgi?ref=a+monad
+07:20:22 <o3> that site is the coolest thing ... i have ever seen
+07:21:04 <o3> marvin-- is a pudding that looks better than it sounds! It does exactly what it says on the tin and is different every time you use it.
+07:26:04 <Marvin--> o3?
+07:26:19 <o3> Marvin--: check out that webpage
+07:26:26 <o3> Marvin--: actually, don't, if you have a report due soon :D
+07:26:39 <Marvin--> ;)
+07:27:05 <Marvin--> I've seen that kind of pages before
+07:27:29 <ludde> Marvin--: http://www.cs.umu.se/information/rapportguide.html
+07:27:30 <Marvin--> eek, do I want to pay 879 SEK (~90 euro) for Barendregt's Lambda Calculus -- in paperback?
+07:27:43 <Heffalump> it's a good book...
+07:27:46 <Heffalump> but that's quite a lot
+07:28:04 <Marvin--> ludde: read it before
+07:28:12 <ludde> Marvin--: ah :)
+07:28:24 <Marvin--> ludde: I have friends at Umu
+07:28:37 <ludde> okay
+07:29:09 <ludde> i have an IRC friend there, and he uses the nick Marvin too (originally... now it's marv)
+07:29:39 <Marvin--> You sure it's not marwin?
+07:29:45 <Marvin--> maybe he wasn't at umu
+07:30:04 <ludde> marv is flodin@ris.cs.umu.se * Marvin the Paranoid Android
+07:30:18 <Marvin--> ok
+07:33:03 <Marvin--> I've been 'Marvin' for years and years... When I spent time on a channel where there was also a guy called marwin, I started going by the nick MarVin to avoid confusion
+07:33:27 <Marvin--> and on OPN^Wfee^Wfreenode Marvin was taken, so I went for Marvin--
+07:33:35 <ludde> heh, okay :)
+07:33:44 <andersca> ah, nick stories
+07:33:53 <Marvin--> he more or less asked for it ;)
+07:33:57 * Marvin-- runs down to the laundry room *sigh*
+07:34:01 <ludde> what does marvin come from anyway?
+07:40:41 <Marvin--> the paranoid android in my case too
+07:44:17 <ludde> eh?
+07:44:26 <ludde> oh
+07:44:30 <ludde> is that a known name?
+07:45:11 <Heffalump> read Douglas Adams
+07:45:17 <ludde> ooh
+07:45:31 <Heffalump> (Hitchhiker's Guide to the Galaxy)
+07:45:43 <Marvin--> You haven't read HHGG???
+07:45:50 <Marvin--> sheesh, what have you been doing with your life? :)
+07:45:57 <Heffalump> lol
+07:46:00 <ludde> no, i havn't :)
+07:46:04 <ludde> hehe
+07:48:18 * Marvin-- ponders using implicit parameters
+07:48:36 <Heffalump> what for?
+07:49:28 <Marvin--> HWS passes around 'conf' a lot
+07:49:39 <Marvin--> and with the plugins, I pass around a list of them too
+07:49:48 <Marvin--> maybe I should use ?conf and ?plugins instead
+07:50:08 <shapr> conf monad at least
+07:50:10 <Heffalump> hmm, yeah
+07:50:15 <Marvin--> Then I could scrap the server monad and everything is in IO and error handling won't be a bitch
+07:50:17 <shapr> lots of explicit conf passing irritated me too
+07:50:26 <Heffalump> getting rid of a monad if possible is good
+07:50:41 <shapr> Heffalump: had time to read the Arrows paper?
+07:50:50 <Marvin--> well, everything will still be in IO, but it'll be in IO instead of StateT Config (StateT [HWSPlugin] IO)
+07:50:57 <Heffalump> shapr: I've read it before, but not recently
+07:51:05 <Heffalump> Marvin--: hmm, is it worth it then?
+07:51:18 <Marvin--> Heffalump: a lot less liftIO calls ;)
+07:51:25 <Heffalump> heh :-)
+07:51:42 <shapr> silly as this may sound, maybe citeseer should add a message board to the webpage for each paper
+07:51:42 <Marvin--> I don't have time to do the change though, but I'll mention it as an alternative-and-possibly-better implementation in the report
+07:51:52 <Heffalump> you could use an IORef
+07:51:59 <shapr> then you can ask stupid questions about that paper, and the authors or other people equally interested could answer
+07:52:16 <Heffalump> shapr: hmm, yes
+07:52:18 <Marvin--> Heffalump: ugh
+07:52:27 <Heffalump> Marvin--: well, if you're in IO anyway...
+07:52:32 * shapr sends an email to citeseer
+07:52:46 <Marvin--> wikiseer?
+07:53:01 <shapr> heh, exactly
+07:54:07 <shapr> well, I'll send them an email if I can ever get the page to load
+07:54:37 <shapr> looks like I might be offline for up to a month starting wednesday
+07:55:39 <Heffalump> I read that as "yesterday" and got confused
+07:55:46 <Heffalump> doing anything exciting?
+09:50:37 --- topic: 'mo' nads than you || We put the Funk in Funktion || See logs @ http://tunes.org/~nef/logs/haskell/ || Gtk+HS  0.14.10 released http://www.cse.unsw.edu.au/~chak/haskell/gtk/ || ICFP is over <Erwin> Your mother asked you to write COM program? Who are you, Dilbert? || Ganesh's HaskPerl challenge: make Haskell look like line noise too!'
+09:50:37 --- topic: set by Heffalump on [Wed Oct 23 04:33:47 2002]
+09:50:37 --- names: list (clog dblack o3 norpan Ig skylan mmc shreya jewel ibid ludde Chilli ChilliX andersca shreya_ rogon smklsmkl Heffalump shapr Marvin-- ChoJin Logan_ Igloo_ liiwi dennisb dark)
+09:50:38 <ibid> ("hmm, okay")
+09:52:12 <ludde> i don't understand record types
+09:52:32 <ludde> what does a record type look like when Show:ed ? like a tuple?
+09:52:59 <dark> Hmm, is there a name for an operation that takes sets A and B, and returns (A - B, A intersect B, B - A) ?
+09:53:25 <Marvin--> ludde: I think it looks like "Foo { a = 43, b = ... }"
+09:53:35 <ibid> i'd assume the record field names would show
+09:53:47 <ludde> but in that case, isn't Show implemented with magic?
+09:53:53 <dark> ludde: You can also pattern-match it that way (I learned this recently :)
+09:54:04 <ludde> where can I read about records?
+09:55:09 <ibid> ludde: as much as printing algebraic data types with the data constructor names is magical
+09:55:23 <ludde> hmm, yeah
+09:55:34 <dark> ludde: For any type definition, you can write a Show instance for it without using magic.
+09:55:44 <dark> A "deriving Show" clause is magical only to that extent.
+09:55:46 <ludde> yeah, but what about the default Show
+09:56:00 <ludde> the default behaviour of Show is implemented in the compiler
+09:56:09 <ludde> and not as haskell code
+09:56:14 <ludde> right?
+09:56:18 <ibid> ludde: there is no default Show
+09:56:22 <Marvin--> ludde: ghc is written in haskell ;)
+09:56:26 <ibid> ludde: there is only deriving show :-)
+09:56:46 <ibid> ludde: and deriving is just the compiler generating the instance code for us, so we don't have to write it manually
+09:56:51 <ludde> yeah
+09:57:13 <ludde> but there is no way to make my own type class that can serialize data to a binary form with the same flexibility as Show ?
+09:57:14 <Marvin--> deriving Show is nothing weird... driving Num and stuff like that gives me the willies
+09:57:33 <ibid> hm, would metaprogamming in haskell allow one to customize deriving? :-)
+09:57:41 * Marvin-- ponders 'deriving Monad'
+09:57:47 <ludde> then i would have to make one instance / unique type
+09:57:56 <ludde> and i can't rely on simply deriving MyClass
+09:57:58 <ludde> right?
+09:58:08 <dark> ludde: Ah, you're asking for a way to define new "deriving" types :)
+09:58:19 <dark> That _is_ magic.
+09:58:21 <ludde> hmm, maybe?
+09:58:22 <ludde> okay
+09:58:33 <ibid> dark: but with metaprogramming it ought to be possible :-)
+09:58:43 <ludde> I don't quite know what deriving mean, I just know what happens when I write it.
+09:58:50 <ibid> but i don't know if spj et al 's proposal allows that
+09:59:05 <ludde> s/mean/means/
+09:59:06 <dark> ibid: What's metaprogramming?  Isn't programming meta enough already? :)
+09:59:20 <ibid> dark: writing programs that operate on programs
+09:59:41 <dark> ludde: It just means "Compiler! Create instances of this type for these classes, because I'm too lazy to do it myself"
+09:59:49 <ibid> dark: in this case, i mean writing code in the program that is executed at compile time to modify the code
+09:59:54 <dark> The rules for what each "deriving" class should do are in the Haskell Report.
+10:00:05 <ludde> dark: i see, so it's a compiler directive then.. okay, thanks.
+10:00:18 <ibid> dark: c++'s template mechanism is a way to do static metaprogramming
+10:00:56 <ibid> dark: but you don't usually see it being used...
+10:00:57 <dark> ibid: So we will finally have the power of cpp? :-)
+10:01:06 <ibid> dark: cpp? cpp is weak
+10:01:34 <dark> I was being sarcastic, I blame cpp for most of C's evils.
+10:01:36 <ibid> dark: spj et al 's proposition allows one to write metacode in haskell
+10:01:46 <ibid> inside haskell programs
+10:02:22 <dark> In particular, having a preprocessor defined as part of the language makes it very hard to do transformations on code.
+10:02:33 <ibid> basically, the metacode gets as input an ast representation of (a portion of) the program and outputs ast for replacement code
+10:02:46 <dark> ibid: Is this like the RULES pragma?
+10:02:56 <ibid> dark: rules pragma?
+10:03:46 <ibid> dark: http://research.microsoft.com/~simonpj/papers/meta-haskell/
+10:03:55 <Marvin--> haha, a friend of mine seems to have fallen in love with implicit parameters
+10:03:58 <Marvin--> type STHeap s a = (?currIx :: Int, ?heap :: STArray s Int a, ?ix :: STArray s a Int) => ST s ()
+10:05:18 <Marvin--> and there he is
+10:05:38 <dark> I don't know if it's GHC-specific.  The users guide gives an example: {-# RULES "map/map" forall f g xs. map f (map g xs) = map (f.g) xs #-}
+10:05:48 <dark> It's used for optimization.
+10:06:20 <Marvin--> eek
+10:07:22 <ludde> are c++ templates considered metaprogramming ?
+10:08:04 <Marvin--> I consider them harmful
+10:08:47 <dark> My only encounter with C++ templates was in trying to get sgmltool to compile.  It's not an experience I care to repeat :)
+10:08:55 <dark> sgmltools, that is.
+10:09:16 <ludde> I want a metaprogramming layer to C
+10:09:37 <Marvin--> When I tried to learn C++ (something I regret) and was wrestling with SGI's STL, I got more than I wanted of templates
+10:09:43 <dark> ludde: K&R suggest using M4 is cpp is insufficient.
+10:09:56 <ibid> ludde: c++ templates are a full programming language, hence, they allow metaprogramming
+10:10:13 <ludde> dark: do you mean m4 "in" cpp ?
+10:10:20 <ibid> c++ templates are the best feature of the language
+10:10:26 <dark> What I dislike about any kind of standardized preprocessing is that it makes program transformations (i.e. automatic refactoring) much harder.  In C, even protoize and unprotoize are hacks.
+10:10:59 <dark> ludde: sorry, typo.  K&R suggest using M4 if cpp is insufficient.
+10:11:20 <ludde> okay
+10:11:39 <ludde> isn't c++ template metaprogramming quite limited?
+10:11:46 <ibid> ludde: in what sense?
+10:11:57 <dark> ibid: c++ templates seem badly misimplemented, though.  You have to know exactly what your typedefs typedef to, if you want to follow the rules about instantiations.
+10:12:00 <ludde> you can't really do any code transformations, can you?
+10:12:33 <ibid> ludde: there are some abritrary limitations on recursion depth etc in the standard
+10:12:55 <ibid> ludde: but disregarding that, it is a full programming language
+10:13:14 <ibid> ludde: i've seen a legal c++ program that looks like haskell
+10:13:19 <ibid> ludde: and compiles and runs...
+10:13:25 <ludde> ibid: you mean the hacks you can do with ... and sizeof ?
+10:13:28 <ibid> ludde: and that uses template metaprogramming
+10:13:32 <ibid> ludde: ?
+10:13:41 <ludde> ibid: nothing :)
+10:13:52 <dark> So, C++ templates are good because they can make it look like Haskell?  I know a better way to achieve that benefit ;-)
+10:13:52 <ludde> it would have been interesting to see such a program
+10:14:14 <ibid> dark: you are making a transitive leap where no transitivity is available :_)
+10:15:24 <ibid> ludde: essentially, you think of class templates as functions
+10:15:44 <ibid> ludde: after that reinterpretation, c++ template subsystem is a functional pl
+10:16:12 <ibid> ludde: using template specialization you can define cases, and recursion is available
+10:17:39 <ludde> you need to type a lot to do it though
+10:17:55 <ibid> true
+10:18:19 <ibid> Krzysztof Czarnecki and Ulrich W. Eisenecker's book "Generative Programming - Methods, Tools, and Applications" contains a chapter on c++ template metaprogramming
+10:19:49 <ludde> template< unsigned n >
+10:19:49 <ludde> struct factorial
+10:19:49 <ludde> {
+10:19:49 <ludde>     static const unsigned value = n * factorial<n-1>::value;
+10:19:49 <ludde> };
+10:19:49 <ludde> template<>
+10:19:51 <ludde> struct factorial<0>
+10:19:53 <ludde> {
+10:19:55 <ludde>     static const unsigned value = 1;
+10:19:57 <ludde> };
+10:19:59 <ludde> ugly
+10:20:03 <ibid> that's the classical example
+10:20:50 <ludde> but is that metaprogramming though? that example doesn't manipulate any other program in any way?
+10:21:00 <ibid> no
+10:21:03 <ibid> it isn't
+10:21:30 <ibid> http://home.t-online.de/home/Ulrich.Eisenecker/meta.htm
+10:21:46 <rogon> Generic method can be thought of as Lisp (defmacro fac (n) (if (= n 0) 1 (* n (fac (- n 1))))))
+10:22:10 <ibid> generic method?
+10:22:21 <ibid> but yes, lisp has metaprogramming facilities
+10:22:26 <rogon> Sorry, bad name maybe.
+10:22:59 <ibid> http://www.prakinf.tu-ilmenau.de/~czarn/meta/metalisp.cpp :-)
+10:23:08 <rogon> Macros are quite cool actually. :-)
+10:24:06 <rogon> I'll brb.
+10:24:56 <engstad> Back.
+10:25:01 <engstad> What was the link again?
+10:25:15 <ibid> which?
+10:25:17 <ibid> http://www.prakinf.tu-ilmenau.de/~czarn/meta/metalisp.cpp 
+10:25:20 <ibid> http://home.t-online.de/home/Ulrich.Eisenecker/meta.htm
+10:25:35 <engstad> Thanks!
+10:32:06 <engstad> Heh, still horible syntax. :-)
+10:35:53 <ibid> sure
+10:36:20 <ibid> i think you can't fix that while still having it be c++ :_)
+10:38:18 <engstad> yeah, i suppose
+10:38:37 <engstad> Haskell doesn't really have macros, but I don't miss it for some reason.
+10:39:28 <Marvin--> "Since changing the implementation of GHC is out of the scope for this project, we will be forced to live with the type unsafety and be happy with what we have."
+10:39:43 <Marvin--> too tongue-in-cheek?
+10:39:51 <shapr> nah, I think it's great
+10:39:58 <shapr> Hughes does that in some of his papers
+10:40:16 <dark> I think it should be either "out of scope" or "outside the scope", though.
+10:40:50 <Marvin--> true
+10:43:14 <Marvin--> dinner time
+10:43:44 * shapr eats chocolat
+10:43:46 <shapr> mmm
+10:43:52 <dark> There's a movie about that.
+10:43:58 <shapr> engstad: haskell does have macros with Template Haskell
+10:44:03 * shapr is looking forward to using that
+10:44:20 <shapr> the TH paper already shows you how to build liftMn
+10:44:44 <shapr> dark: water like chocolate?
+10:45:03 <shapr> there's a chocolate movie that was released recently, but I don't remember the title
+10:45:18 <shapr> three chocolateers?
+10:45:22 * shapr doesn't think so
+10:46:08 <Marvin--> Chocolat?
+10:47:30 <raphael> confusion .... i get an ungainly parse error when I use "with" for implicit parameters, eg f with ?a = b
+10:47:38 <raphael> anyone got ideas?
+10:47:56 <shapr> marvin: chocolate
+10:47:57 <raphael> it just says parse error on "="
+10:48:29 * shapr just had lots of exercise and then a sauna
+10:48:42 <Marvin--> shapr: I mean that there's a movie called Chocolat
+10:48:54 <shapr> really called chocolat without the e ?
+10:49:03 <Marvin--> I think so
+10:49:07 <shapr> hm, neat
+10:49:10 <Marvin--> http://us.imdb.com/Title?0241303
+10:49:14 <Marvin--> yup, Lasse Hallström
+10:50:00 <Marvin--> "MPAA: Rated PG-13 for a scene of sensuality and some violence."
+10:50:06 <Marvin--> a "scene of sensuality"? sheesh
+10:50:10 <shapr> oh, that's the movie I was talking about!
+10:50:31 <shapr> the title is in finnish on my copy, so I can never remember the real title
+10:50:41 <Marvin--> I dunno if 2000 is "recently" in the Hollywood world though :)
+10:50:54 <Marvin--> oh well, food
+10:51:02 <shapr> well, the arrows paper is from '98
+10:51:15 * shapr isn't really sure how those two are related
+10:51:22 <shapr> I'm addicted to arrows.
+10:51:24 * shapr laughs
+10:51:48 * shapr begins his own paper "Generalizing Arrows to Spears"
+10:52:41 <raphael> maybe "Generalizing Arrows to Nuclear Weapons" would simply be: unsafeInterleaveIO
+10:52:53 <shapr> Spears can do anything efficiently, but they have sixty thousand laws they must satisfy, and we haven't actually found one yet.
+10:52:57 <ibid> rotfl
+10:53:09 * shapr laughs
+10:53:27 * shapr adds that to the quote page on HaskellWiki
+10:54:23 <ibid> a story tells about a grad student in maths whose phd thesis project was proceeding nicely... he defined an axiomatic theory of certain things and derived lots of theorems about them ... the final was "there are no such things"
+10:54:38 <ibid> and of course, he had to start over
+10:54:42 <ibid> shapr: url?
+10:55:18 <dark> Why would he have to start over?  What happened to "negative results are also results"? :)
+10:55:45 <raphael> yeah, take Frege as an example. 
+10:56:16 <shapr> ibid: http://purl.org/wiki/haskell/QuotesPage
+10:56:16 <raphael> I must say I admire him for admitting his mistake.
+10:56:22 <ibid> raphael: but frege had already published his stuff before russell's paradox
+10:56:49 <ibid> dark: a result proving that something already published is inconsistent is a result
+10:57:13 <ibid> dark: but publishing a theory you know is inconsistent is most of the time waste of time in maths
+10:58:32 * shapr wishes they would FIX the HaskellWiki
+10:58:39 <shapr> or at least ship me the raw content and let me fix it.
+10:59:02 <dark> Who is "they"?
+10:59:06 <shapr> I don't know
+10:59:14 <shapr> the HaskellWiki maintainer keeps changing
+10:59:31 <shapr> maybe I should volunteer to take it over.
+10:59:50 <shapr> but not before I move
+11:00:05 <ibid> raphael: and it wasn't frege himself who discovered the inconsistency
+11:00:29 <raphael> but he still added the letter from russel as an appendix :)
+11:00:59 <ibid> no he didn't
+11:01:04 <ibid> he wrote his own appendix
+11:01:37 <Igloo_> Blast, this channel needs a digest version
+11:01:42 <ibid> hehe
+11:01:46 <ibid> what would that solve?
+11:02:16 <ibid> "  Hardly anything more unfortunate can befall a scientific writer than
+11:02:16 <ibid>   to have one of the foundations of his edifice shaken after the work
+11:02:17 <ibid>   is finished."
+11:02:33 <ibid> - gottlob frege opening that appendix
+11:03:09 <shapr> I dunno, I think it'd be cool
+11:03:14 <Igloo_> Well, I don't mean digest, I mean a sort of summary with links to the detail. So I could just go through reading all the template meta-programming stuff, for example  :-)
+11:03:17 <shapr> Igloo: hah!
+11:03:28 <shapr> Igloo: we're just so cool you need to be around all the time, see?
+11:03:38 <Igloo_> That is *precisely* my problem
+11:03:40 <ibid> Igloo_: you mean #haskell weekly news? :-)
+11:03:45 <shapr> hey, good idea
+11:03:49 <Igloo_> Well, that and there are various other places I have to be at various times too
+11:04:01 <Igloo_> Well volunteered, ibid  :-)
+11:04:11 <shapr> step forward brave volunteer
+11:04:12 <ibid> Igloo_: i'm swamped
+11:04:14 * shapr  laughs
+11:04:31 <Igloo_> Sorry...well volunteered, swamped  :-)
+11:04:38 * shapr laughs more
+11:04:52 <shapr> that's evil :-)
+11:05:09 <ibid> Igloo_: on monday is my last lecture on popl, and i'm leaving to recover from the experience
+11:05:19 <Igloo_> Oh, anyone happen to know what I have to compile Java programs with for gdb to be able to debug them BTW?
+11:05:25 <shapr> taking one of those estonian cruises? ;-)
+11:05:28 <ibid> then i need to finish my msc thesis
+11:05:29 <Igloo_> (This is leading to Haskell code, I promise!)
+11:05:37 <ibid> shapr: no
+11:05:44 <shapr> aww
+11:05:47 <ibid> Igloo_: gcj?
+11:05:56 <shapr> yah, start with gcj
+11:06:07 <shapr> then note that AWT and Swing don't work with gcj
+11:06:16 <shapr> at least, they didn't last I checked
+11:06:38 <Igloo_> OK, ta
+11:07:08 <shapr> you could use DDD and jdb
+11:07:14 <Igloo_> Aarggh, that wants to install gcc 3 stuff. But not remove the 2.9x stuff, so it's probably safe
+11:07:22 <dark> I think gcj has parts of AWT but only a little bit of Swing.
+11:07:29 <raphael> anyone know what flags i need to give ghc to use implicit parameters? -fglasgow-exts aren't enough, it seems
+11:07:38 <raphael> isn't
+11:07:38 <shapr> it's especially handy to know that the the jvm-debug stuff works across tcp/ip sockets
+11:07:43 <Igloo_> shapr: jdb doesn't seem to be a Debian package?
+11:07:48 <shapr> it's not
+11:07:52 <shapr> java isn't DFSG
+11:08:01 <dark> I started on a Swing implementation for gcj, this was before I realized that Java sucked :)
+11:08:01 <Igloo_> Right, stuff that then  :-)
+11:08:18 <Igloo_> I'd have thought ddd could use gdb for debugging Java in the same way it can for C, anyway
+11:08:28 <shapr> you could use the blackdown debs
+11:08:33 <shapr> I think they include jdb
+11:08:42 <shapr> and they're up to jdk1.3.x
+11:08:44 <Igloo_> Or I could go the open source route  :-)
+11:09:01 <dark> Heh, but read the license if you use the blackdown debs.
+11:09:22 <shapr> jewel was working on plugging jrvm to gnu classpath... I could actually live with java again if that happens
+11:09:42 <shapr> at least, I wouldn't actively fight it
+11:10:46 * shapr ODs on chocolate
+11:11:08 * Igloo_ is only looking at Java because I have a zlib implementation for it that looks slightly less obfuscated than the C one
+11:24:43 <dark> A chocolate OD would usually require several kilograms.
+11:25:19 <Igloo_> In what timespan?
+11:25:42 <dark> Short, presumably :)
+11:25:45 <shapr> hah
+11:25:51 * shapr gets high from chocolate
+11:27:51 <Marvin--> meh, I want chocolate too
+11:28:00 * ibid gets zits from chocolate. also gets bigger from chocolate, also heartburn
+11:28:09 <ibid> chocolate is bad
+11:28:12 <dark> Hmm, I need a sorting function for elements that have only a partial ordering.  Are there such?  Would they be any cheaper than just defining (arbitrary) complete ordering and using a normal sort?
+11:28:22 <ibid> dark: topological sort?
+11:28:29 <dark> ibid: Never heard of that :)
+11:28:35 <ibid> dark: really?
+11:30:01 <dark> http://www.nist.gov/dads/HTML/topologcsort.html
+11:31:29 <Igloo_> You'd need to compare every element to every other element if you only have a partial order wouldn't you?
+11:31:30 * raphael goes out and buys chocolate
+11:31:42 <Marvin--> raphael: uh, I can use implicit parameters with -fglasgow-exts
+11:32:07 <raphael> Marvin--: you can? weird ... wonder what I'm doing wrong
+11:32:33 <Marvin--> Prelude> :t ?x
+11:32:33 <Marvin--> forall t. (?x :: t) => t
+11:32:49 <raphael> oh, but the problem is the 'with' construct
+11:33:25 <Marvin--> hmm, you're right
+11:33:26 <Marvin--> odd
+11:33:29 <raphael> supposedly its in ghc 5.02 and higher
+11:34:01 <raphael> Hughes refers to an example using with and says it will compile using 5.02 +
+11:35:18 <Marvin--> well, I'd better go buy some chocolate before I go nuts ;)
+11:35:24 <raphael> me too
+11:35:38 <dark> Igloo: Hmm.  I was hoping to make it _more_ efficient by not requiring a complete sort :)
+11:39:07 <Igloo_> Well if you have something like quicksort and your comparison function hasn't got a value for a set of elements then you're going to have to lump them into a set and call qsort recursively and then you have to worry about the possibility that one of them is < or > something in the other set (that the order was defined on) and merge the two correctly. My word that was badly explained.
+11:40:08 <dark> Igloo: I grasp it, though :)
+11:41:09 <Igloo_> If nothing is les than anything else you will definitely have to check all pairs
+11:46:50 * dark wonders if nhc98 (in Debian) is worth rescueing.  Some of those bugs look tricky.
+11:48:16 <Marvin--> raphael: wait a sec, maybe ghc reuses let bindings for implicit parameters?
+11:48:52 <Marvin--> raphael: indeed... if I define foo = ?x + 2, I can write  let ?x = 3 in foo
+11:52:42 <raphael> let ?x = 1 in let ?x = ?x + 1 in foo
+11:52:47 <raphael> prints 4
+11:52:52 <raphael> now that is evil
+11:53:01 <Marvin--> Still no feedback on the afp labs, and still no reply to my question about submission procedure for the project :(
+11:53:05 <Marvin--> raphael: extremely evil
+11:53:15 <Marvin--> raphael: it's called alpha conversion ;)
+11:55:19 <Marvin--> raphael: you can not, however do let { ?x = 1; ?x = ?x + 1 } in ?x
+11:55:27 <raphael> Marvin--: yeaaah ... (\x.x+2)(\x.x+1)1
+11:55:41 <raphael> no?
+11:55:50 <Marvin--> Unbound implicit parameter (?x :: a)
+11:56:03 <raphael> ah, of course. it is unbound.
+11:57:59 * shapr returns from going out to get more chocolate for his woman
+11:58:30 <shapr> there's *one* store still open to buy chocolate
+11:58:34 <shapr> barely made it
+11:59:01 <Marvin--> shapr: They close at ten?
+11:59:09 <shapr> yup
+11:59:23 <shapr> even the kioski closes at nine
+11:59:58 <shapr> one food store stays open till eight, everything else closes at 16:30
+12:00:03 <Marvin--> shapr: you've got to come visit when you've moved. Not that Boden is *a lot* closer to Göteborg than Finland, but still ;)
+12:00:06 * shapr lives in a very small town
+12:00:31 <shapr> yah, I'd like to come visit, try PairProgramming with Haskell maybe :-)
+12:00:49 <Marvin--> heh, we do that all the time
+12:00:57 <shapr> cool!
+12:01:20 * Heffalump did some PairProgramming with Oege on a plane fight recently, but in SML
+12:01:23 * shapr mailed the arrows quote to Hughes
+12:01:33 <shapr> I hope that isn't presumptuous
+12:01:46 <Heffalump> what quote?
+12:02:02 <shapr> the part about "Generalizing Arrows to Spears" and "to Nuclear Weapons"
+12:02:07 <Heffalump> lol
+12:02:13 * Heffalump disappears to cook sausages
+12:02:33 <shapr> closest I've been to PairProgramming in Haskell was the ICFP
+12:02:39 <shapr> I learned *lots* during those three days
+12:04:45 <Marvin--> ludde: Do you know what we're supposed to do re. submitting the project? I mean, raphael and I have shared a lab account for purpouse of handing in the labs...
+12:05:43 <ludde> hmm, no idea.
+12:05:55 <ludde> i made the labs on my own
+12:06:00 <ludde> so i'm not affected..
+12:06:05 <Marvin--> I have my own account too, but we used raphael's account for handing in labs
+12:06:14 <ludde> oh
+12:06:27 <ludde> but in that case, why not use your account for your project, and his account for his project?
+12:06:29 <Marvin--> so should we remove me from his personuppgifter file? but then, how will they know I've solved the labs too?
+12:06:34 <ludde> hrm
+12:06:40 <ludde> mail koen? :)
+12:06:46 <Marvin--> I did! Last Tuesday!
+12:07:04 <ludde> hrm
+12:07:10 <ludde> well
+12:07:17 <ludde> i guess it's okay if you use your account
+12:07:25 <ludde> i guess raphael's project will only contain his name
+12:07:32 <ludde> so they'll see that you didn't work on it
+12:07:44 <Marvin--> true
+12:08:03 <Marvin--> I find their lack of response to my e-mails disturbing :/
+12:08:23 <Marvin--> and we still haven't gotten any feedback on lab2 or the second handin of lab1
+12:08:29 <ludde> i mailed him last tuesday too
+12:08:39 <ludde> i got lab2 today
+12:08:58 <Marvin--> you got odd or even number?
+12:09:07 <ludde> 41
+12:09:19 <Marvin--> okay, so it's Jan-Willem who's correcting your labs too?
+12:09:25 <ludde> yep
+12:09:31 <ludde> gtg... cya
+12:10:23 <dark> Interesting density of dutch names :)
+12:10:53 <Marvin--> yeah, I couldn't believe my ears at the first lecture when he introduced Jan-Willem and said he was the assistant on the course :P
+12:11:29 <raphael> shapr: about the quote, it's quite alright, if he's upset about it he knows who i am :)
+14:00:13 --- topic: 'mo' nads than you || We put the Funk in Funktion || See logs @ http://tunes.org/~nef/logs/haskell/ || Gtk+HS  0.14.10 released http://www.cse.unsw.edu.au/~chak/haskell/gtk/ || ICFP is over <Erwin> Your mother asked you to write COM program? Who are you, Dilbert? || Ganesh's HaskPerl challenge: make Haskell look like line noise too!'
+14:00:13 --- topic: set by Heffalump on [Wed Oct 23 04:33:47 2002]
+14:00:13 --- names: list (clog ChoJin ibid andersca dblack o3 norpan Ig skylan mmc shreya jewel ludde Chilli ChilliX shreya_ smklsmkl Marvin-- Logan Igloo_ liiwi dennisb dark tetryl raphael engstad galority Heffalump)
+14:04:05 <Marvin--> "17 errors found"
+14:04:07 * Marvin-- sighs at LyX
+14:04:19 <Marvin--> "Missing { inserted"
+14:04:22 <Marvin--> "Missing } inserted"
+14:05:24 <Marvin--> rofl, I forgot that _ means subscript... HR_OK, HR_Decline and HR_Error turned out pretty weird
+14:05:35 <raphael> maybe I should just do away with implicit parameters and use STRef instead ... but that means monads in monads in monads in ...
+14:07:04 <raphael> WHOA! It works!
+14:07:06 <Heffalump> but ST isn't a monad transformer
+14:07:23 <Marvin--> raphael: what'd you do=
+14:07:24 <Marvin--> ?
+14:07:37 <raphael> nope, but I could wrap several State Threads in States ...
+14:07:55 <Marvin--> works as in works in ghc or as in works in hugs?
+14:07:59 <Heffalump> wdym?
+14:08:47 <raphael> works in hugs, and what I did was remove my type sigs and then carefully never returned any (potentially) polymorphic values :)
+14:09:08 <Marvin--> heh
+14:09:19 <raphael> I'm doing an efficient heap-based implementation of a modular algorithm for greedy heuristics on TSP
+14:09:38 <raphael> actually euclidean tsp, but that doesn't sound as cool
+14:09:45 <Heffalump> TSP?
+14:09:53 <raphael> travelling salesman problem
+14:11:04 <dark> I'd like to propose the solution of keeping the damn salesmen in one place and giving them telephones.
+14:11:18 <raphael> good idea :)
+14:11:27 <raphael> simple algorithm: id
+14:11:44 <Heffalump> lol
+14:11:50 <dark> data Ring = Ring Ring
+14:12:00 <Marvin--> dark: but then it wouldn't be TSP, it'd be SSP (Sitting Salesman Problem)
+14:12:08 <Marvin--> haha
+14:12:20 <raphael> could be Telephone Salesman Problem
+14:12:23 <Marvin--> true
+14:13:00 <Marvin--> damn, I've already written five pages
+14:13:45 <raphael> I have that problem. Idiots trying to sell me new telephone services call every other week.
+14:14:07 <dark> My mobile phone is blessedly free of that.  I do get occasional spam sms though.
+14:14:22 <Marvin--> raphael: that's known as the TP, Telemarketer Problem
+14:14:35 <Marvin--> the only known soluttion is to shoot them
+14:14:54 <Marvin--> well, HUP is a temporary solution
+14:15:21 <dark> Hm?  Shooting them is too much work.  Just pretend to order something, give your name as "Hastur Hastur Hastur", and wait.
+14:16:26 <raphael> or you write a script in Haskell with voice recognition, plug a little embedded device to your phone that blocks all calls from people it doesn't recognise .....
+14:16:58 <raphael> and then hope you know your machine learning algorithms
+14:17:47 * raphael oughta get some sleep soon
+14:18:44 <raphael> wonder if Observe can handle implicit parameters?
+14:21:28 <Marvin--> scary thought
+14:21:55 <Marvin--> Observe is creepy enough as it is
+14:22:53 <raphael> oh, now I get it.  you're supposed to write "let return () in ?x = ?x +1" ... doh! of course
+14:23:10 <raphael> with is just backwards let
+14:23:32 <Marvin--> uh
+14:23:45 <Marvin--> let return () in ???
+14:25:09 <raphael> except that you can't write that in a do statement ... ugh, my brain is turning to sludge ....
+14:25:52 <Marvin--> I would say parse error on let return () in
+14:26:44 <raphael> hmm ... I'm not reading this axiomatic semantics right.
+14:26:48 <raphael> these
+14:44:12 <Marvin--> w/b shapr
+14:44:35 <shapr> hiya marvin
+14:44:41 * shapr is trying to build his own monads
+14:44:54 <Marvin--> I'm trying to figure out how I'm going to fit this report in eight pages!
+14:45:10 <Marvin--> I'm already on six pages and I haven't talked anything about the plugins I've written
+14:45:30 <shapr> hah
+14:45:50 <Marvin--> and I haven't talked anything about what's missing and what should be added in order to make the implementation more useful
+14:45:56 <shapr> sounds like a good report to me
+14:46:05 <Marvin--> not to mention the conclusions :-)
+14:46:09 <shapr> ten point type, small margins :-)
+14:46:16 <shapr> single spaced
+14:46:37 <Marvin--> I don't know what size LyX is spitting out *checks*
+14:46:43 <dark> I expect the report will actually be better if you first write sixteen pages, then cut back to eight.
+14:46:50 <liiwi> shapr: gonads?
+14:46:52 <liiwi> shapr: http://www.albinoblacksheep.com/flash/weeee.html
+14:47:30 <Marvin--> meh, "font size: default"
+14:47:34 <shapr> I still don't have flash installed here :-)
+14:47:45 <shapr> yah, I agree with dark
+14:47:49 <Marvin--> dark: probably, but do I have the time? (quoth Voltaire again)
+14:48:08 <shapr> you have to hand this in tomorrow?
+14:48:23 <shapr> hey, it's winter time tomorrow
+14:48:24 <Marvin--> yes :)
+14:48:29 <shapr> in .fi it is
+14:48:36 * shapr dunno if all the countries around here do that
+14:50:21 <Marvin--> liiwi: hahahaha
+14:50:39 <Marvin--> shapr: I never know beforehand when it happens, I just check the computer clock in the morning ;)
+14:50:44 <Marvin--> liiwi: Weeeeeeeeeeeeeee
+14:51:54 <shapr> I need to be awake and energetic at 9am on wednesday, so I'm trying to adjust back to that kind of schedule
+14:52:20 <Marvin--> hehe
+14:52:29 <shapr> it sucks, I'm a night person
+14:54:51 <raphael> ah, good, an extra hour to work on my project :/
+14:57:42 <raphael> why 'with' is not working in ghc: "I would like to replace "with" and "dlet" with "let". But SimonPJ said
+14:57:42 <raphael> he won't do it in ghc unless Hugs does it too, and Mark P Jones said
+14:57:42 <raphael> he won't do it in Hugs now (without deep reasons: no people/hours to
+14:57:42 <raphael> do that, and no plans to release next Hugs version this year)."
+14:57:43 <Marvin--> looks like the default font size is 10pt
+14:58:25 <Marvin--> uh... right.. but ghc doesn't use with?
+14:58:53 <raphael> dunno. seems there's no agreement on how to do what, and people are waiting for someone else to do it first
+14:59:03 <raphael> :P
+14:59:13 <raphael> (this was six months aog)
+15:00:11 <Marvin--> well, that's what you get if it isn't standardized...
+15:00:29 <raphael> standard? it's still experimental ....
+15:00:33 <Marvin--> exactly
+15:00:42 <Marvin--> I have no idea how far off Haskell2 is
+15:01:11 <Heffalump> a long way
+15:01:15 * shapr finds a really cool quote in python's catalog-sig
+15:01:17 <Heffalump> noone's prepared to lead an effort
+15:01:18 <Marvin--> that's what I thought
+15:01:40 <Marvin--> bah, I'll go bug Koen and John about it ;)
+15:01:44 <Heffalump> when we were at ICFP Koen was saying that he thought someone should
+15:01:52 <Heffalump> but that noone was volunteering
+15:02:06 <raphael> heh
+15:02:23 <shapr> actually, that fits this quote
+15:02:33 <shapr> > /The chicken and egg issue. It's difficult to reach the critical mass///
+15:02:33 <shapr> > /where the system is actually used.///
+15:02:33 <shapr> > It might be useful to see how CPAN got started.
+15:02:33 <shapr> The standard perl way.  A huge amount of energy, a lot of people actively
+15:02:33 <shapr> working together, and a lack of fear of hacks.  CPAN is nothing but a
+15:02:34 <shapr> replicated FTP server w/ a bit of authentication and a lot of library science
+15:02:36 <shapr> =).
+15:02:58 <shapr> python catalog-sig have been trying to get a python version running for *years*
+15:03:12 <Marvin--> heh
+15:03:28 <shapr> as they say later in the thread, nobody wants to manage
+15:03:28 <Marvin--> yeah, some of the python sigs have a tendency of over-engineering
+15:03:41 <Heffalump> the problem with Haskell2 is that it needs someone to lead it
+15:03:41 <shapr> because programmers see managing as work, not fun.
+15:04:17 <shapr> who could do the best job?
+15:04:35 <Heffalump> SimonPJ, I guess
+15:04:47 <Heffalump> alternatively John Hughes
+15:04:48 <Marvin--> but he doesn't wnat to?
+15:04:52 <Heffalump> no
+15:04:54 <Igloo_> I wouldn't be surprised to see him thinking about it after the CUP thing is over
+15:04:58 <Heffalump> I would.
+15:04:58 <Igloo_> Ah, OK
+15:05:05 <Heffalump> (from what Koen and others have said)
+15:05:09 <Marvin--> CUP?
+15:05:16 <Heffalump> publishing the Haskell report as a book
+15:05:17 <shapr> did SimonPJ lead Haskell98 ?
+15:05:20 <Marvin--> oh
+15:05:29 <Heffalump> well, he and someone else were the editors
+15:05:32 <Heffalump> (Hughes?)
+15:05:36 <Marvin--> I think so
+15:05:40 * Igloo_ would do it if someone paid me and didn't mind me being crap  :-)
+15:05:45 * shapr laughs
+15:05:50 <Heffalump> :-)
+15:06:00 <shapr> so, we take up a collection to pay Igloo to make Haskell2 happen
+15:06:06 * shapr grins
+15:06:19 <Igloo_> "paid me" isn't quite as strong a condition as I intended  :-)
+15:06:34 <Marvin--> yep, SimonPJ and Hughes
+15:06:41 <shapr> should be "paid me lots" right?
+15:06:54 <Igloo_> Indeed
+15:06:55 <raphael> Hughes is on several comittees and a chairman of the IFIP ... maybe he has enough on his table. Just like SPJ and the rest
+15:07:20 <raphael> unfortunate, but guess that's how it works
+15:07:43 <shapr> we could do it the IETF way
+15:07:53 <Marvin--> shapr: what, argue about it for years and years?
+15:08:01 <shapr> nah, "rough consensus, running code"
+15:08:09 <raphael> *dramatic music* So, brothers and sisters, it is up to *us* to bring Haskell2 to the world!!
+15:08:09 <shapr> the CPAN way too
+15:08:10 <Marvin--> and never get further than RFC
+15:08:25 <shapr> well, throw out a Haskell2 standard, see how many people flame it.
+15:08:35 <shapr> the parts that don't burn away are Haskell2 :-)
+15:08:35 <Marvin--> heh, I shudder at thinking of the report... "Oh yeah, this is cool too, we gotta have this
+15:08:46 <andersca> haha
+15:08:54 <andersca> PL/I
+15:09:01 <raphael> PL/H
+15:09:10 <Marvin--> but a *functional* PL/I
+15:09:12 <shapr> Algol.. 68 ?
+15:09:28 <raphael> let's use a special keyboard to be extra 1337 as well
+15:09:43 <Marvin--> no really, a good start would be to take the intersection of what ghc and hugs can do and drop the most hideously experimental parts and see where that leads
+15:09:55 <shapr> that's true
+15:09:58 <Marvin--> raphael: yay, real \lambdas and \rightarrow and \leftarrow
+15:10:15 <Marvin--> "The Haskell keyboard"
+15:10:24 <Marvin--> "also works for limited TeX typesetting"
+15:10:37 <shapr> since it uses Unicode, our keyboard is slightly smaller than a dining room table
+15:10:38 <raphael> "and bashing stuff up."
+15:10:52 <Heffalump> none of us know enough about implementing
+15:10:56 <Marvin--> wtf is the sound outdoors...
+15:11:23 <Igloo_> Does 2^20/2^5 keys fit on a dining room table?
+15:11:33 <Heffalump> sorry??
+15:11:36 * shapr opens ghci
+15:11:39 <raphael> sure we do.  uuuh ... ok, an easy way to implement this is to just build lots of data structures and then provide a simple run
+15:11:44 <andersca> like http://carbon.hemmet.chalmers.se/Screenshots/unilang.png
+15:11:47 <Heffalump> 2^15 = 32768 - what kind of key?
+15:11:51 <raphael> lets say .... run :: ()
+15:12:02 <Heffalump> there's no way the CPAN way would work for a language standard
+15:12:07 <Marvin--> maybe it's just the heavy wind playing tricks on me
+15:12:07 <Igloo_> Actually, there would be multiple instances of the shifting keys
+15:12:14 <Igloo_> Computer keyboard keys
+15:12:36 <shapr> Heff: well, it's be closer than we are now :-)
+15:12:37 <Heffalump> is there a beginning to that conversation that I'm missing somewhere?
+15:12:44 <Igloo_> [23:10] < shapr> since it uses Unicode, our keyboard is slightly smaller than a 
+15:12:47 <Igloo_>                  dining room table
+15:12:49 <Heffalump> ahhh.
+15:13:16 <Heffalump> shapr: well, if an attempt made that way actually took off at all, IMO it'd set things back by getting in the way of a seriou seffort
+15:13:21 <Marvin--> re data structures... are there any extensions in ghc that don't reduce to the core language anyway?
+15:13:45 <shapr> we could just call Core Haskell2 and everything else extensions ;-)
+15:14:06 <Marvin--> shapr: the core language is basically lambda calculus, not Haskell98
+15:14:13 <shapr> yah, I know...
+15:14:28 <Marvin--> Heffalump: well, we could always have the banner "yeah, this sucks, you do it better!"
+15:14:29 <shapr> not a serious suggestion :-)
+15:14:39 <shapr> right, might actually start a Haskell2 project.
+15:14:55 <Marvin--> "If you don't stop us soon, Haskell will get bad publicity over our stupidity"
+15:14:58 * shapr laughs
+15:15:02 * shapr laughs more
+15:15:08 <Heffalump> there were 7 years between SML 90 and SML 97
+15:15:18 <Marvin--> Heffalump: really? ;)
+15:15:21 <Heffalump> :-)
+15:15:33 <Heffalump> but Haskell has so many random extensions that maybe we need a new version quicker than that
+15:15:34 <shapr> yah, but Haskell has more users, so we need standards, and media attention especially.
+15:15:42 <Marvin--> well, it's soon 2003...
+15:15:46 <Heffalump> ML does have a lot of users
+15:15:57 <Heffalump> well, SML 97 is a fairly minor revision of SML 90
+15:17:13 <shapr> well, we gotta do something if we want Haskell to gain critical mass so I can get more paying gigs with it.
+15:17:16 <shapr> :)
+15:17:55 <shapr> we could resurrect the Haskell Wishlist
+15:18:00 <Marvin--> raphael: should we reimplement the interpreter in the semantics course in a few different languages and see what speeds we'll get? :)
+15:18:40 <Marvin--> raphael: e.g. C, Python, Java...
+15:20:01 <shapr> Heffalump: the extensions are getting spiffier, if there isn't a new standard soon, people will stop worrying about following the existing one.
+15:20:07 <shapr> that's happening to me
+15:20:27 <shapr> I'm just trying to stick with GHC compatibility
+15:20:38 <Igloo_> That can be partially addressed with addendums like the FFI one
+15:20:44 <raphael> Marvin--: you mean you have the time for that?
+15:20:54 <Igloo_> They should be too intrusive, though
+15:21:36 <Heffalump> shapr: that was what worrying Koen too
+15:22:19 <shapr> maybe an interim standard?
+15:22:22 <dark> Same here, I'm writing for GHC, not Haskell.
+15:22:58 * Igloo_ writes H 98 and H 98 + FFI
+15:23:00 <Marvin--> raphael: no :)
+15:23:21 <Heffalump> MAG is H98
+15:23:39 <Igloo_> What did the ICFP entry use from GHC in the end? Was it just Socket?
+15:23:46 <dark> Igloo: I think syntaxwise I do the same, but I depend on GHC libraries.
+15:23:49 <Marvin--> I'm too deeply in love with hiearchial modules to use something else than ghc
+15:23:56 <dark> Oh, yeah, those.
+15:24:15 <dark> Hierarchical modules could be another addendum.
+15:24:29 <ludde> woo
+15:24:32 <ludde> me cracked a program!
+15:24:33 <Heffalump> they're a sort of implicit addendum, I think
+15:24:34 <ludde> err
+15:24:35 * ludde cracked a program!
+15:24:40 <Marvin--> ludde: ?
+15:24:45 <dark> Though, by themselves they're not useful -- they'd have to include a new library specification.
+15:24:52 <dark> And about THAT we could argue for years :)
+15:24:55 <Marvin--> but does hugs do hierarchial modules?
+15:24:55 <ludde> Marvin--: I made a crack for a program :)
+15:24:56 <shapr> anyone here could switch to nhc or hugs without losing something they want to use?
+15:25:00 <Heffalump> in the sense that they're very non-intrusive, very simple, and every implementation is committed to supporting them
+15:25:00 <Marvin--> ludde: oh
+15:25:09 <dark> shapr: I don't even know.
+15:25:09 <Heffalump> the new release of hugs should, I think
+15:25:12 <ludde> Marvin--: a friend's program
+15:25:14 <Heffalump> shapr: MAG runs in hugs
+15:25:21 <Heffalump> and builds with nhc
+15:25:21 <dark> Still, standard or not, I can't do without FiniteMap.
+15:25:32 <Marvin--> ludde: what is he protecting that you want to crack?
+15:25:36 <dark> And that doesn't sound like something that'll make it into the standard library.
+15:25:47 <Marvin--> dark: why not?
+15:25:54 <ludde> Marvin--: actually, not a friend, but a person on an IRC channel where I am. He works at a company that made this program.
+15:26:01 <Marvin--> ludde: heh
+15:26:06 <dark> Marvin: all the rest of the standard library can be defined in a few lines of code.
+15:26:07 <Igloo_> shapr: I tested Haskell2LaTeX in all 3 implementations except when bugs in the implementations made it impractical
+15:26:14 <dark> Marvin: Either that or it's completely implementation-dependent.
+15:26:17 <ludde> Marvin--: and he has spent lots of time making it uncrackable :)
+15:26:24 <shapr> Igloo: cool :-)
+15:26:56 <shapr> Igloo: ok, evil question.... could you have done things better with ghc extensions?
+15:27:23 <shapr> probably not a fair question :-)
+15:27:30 <Marvin--> haha
+15:27:38 <dark> Hmm, I guess that the FiniteMap operations could be defined in a few lines of code if they're assumed to use [(a, b)] lookup lists.
+15:27:51 * shapr withdraws his question
+15:27:55 * Igloo_ isn't familiar with the extensions so I'm not really sure
+15:28:06 <ludde> bleh, I should really concentrate on my report instead :(
+15:28:18 <Heffalump> dark: there's modules around that you can use independently of GHC
+15:28:29 <Heffalump> the project I'm referring to (MAG) uses one
+15:28:52 <Marvin--> is anyone still using hbc?
+15:29:12 <dark> So far I haven't seen any reason to use something else than ghc, though.
+15:29:32 <Igloo_> hat
+15:31:07 <shapr> hat is spiffy
+15:31:56 <Marvin--> hat?
+15:33:32 * shapr looks for url
+15:33:48 <shapr> http://www.cs.york.ac.uk/fp/hat/
+15:35:35 <shapr> in any case, I'd like to see a Haskell2 standard.
+15:35:43 <Marvin--> cool
+15:36:04 <Igloo_> Oh, and Haskell2LaTeX will break if you stray too far  :-)
+15:36:14 <Marvin--> heh
+15:40:24 <Marvin--> right, now I've written the introduction, a chapter about dynamic loading, and a chapter that briefly discusses the implementation of the plugin layer
+15:40:41 <Marvin--> five and a half pages
+15:40:45 * Marvin-- is getting nervous
+15:41:01 <Marvin--> I have yet to talk about the plugins I've written, about what's missing, and my conclusions
+15:41:05 <Heffalump> is there a length limit?
+15:41:15 <Marvin--> The report is supposed to be six to eight pages
+15:41:34 <Marvin--> I don't think it's a very hard limit, but I like to keep within the recommended limits
+15:41:57 <Marvin--> Writing too much is almost worse than writing too little (well, depending on the quality of it of course)
+15:42:06 <Marvin--> but I think I'll call it a day now
+15:43:03 * raphael goes to bed
+15:51:44 <ludde> Marvin--: oh, that raphael is your lab partner? another chalmers person in this channel then :)
+15:54:27 <Marvin--> ludde: *GU*
+15:54:33 <Marvin--> :)
+15:54:52 <ludde> whatever
+15:54:56 <ludde> :)
+15:55:08 <ludde> is that the guy with camouflage clothes (i think)
+15:55:35 <ludde> maybe not
+15:55:41 <shapr> what's the difference between gu and chalmers?
+15:55:53 <shapr> goteborg uni /= chalmers, yes?
+15:55:59 <ludde> two different unis
+15:56:07 <ludde> both in gbg
+15:56:20 <ludde> chalmers has only tech subjects
+15:56:24 <ludde> while gu is much wider
+15:56:25 <Marvin--> ludde: heh, sometimes he wears camouflage jeans
+15:56:39 <ludde> Marvin--: ok, i guess i know who it is then
+15:56:41 <ludde> :)
+15:56:51 <Marvin--> shapr: the distinction between GU and Chalmers when it comes to computer science is pretty small though
+15:56:53 * shapr would like to meet #haskell people in person sometime
+15:57:10 <Marvin--> though we at GU like to point out that the Chalmers program is computer *engineering* ;9
+15:57:41 <Heffalump> we should all meet in Uppsala next year
+15:57:42 <shapr> is that what John Hughes does?
+15:57:49 <shapr> Uppsala??
+15:57:52 <shapr> what's happening there?
+15:58:10 <Heffalump> ICFP
+15:58:19 <shapr> in Uppsala??
+15:58:21 * shapr is shocked
+15:58:24 <shapr> cool!
+15:58:24 <ludde> Marvin--: my program is "computer science AND engineering"
+15:58:26 <Igloo_> And more importantly what are the chances of someone paying for me to go?
+15:58:31 <Heffalump> Igloo_: write a paper for it
+15:58:37 <Heffalump> that's what I hope to do :-)
+15:58:47 <Igloo_> I think Oege suggested I should for some ICFP, but I can't remember what year
+15:59:03 <Marvin--> ICFP in Uppsala? Why!? :)
+15:59:07 <Heffalump> his plans don't last all that long once made
+15:59:14 <Heffalump> I think it's Uppsala, anyway
+15:59:15 <Igloo_> Ah, 2003
+16:00:02 <shapr> if it's in Uppsala, I'll show up.
+16:00:03 <Marvin--> I'm so going :)
+16:00:07 <shapr> yah, me too
+16:00:13 <Heffalump> how close is shapr to Uppsala, then?
+16:00:22 <Heffalump> or will he be, anyway
+16:00:30 <shapr> not very close, but *much* closer than Pittsburgh
+16:00:45 <shapr> Marvin: how far from sthm to Lulea?
+16:00:49 * shapr isn't quite sure
+16:00:53 <shapr> I think it's 800km
+16:01:02 <shapr> ~ overnight on the train
+16:01:08 <Heffalump> why are you moving to the far north of Sweden, anyway?
+16:01:22 <shapr> it's south from here :-)
+16:01:32 <Heffalump> really? wow.
+16:01:38 <Marvin--> shapr: I know that Göteborg <-> Umeå is overnight train, Stockholm <-> Luleå should be roughly the same
+16:01:39 * Heffalump looks for a map
+16:02:03 <shapr> I am now living where sweden, finland, and the gulf of bothnia touch
+16:02:09 <shapr> five minutes walk to the water
+16:02:39 <Heffalump> don't they only touch in the south?
+16:02:43 <Heffalump> oh, no
+16:02:45 <shapr> marvin: cool, thanks
+16:02:49 * Heffalump unconfuses himself
+16:02:51 <Heffalump> right.
+16:03:07 <shapr> Lulea is southwest of here
+16:04:26 <shapr> ICFP in Uppsala will be great :-)
+16:06:30 <Marvin--> if all goes well, I'll be a PhD student by then *hopes it possible*
+16:09:57 <shapr> if all goes well I'll be a bachelor's student by then =)
+16:10:40 <shapr> swedish classes are more important though
+16:10:44 <shapr> jag ar american!
+16:10:54 <Igloo_> If all goes well I'll not have been thrown out of the university by then
+16:11:04 * shapr grins
+16:11:24 <shapr> igloo: what's your next step?
+16:12:04 <Igloo_> To getting thrown out? Refusing to leave comlab during fire brigade strikes
+16:12:13 <Igloo_> For my dPhil? Writing a paper for ICFP 2003
+16:12:54 * shapr grins
+16:13:07 <shapr> any idea what your paper will be about?
+16:13:41 <Igloo_> At this stage I would have to guess http://web.comlab.ox.ac.uk/oucl/work/ian.lynagh/Mandelbrot/
+16:13:59 <Igloo_> But that requires me making it happen  :-)
+16:14:25 <Heffalump> you're missing the word "speedup" on that page.
+16:14:38 <Igloo_> Oh, so I am. Ta!
+16:14:39 <Heffalump> it makes it somewhat confusing.
+16:14:40 <shapr> yah, need speed
+16:15:21 <shapr> that's a neat idea
+16:15:35 <Igloo_> Yes, but more importantly it makes pretty pictures
+16:15:50 <shapr> yah it does, always important
+16:16:10 <shapr> can Mandelbrot be memoized?
+16:16:25 <Igloo_> Wouldn't have thought so
+16:16:53 <Igloo_> The equation is z^2+c, so even if z is the same c will be different
+16:17:04 <Igloo_> (c being the coordinates of the point in question)
+16:17:08 <shapr> I wonder if any optimizer could figure out that the output is symmetrical and automirror it
+16:17:37 <Heffalump> I'd be impressed
+16:19:44 <Heffalump> hmm, want a CGI (or something) to automatically look inside tarballs on the comlab web pages
+16:23:01 * shapr could go for a sheperd's pie
+16:23:22 <shapr> or some lucasaid
+16:23:35 <shapr> lucasade?
+16:23:39 * shapr isn't sure how it's spelled
+16:23:59 * Igloo_ sometimes untars mine, but CBA to from a real webpage rather than a directory listing
+16:26:08 <shapr> CBA?
+16:26:21 <Igloo_> Can't Be Arsed
+16:26:53 <shapr> heh
+16:26:56 <shapr> ok :-)
+16:27:39 <shapr> what about genetic algorithms doing Burstall-Darlington transforms on existing via Template Haskell
+16:27:41 <shapr> ?
+16:27:47 <shapr> that could be entertaining
+16:28:12 <Heffalump> Oege had the idea of using the random data from QuickCheck to measure the performance of transformed programs
+16:28:19 <shapr> oh neat!
+16:28:22 <shapr> I like it!
+16:28:31 <Heffalump> I didn't when he first mentioned it, but it's growing on me.
+16:28:44 <shapr> I think QuickCheck is a very powerful tool
+16:28:53 <Heffalump> so you've said :-)
+16:28:55 <Igloo_> shapr: I think you've mentioned that before but I can't remember what it is
+16:29:14 <Heffalump> Igloo_: what what is? Burstall-Darlington transforms?
+16:29:40 <Igloo_> Yup
+16:29:49 <shapr> just a way of changing code into more efficient version of the code
+16:29:59 <shapr> turning a multi-pass alg into a single-pass version for example
+16:30:02 <Heffalump> fold/unfold transformations
+16:30:15 <shapr> the lapalm book said that some compilers can do it
+16:30:22 <shapr> "lapalme"
+16:30:22 <Heffalump> http://www.acm.org/pubs/articles/journals/jacm/1977-24-1/p44-burstall/p44-burstall.pdf
+16:30:36 <Heffalump> you'll only be able to download the pdf from inside .ox.ac.uk or somewhere else that subscribes
+16:31:04 <Heffalump> Igloo_: do you remember the first chapter of my thesis, talking about the fold/unfold procedure?
+16:31:15 <shapr> lapalme and rabhi will show an unoptimized and very clear version of an algorithm, and then they turn it inside out, and do other evil stuff to it, and then it's waaaay more efficient and hard to recognize.
+16:31:48 <shapr> coolest part about that book is that I've found I can apply BD-transforms to Python code as well
+16:32:20 <shapr> so I figure it must be a general purpose tool
+16:32:35 <Heffalump> they're fairly general, but the problem is always one of control
+16:32:47 <shapr> ?
+16:32:52 <shapr> how so?
+16:33:08 <Igloo_> Only vaguely
+16:33:09 <Heffalump> well, when do you stop unfolding?
+16:33:22 <Heffalump> Igloo_: ok, well it's that :-) You could look at my thesis or that paper to find out about them.
+16:33:47 <shapr> I haven't hit that yet
+16:33:50 <Igloo_> :-)
+16:34:02 <shapr> I just do it once or twice when I see obvious wastage
+16:34:14 <Heffalump> shapr: sure, but if you want an automatic system to do it..
+16:34:17 <shapr> that's true
+16:34:18 <shapr> good point
+16:34:37 <Heffalump> one of the main points of my thesis is a way of getting round that for a specific set of circumstances
+16:34:47 <shapr> cool
+16:34:56 * shapr adds that to stack of things to read
+16:35:27 <Heffalump> my thesis? I wouldn't bother, it's not really hugely generally applicable.
+16:35:46 <Heffalump> Basically it's about neat transformations you can do do certain (not really very many) Haskell programs
+16:36:30 <shapr> well, it's in my "in" directory now
+16:38:28 * shapr likes the open-ended learning potential of #haskell
+16:40:28 * Heffalump watches a server he helps run get slashdotted
+16:40:37 <shapr> what for?
+16:40:55 <shapr> aha
+16:41:04 <shapr> Oxford Union
+16:41:08 <Heffalump> yeah
+16:41:12 <Heffalump> the "pictures like this" link
+16:41:59 <shapr> I want that T-Shirt
+16:42:04 <Heffalump> heh
+16:42:30 * shapr has a major problem with current copyright law
+16:42:37 * shapr is also a music addict :-/
+16:42:55 <Heffalump> I'd be reasonably happy with it if the DMCA was repealed and some EULAs were tested in court and found to be illegal
+16:45:46 <Marvin--> 'Hilary Rosen asks "Put up your hand if you download and burn music" (most hands go up). She then asks "Keep you hand up if you buy more music because of it" (many stay up). She gets worried and immediately asks some different and confusing set of people to put their hands up, causing everyone to look miffed, and everyone putting their hand down)'
+16:45:47 <Marvin--> heh
+16:46:36 <shapr> http://www.geekstyle.co.uk/images/corrupt.jpg
+16:46:53 <shapr> btw, I accidentally purchase a copy-protected CD two days ago
+16:47:14 <Heffalump> did you take it back?
+16:47:18 <shapr> happily, I had no trouble ripping it onto my drive.
+16:47:28 <Heffalump> you should always take them back and demand refunds.
+16:47:31 <shapr> I didn't realize it was copy-protected till I tried to read the included data track
+16:47:35 <Heffalump> put them off selling them
+16:48:03 <shapr> I don't download music, nor do I upload it. I choose to obey the law, no matter how stupid it is.
+16:48:18 <shapr> censoring linux kernel changelogs is just stupid though.
+16:48:19 <Marvin--> you could still return it
+16:48:30 <shapr> good point
+16:48:38 <Heffalump> I think that's just Alan Cox trying to make a point
+16:48:43 <shapr> he's right though.
+16:48:49 <Heffalump> it's not really necessary, and I doubt he actually thinks it is either
+16:49:29 <shapr> felt-tipped pens can break the Sony copyprotection
+16:51:42 <Marvin--> http://alumni.ox.compsoc.net/~agk/photos/CDR/full/C0346.jpg  Alan Cox looking good as usual
+16:52:15 <shapr> geeks are the opposite of the fashion industry
+16:52:28 <shapr> full head, empty body
+16:56:57 <Marvin--> oh heck, I really should go to bed
+16:58:00 <dark> I'd like to take a stand on the crippled-CD thing, but I rarely buy CDs anyway :)
+16:58:31 <dark> I made a point of it when buying the last Nightwish CD, though.
+16:58:50 <Marvin--> it was crippled?
+16:59:06 <dark> There was a crippled version with an extra video track, and a non-crippled version.
+16:59:20 <Marvin--> heh
+16:59:21 <dark> I think they were testing the waters, which makes it even more important to make a point :)
+16:59:45 <dark> Unfortunately the crippled version sold out in a week or so, so they probably got the wrong message.  (I bet it was collectors going for the extra track)
+16:59:59 <Marvin--> damn
+17:00:13 <Marvin--> well, I'm off to bed
+17:02:24 * shapr goes off to play CS for a bit
+17:25:07 <dark> resolve_changes :: FiniteMap FilePath FilePath -> FilePath -> FilePath -> Change FilePath -> (FilePath, FilePath)
+17:25:09 * dark feels slightly ill.
+17:25:17 <Heffalump> :-)
+17:25:23 <Heffalump> I've made much worse type signatures than that
+17:25:30 <Heffalump> but maybe not with the same name repeated quite so many times
+17:25:49 <dark> At least this one doesn't have just "a", "b", and "m" while being of the same length :)
+17:26:02 <Heffalump> :-)
+17:28:40 <dark> Hmm... I guess, if a function takes lots of same-type arguments and there's a danger of getting them mixed up, it might make sense to define a record type for it.
+17:28:52 <dark> That effectively uncurries the function, though.
+17:29:56 <Heffalump> well, most of your arguments are different types
+17:30:10 <Heffalump> it would be nice if record arguments could be curried
+17:30:29 <Heffalump> e.g. foo :: { a :: X, b :: Y } -> Z
+17:30:41 <Heffalump> foo { a = x } :: { b :: Y } -> Z
+17:30:51 <Heffalump> and foo { b = y } :: { a :: X } -> Z
+17:31:48 <dark> Argh, it needs another FilePath :-)
+17:32:26 <dark> Hmm, that would be like currying data constructors.
+17:32:43 <Heffalump> you can curry data constructors
+17:32:59 <dark> Hmm :)  I think I actually used that without ever stopping to think about it.
+17:33:20 <Heffalump> well, they're just functions you can pattern-match on too, really
+17:33:54 <dark> You can curry record _types_ then, just not in record notation.
+17:34:07 <Heffalump> explain?
+17:34:53 <dark> data Foo = Foo { a, b :: Int }
+17:34:59 <dark> (Foo 4)
+17:35:06 <Heffalump> that's possible?
+17:35:22 <dark> Yeah, record types can be pattern-matched as normal constructors, with their arguments in order of declaration.
+17:35:39 <dark> I _think_ they can also be constructed that way, I don't know if I ever tried though :)
+17:35:44 <Heffalump> hmm.
+17:35:51 <Heffalump> yes, looks like they can be.
+17:35:56 * Heffalump doesn't like that.
+17:35:58 <Heffalump> asking for trouble, it is
+17:36:06 <dark> It means a dependency on their argument order.
+17:36:12 <Heffalump> and it doesn't help with adding arguments in the wrong order :-)
+17:36:28 <dark> I used to think it was the only way to pattern-match on them :)
+17:36:37 <dark> But if it isn't, then I guess currying is the only use for that.
+17:36:55 <dark> And, of course, it's nice that the compiler can desugar record types that way.
+17:37:17 <Heffalump> sure, but it shouldn't be exposed in the language
+17:38:10 <dark> Hmm, I think everything else is exposed that way.
+17:38:14 <dark> Except "deriving" clauses.
+17:39:01 <dark> Core syntax is valid Haskell, is it not?
+17:41:39 <Heffalump> no
+17:42:34 <Heffalump> unless we're talking about two different things
+17:43:06 <dark> I'm taking about the stuff dumped by --show-iface :)
+17:43:48 <Heffalump> isn't how do I make that work?
+17:44:35 <dark> Erm, parse error
+17:44:47 <Heffalump> sorry
+17:44:48 <Heffalump> s/isn't //
+17:44:54 <Heffalump> I started saying something else :-)
+17:44:56 <dark> ghc --show-iface foo.hi
+17:45:18 <dark> It shows inlined functions on some modules.
+17:45:51 <Heffalump> that's definitely not valid Haskell.
+17:46:02 <Heffalump> 1 main :: GHC.IOBase.IO ();
+17:46:11 <dark> Oh, I was wondering where my inlined functions went, but I'm compiling without -O :)
+17:46:17 <dark> I got worried about not_null not being inlined.
+17:46:57 <dark> Heffalump: Well, it's marked up with interface versioning numbers.
+18:15:14 <dark> resolve_changes is a horrible function, but it fits in 24 lines :)
+18:16:19 <dark> If I have a function that produces (a, b) tuples, and another that consumes (b, a) tuples, I wonder if ghc can be smart enough to reverse the output of the first function in the first place.
+18:16:40 <dark> i.e. completely fold in the "swap" I put between them.
+18:22:31 <Heffalump> well, that's basically inlining
+18:22:38 <Heffalump> and pretty simple inlining at that
+19:36:20 --- mode: brunner.freenode.net set +n

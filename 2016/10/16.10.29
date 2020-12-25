@@ -1,0 +1,1847 @@
+00:00:22 <grantwu> I guess Haskell threads are cheap
+00:00:59 <EvanR> looks like each job has its own runner
+00:01:15 <EvanR> not because of async exceptions, but because of regular exceptions in the job itself
+00:01:54 <EvanR> which it doesnt seem to be dealing with
+00:02:06 <EvanR> cron would send you an error report
+00:02:50 <EvanR> yes 10 threads for 10 jobs mostly sleeping is nothing
+00:04:38 <grantwu> Currently reading this, this seems helpful https://www.fpcomplete.com/blog/2016/06/async-exceptions-stm-deadlocks
+00:05:09 <EvanR> k this cron lib looks kind of underwhelming
+00:05:34 <EvanR> its almost just doing a silly loop with delay
+00:06:53 <grantwu> Is that bad?
+00:07:04 <EvanR> its just that very robust
+00:07:08 <grantwu> I mean... well yes, it's not great but
+00:07:27 <grantwu> Why isn't it robust?  Doesn't the whole forking off threads thing fix that
+00:07:39 * hackagebot ivory-backend-c 0.1.0.4 - Ivory C backend.  https://hackage.haskell.org/package/ivory-backend-c-0.1.0.4 (LeePike)
+00:07:39 * hackagebot ivory-eval 0.1.0.4 - Simple concrete evaluator for Ivory programs  https://hackage.haskell.org/package/ivory-eval-0.1.0.4 (LeePike)
+00:07:42 <EvanR> how do you change the schedule?
+00:07:52 * grantwu scratches head
+00:08:04 <grantwu> You don't, I suppose
+00:08:12 <grantwu> Thankfully I have no need to change the schedule
+00:10:00 <EvanR> yeah forkIOWithUnmask, restore, and all that, the concurrency haskell paper still seems pretty good reference for that
+00:10:07 <EvanR> concurrent haskell
+00:10:55 <grantwu> I am kind of unsure what the heck is going on in findNextMinuteDelay
+00:11:05 <grantwu> There appears to be parsing happening?
+00:12:06 <grantwu> Oh, this is to support the cron functionality, I think
+00:13:08 <grantwu> Yeah I think busy-wait with Data.Time.Clock is strictly better for my needs
+00:14:16 <grantwu> Oh, hrm... I probably want to kill threads if they take too long...
+00:15:55 <EvanR> heh
+00:16:11 <EvanR> System.Timeout (more async exceptions!)
+00:16:38 <EvanR> except im not sure if that works when youre blocked on an ffi call
+00:17:02 <EvanR> that blog post... yeesh
+00:17:50 <grantwu> Lol yeah I mainly found the "Synchronous vs Asynchronous exceptions" part helpful
+00:18:28 <grantwu> The "Hrm, here's this super hacky way to workaroud deadlock detection, and this unreproducible bug" part less so
+00:19:30 <lacrimosa> hi everyone
+00:20:22 <grantwu> Hello
+00:21:16 <EvanR> i agree with the behavior they were getting
+00:22:14 <EvanR> something about unsafePerformIO
+00:22:18 <EvanR> which i didnt get
+00:27:12 <haskell865> Why does my function newBunch have an infinite loop? http://lpaste.net/312726
+00:27:45 <haskell865> if my list is finite, it's working
+00:27:53 <EvanR> mapM has to go through the whole list to give you the final answer
+00:28:11 <haskell865> even with Control.Monad.State.Lazy?
+00:28:20 <EvanR> yes
+00:29:21 <EvanR> the answer depends on running infinity state changing steps that depends on all previous steps
+00:30:24 <EvanR> er, wait
+00:31:10 <EvanR> your code doesnt show what you do with newBunch
+00:31:44 <c_wraith> I think it depends on m
+00:32:01 <c_wraith> if it's Identity, it might stream
+00:32:05 <EvanR> oh yeah that too
+00:32:08 <c_wraith> If it's IO, it certainly won't
+00:32:28 <haskell865> oooooh, well I was testing it in ghci so maybe that's the problem
+00:32:47 <EvanR> i... guess that means m=IO ?
+00:32:57 <c_wraith> It can, depending on how it was tested.
+00:33:03 <EvanR> but you still didnt explain how you tested it
+00:33:05 <jle`> haskell865: remember that the monadic chaining of states needs the new state from the previous action to continue
+00:33:06 <c_wraith> test with runState instead of runStateT
+00:33:55 <EvanR> if that doesnt work try evalState
+00:34:03 <c_wraith> err, yes
+00:34:14 <c_wraith> runState will try to show the final state.  that will be troublesome
+00:34:27 <EvanR> well
+00:34:36 <jle`> in the case of mapM (\_ -> newVariable) [0..], the final state won't come until after you execute every action
+00:34:37 <EvanR> let (aha, _) = runState .. ;)
+00:34:54 <c_wraith> so...  evalState
+00:34:56 <jle`> the final state from take 2 <$> mapM (\_ -> newVariable) [0..] is the same as the final state from mapM_ (\_ -> newVariable) [0..]
+00:35:18 <EvanR> but you dont nec need the final state
+00:35:32 <jle`> yeah, just clarifying why asking for the final state is problematic 
+00:35:48 <jle`> oh, just saw that you mentioned it earlier
+00:36:45 <jle`> honestly the best thing here is to just not mess around with having _|_ as your state
+00:36:54 <jle`> use 'replicateM 2 newVariable' instead
+00:37:11 <autaut> hello there
+00:37:35 <jle`> because even if you can play tricks with runState/evalState here, if you ever intend on binding a state action after newBunch, like newBunch >> ..., you'll run into problems there
+00:37:48 <EvanR> let (x,_) = runState.... works
+00:37:57 <jle`> autaut: hi!
+00:38:01 <haskell645> Im the guy with the lazy state problem, my computer just died, the IO was the problem I tested it with runState and it workd
+00:38:09 <EvanR> or even let (x,sinfinity) = ... just dont look at sinfinity
+00:38:19 <jle`> EvanR: it works, but if you ever want to bind newBunch with other actions, you're going to have problems
+00:38:28 <autaut> for what uses do you suggest haskell guys?
+00:38:28 <haskell645> But the final state kinda crashed my computer haha
+00:38:39 <EvanR> the final state doesnt exist
+00:38:53 <EvanR> jle`: good point
+00:39:07 <jle`> for example, do x <- newBunch; ...
+00:39:10 <haskell645> Ghci is still trying to find it
+00:39:11 <jle`> that won't work in most cases
+00:39:19 <jle`> haskell645: that's because there is no final state, do you see why?
+00:39:29 <EvanR> control C
+00:39:40 <jle`> the final state of mapM (\_ -> newVariable) [0..] can only be known if you execute newVariable an infinite number of times
+00:40:26 <EvanR> its kind of brain twisty to predict these lazy monads
+00:40:28 <jle`> essetially, you're setting your state to _|_
+00:40:41 <jle`> you might as well set your state to be "undefined"
+00:40:58 <jle`> it might work if you're being clever, but in general, that's not really a smart thing to play with
+00:41:09 <jle`> just do something sane like `replicateM 2 newVariable` instaed :)
+00:41:23 <EvanR> its very smart to play with laziness! ;)
+00:41:52 <jle`> setting your state to undefined/_|_, what could go wrong? :P
+00:42:17 <jle`> try: "do x <- newBunch; put undefined; return x" :P
+00:42:28 <jle`> then at least when you try to get the final state, it'll return an error immediately
+00:42:30 <EvanR> try it at least once, while youre young
+00:43:26 <haskell645> I think I'll do replicateM  or something like that I don't want to reboot my PC again haha
+00:43:49 <jle`> yeah, just use replicateM, that's what's meant to be used here
+00:44:26 <EvanR> learn to kill your processes
+00:45:03 <haskell645> I couldn't, my PC was completely frozen
+00:45:31 <EvanR> completely? like even the mouse pointer?
+00:45:40 <haskell645> Ya
+00:45:54 <EvanR> windows 98 SE ?
+00:46:24 <EvanR> what kind of chip you got in there, a dorito?
+00:46:44 <grantwu> Lol, maybe the program caused OOM?
+00:46:55 <haskell645> No, I got Ubuntu and like a i5, it's an Ultrabook but it's not that bad
+00:47:13 <EvanR> OOM usually helps
+00:47:31 <EvanR> accidentally going into swap probaby
+00:47:37 <grantwu> Helps?  I mean, it helps if the OOMKiller kills it, but heavy swapping is bad
+00:48:34 <EvanR> if linux gui is frozen, try control alt F1 ... i.e. the emergency console
+00:48:44 <EvanR> i think thats the combo
+00:49:03 <grantwu> Yes, any of F1 through F6 work, usually F7 is your X server
+00:50:22 <haskell645> It's not working for me, maybe it's my KDE setting
+00:50:40 * EvanR shakes head at ubuntu
+00:51:17 <grantwu> Maybe you need to press Fn?
+00:51:26 <grantwu> In case your function keys are actually media keys?
+00:51:43 <haskell645> No I already changed that haha
+00:53:15 <grantwu> Well, CTRL-Z might help
+01:07:35 <k0ral> Hello
+01:08:02 <k0ral> why isn't there an instance Bits Char defined in Data.Bits (or Data.Char) ?
+01:15:16 <Hijiri> k0ral: Char is a unicode codepoint so it's not fixed size
+01:15:25 <Hijiri> at least, that is what I am guessing the reason is
+01:15:33 <k0ral> oh, right
+01:15:54 <k0ral> is there a type in base to represent ASCII chars ?
+01:16:34 <Hijiri> Word8? :P
+01:16:39 <k0ral> I guess Int8 is what I'm looking for
+01:16:44 <k0ral> or Word8, yes :)
+01:18:25 <Hijiri> there's an instance for Integer
+01:18:44 <Hijiri> > Data.Bits.complement (0 :: Integer)
+01:18:45 <lambdabot>  -1
+01:18:54 <Hijiri> boring
+01:19:03 <Hijiri> I thought it would try to invert all the bits it didn't have
+01:19:24 <Hijiri> for Char there's also the fact that Char isn't closed under those bit operations
+01:19:39 <Hijiri> (you might get a value that's not a valid codepoint)
+01:22:08 <k0ral> I'll go with Word8, thank you
+01:22:37 * hackagebot gitcache 0.3 - Simple git utility to use and manage clone cache  https://hackage.haskell.org/package/gitcache-0.3 (VincentHanquez)
+01:25:40 <EvanR> a codepoint doesnt have a size
+01:26:13 <EvanR> Char is internally an Int, but Bits cant rely on that
+01:26:57 <EvanR> k0ral: Char8 is probably a more convenient type for ascii chars
+01:27:14 <EvanR> but its still not strictly ascii-only
+01:27:35 <EvanR> or even safe
+02:29:03 <zipper> How can I open ghci when I have haskell-mode enabled in emacs and on a .hs file?
+02:31:51 <allenj12> is there a way to have a 'default' namespace. like if I have import Data.List and Data.Set as S. I get an error if I use map still although I want the default to be the list version
+02:32:54 <allenj12> zipper: usually C-c C-l 
+02:32:58 <MarcelineVQ> import qualified Data.Set as S
+02:33:25 <zipper> allenj12: That opens a new window
+02:33:39 <zipper> hmmm can it happen in another split biffer?
+02:33:41 <MarcelineVQ> then you'd use S.map when you want Set's map
+02:33:42 <zipper> *buffer?
+02:33:54 <allenj12> zipper: it usually opens a new buffer
+02:34:04 <allenj12> MarcelineVQ: thank you!
+02:34:11 <zipper> allenj12: I've probably messed my emacs config
+02:34:37 <allenj12> zipper: heres mine https://github.com/allenj12/.emacs.d/blob/master/lisp/init-haskell.el
+02:35:20 <zipper> allenj12: All you have installed is haskell mode and company mode?
+02:35:29 <zipper> or what is company ghci?
+02:35:49 <allenj12> zipper: company ghci is autocomplet but for your ghci instance
+02:36:12 <zipper> Let me search that
+02:36:43 <allenj12>  zipper: and yea my haskell set up is pretty simple. haskell mode comes with interactive mode pretty sure
+02:36:46 <allenj12> ok
+02:37:26 <zipper> allenj12: Mine is complicated but broken it used to be good but I am so out of touch idk what I put in it when I wrote it lol
+02:37:29 <zipper> thanks
+02:38:05 <allenj12> zipper: my whole emacs config use to be like that, and out of date, so i just started over. that repo is pretty new if you notice :D
+02:38:38 <zipper> allenj12: true
+02:38:49 <zipper> Mine is big but I understand it :)
+02:39:08 <allenj12> :D
+02:43:16 <zipper> allenj12: Bro, you need flycheck :)
+02:44:13 <allenj12> zipper: yea, I do haha
+02:44:25 <allenj12> prolly get it tonight since you mentioned it 
+02:46:02 <zipper> allenj12: here is mine broken though I have replaced it with yours save for the flycheck bit. Will make it better as I refresh on haskell. https://github.com/onaio/meow/blob/master/config/haskell/haskell-conf.el
+02:48:59 <allenj12> its probably all thes stack specific things that broke it im thinking. I use stack and alot of that seems to be handled
+02:50:16 <zipper> allenj12: Thanks  man. You saved me there. ghci in emacs now loads well.
+02:50:19 <zipper> allenj12: :)
+02:50:24 <zipper> or woman
+02:50:26 <zipper> Sorry
+02:50:46 <allenj12> anyway if I have [Int] and I want to [(Int,Int)] where the pairs are numbers that add to ten witin the original list. How might I write something like that. I feel i dont really have an elegant solution. I just recur over the list with a Data.Set
+02:50:55 <hvr> zipper: you're assuming a binary gender model... :)
+02:50:57 <allenj12> zipper: its man, no need to apologize for that
+02:51:44 <allenj12> would a state monad make sense here?
+02:52:18 <zipper> hvr: :)
+02:52:47 <zipper> allenj12: What do you mean att to 10?
+02:52:52 <zipper> add what to 10?
+02:53:00 <zipper> allenj12: Are you not using map?
+02:53:06 <zipper> or pattern matching?
+02:53:35 <allenj12> zipper: [1,2,9,8] => [(1,9),(2,8)]
+02:54:03 <zipper> You want to make pairs/tuples out of elements of a list?
+02:54:14 <allenj12> yea
+02:54:18 <zipper> What if they're not evenly numbered?
+02:54:35 <allenj12> zipper: then exclude them from the final list
+02:54:43 <allenj12> zipper: [1,2,9,8] => [(1,9),(2,8)]
+02:54:46 <allenj12> woops
+02:54:48 <allenj12> sorry
+02:54:59 <allenj12> zipper: [1,2,9,8,3] => [(1,9),(2,8)]
+02:55:02 <allenj12> is what i ment to send
+02:55:07 <zipper> hmmmm
+02:55:44 <zipper> Yeah I also have no elegant solution but I would start with making it even numbered.
+02:56:01 <zipper> then maybe rearrange and lazily create tuples
+02:56:06 <zipper> what is your approach?
+02:57:07 <allenj12> before I was using recursion, and if the map(you were right btw shouldnt be set) 10-elem you add it to the list and recur again. the final result is tail recured
+02:57:14 <allenj12> through the whole thing
+02:57:35 <allenj12> zipper: I had it written yesterday, but lost it. I can rewrite it again
+02:59:13 <zipper> allenj12: I don't think map would work here because it reads an element at a time
+02:59:41 <allenj12> zipper: by map i ment HashMap sorry
+03:00:24 <zipper> allenj12: Key value pairs? Why?
+03:00:49 <allenj12> i get to an element, if I can find its counterpart in the hashmap I add it to the list, if not I add the element to the HashMap, if its aleady in the HashMap I just add it to the frequency so it can be matched again
+03:01:53 <allenj12> [1,1,1,9,9,9] => [(1,9),(1,9),(1,9)].. I use the hashmap to keep track of how many 1s I have if i get multiple of them before I get to the 9s
+03:02:22 <allenj12> [1,1,1,9,9,9] => [(1,9),(1,9)]
+03:03:26 <zipper> allenj12: It's counterpart in the hashmap? but the keys are unique
+03:03:34 <onintza> [snd t | t <- zip [1..] a, even (fst t)]
+03:03:39 <zipper> Ok I honestly don't have an elegant solution
+03:03:43 <zipper> Like that one :)
+03:04:28 <onintza> You could define some function filterIndex that takes a function - even or odd in this case - as an argument
+03:04:54 <onintza> then `zip (filterIndex odd yourList) (filterIndex even yourList)`
+03:05:20 <onintza> Not the ideal solution though
+03:06:45 <allenj12> onintza: interesting, why the seperation of even and odd though?
+03:06:48 <onintza> Oh, disregard that, I thought you wanted something else
+03:07:02 <allenj12> yea, I want elements that add to 10
+03:07:33 <onintza> Do they have to add to 10 in tuples of 2
+03:07:33 <allenj12> onintza:  [1,2,9,8,3] => [(1,9),(2,8)]
+03:07:48 <allenj12> yes
+03:08:18 <onintza> Can we ignore duplicate elements?
+03:08:46 <allenj12> [1,1,1,9,9,9] => [(1,9),(1,9)], no
+03:09:01 <allenj12> and we boot something if it dosnt have a pair
+03:09:11 <allenj12> boot meaning we exclude it from the final list
+03:09:17 <onintza> Would that not be [(1,9), (1,9), (1,9)]?
+03:09:49 <ocramz> hullo
+03:09:55 <allenj12> onintza: yes sorry
+03:10:13 <allenj12> [1,1,1,9,9,9] => [(1,9),(1,9),(1,9)]
+03:10:33 <onintza> Do we need to maintain order?
+03:10:38 <amx> I guess you could use permutations from Data.List, map something over it that makes pairs and then filter for those lists that only consist of pairs that add up to 10. Probably not very efficient though.
+03:10:39 <allenj12> onintza: no
+03:11:23 <allenj12> amx: defniantly inefficient, but would look nicer than what I have :P
+03:12:27 <onintza> I would, as you say, first generate a map or list of tuples (element, occurrences), then get its counterpart (c_element, c_occurrences), then create as many (element, c_element) as min occurrences c_occurrences
+03:13:15 <onintza> That map can be generated traversing the list only once
+03:13:35 <onintza> You still have to traverse the map, but that's a fixed size 10
+03:13:52 <zipper> onintza: Where did you get a in [snd t | t <- zip [1..] a, even (fst t)] ?
+03:13:53 <allenj12> onintza: kinda what I wrote, but it looks kinda sloppy. Im rewriting it now and will share
+03:14:05 <onintza> zipper: a was the input
+03:14:38 <onintza> zipper: but i didn't understand the question correctly
+03:15:10 <zipper> onintza: Oh
+03:16:57 <zipper> onintza: Can I read more than one value at a time in a list comprehension?
+03:17:01 <zipper> OMG wait a sec
+03:17:03 <zipper> take
+03:21:10 <zipper> hmmm this is what I have onintza `[ [(a,c), (b,d)] | [a,b,c,d] <- take 4 ex] :: [[(Num, Num)]]`
+03:21:15 <zipper> but it doesn't work
+03:21:32 <zipper> see it's based on taking 4 elements from the list each time
+03:21:38 <zipper> where ex is the input list
+03:23:48 <allenj12> ugh the code im rewriting is so messy its hard to even get it right :( lol
+03:24:11 <onintza> zipper: that doesn't take 4 each time, it takes 4 only once
+03:24:38 <zipper> onintza: Yes it does but I would like it work even when it takes 4 once
+03:24:47 <zipper> My question is on this part of the funcion
+03:24:55 <zipper> > [ x | (x:xs) <- take 4 ex]
+03:24:56 <lambdabot>  error:
+03:24:56 <lambdabot>      • Variable not in scope: ex :: [[t]]
+03:24:56 <lambdabot>      • Perhaps you meant one of these:
+03:25:19 <zipper> You see I can't pull the head out of the list structure here, can I?
+03:27:03 <jedai> let f xs = concatMap (\n -> replicate (min (m ! n) (m ! (10 - n))) (n,10-n)) (Prelude.filter (<6) $ keys m) where m = fromListWith (+) (Prelude.map (\x -> (x,1)) xs) in f [1,9,2,8,1,9]
+03:27:07 <jedai> > let f xs = concatMap (\n -> replicate (min (m ! n) (m ! (10 - n))) (n,10-n)) (Prelude.filter (<6) $ keys m) where m = fromListWith (+) (Prelude.map (\x -> (x,1)) xs) in f [1,9,2,8,1,9]
+03:27:09 <lambdabot>  error:
+03:27:10 <lambdabot>      • Variable not in scope: keys :: Array t2 Int -> [t2]
+03:27:10 <lambdabot>      • Perhaps you meant one of these:
+03:27:38 <jedai> > let f xs = concatMap (\n -> replicate (min (m M.! n) (m M.! (10 - n))) (n,10-n)) (filter (<6) $ M.keys m) where m = M.fromListWith (+) (map (\x -> (x,1)) xs) in f [1,9,2,8,1,9]
+03:27:40 <lambdabot>  [(1,9),(1,9),(2,8)]
+03:27:53 <onintza> my god
+03:27:58 <jedai> > let f xs = concatMap (\n -> replicate (min (m M.! n) (m M.! (10 - n))) (n,10-n)) (filter (<6) $ M.keys m) where m = M.fromListWith (+) (map (\x -> (x,1)) xs) in f [1,9,2,8,1,9, 5]
+03:28:00 <lambdabot>  [(1,9),(1,9),(2,8),(5,5)]
+03:28:05 <onintza> how could you write that as a one liner
+03:28:08 <jedai> There is a bug !! :)
+03:28:37 <jedai> onintza: that's an abomination, I'll admit it cheerfully
+03:28:38 <allenj12> jedai pretty impressive tho, haha. but is it fixable?
+03:29:20 <jedai> allenj12: it is fixable by special casing for 5, I don't know if there's a more elegant way
+03:30:18 <jedai> > let f xs = concatMap (\n -> replicate (min (m M.! n) (m M.! (10 - n))) (n,10-n)) (filter (<5) $ M.keys m) ++ replicate ((m M.! 5) `div` 2) (5,5) where m = M.fromListWith (+) (map (\x -> (x,1)) xs) in f [1,9,2,8,1,9, 5]
+03:30:20 <allenj12> jedai: dam, ill post mine in a second, its taking so long because its a mess haha
+03:30:20 <lambdabot>  [(1,9),(1,9),(2,8)]
+03:30:33 <jedai> > let f xs = concatMap (\n -> replicate (min (m M.! n) (m M.! (10 - n))) (n,10-n)) (filter (<5) $ M.keys m) ++ replicate ((m M.! 5) `div` 2) (5,5) where m = M.fromListWith (+) (map (\x -> (x,1)) xs) in f [1,9,2,8,1,9, 5, 5]
+03:30:34 <onintza> jedai: you could split the domain in n/2, all <= 5, > 5, iterate over one and lookup into the other
+03:30:35 <lambdabot>  [(1,9),(1,9),(2,8),(5,5)]
+03:31:17 <jedai> onintza: won't help, 5 is special because you need to add itself, 5, to get 10
+03:31:37 <jedai> onintza: in other words there are three domains <5, 5, >5
+03:31:43 <onintza> jedai: oh, i thought it shouldn't appear in the results :s
+03:32:01 <onintza> yeah, that makes sense
+03:32:02 <allenj12> 5, 5 should appear if theres two of them
+03:32:44 <jedai> allenj12: Right, see my correction, I don't see a way around special casing for 5 (since it _is_ a special case)
+03:33:07 <onintza> i think this particular problem would more readable by iterating over the list a number of n times and just popping elements out of it
+03:33:17 <onintza> a la imperative programming
+03:33:32 <jedai> onintza: sure but that's O(n²) instead of O(n log n)
+03:33:42 <onintza> yes
+03:34:39 <jedai> onintza: and a list is just inherently very bad for this (it probably wouldn't be O(n²) if I take into account the cost of "popping elements out of it")
+03:35:01 <onintza> that too
+03:35:12 <onintza> well, you don't have to pop them out
+03:35:20 <onintza> you can replace them, having a list of Maybe Int
+03:35:40 <onintza> - which is horrible
+03:35:47 <jedai> onintza: so the natural thing to do would be to go to a data structure that is better for that, the better algorithm emerge naturally once you see your list as a MultiSet (here materialized by a Map)
+03:36:14 <jedai> onintza: replacing is no better than deleting in a list, you're thinking of an array
+03:36:39 <onintza> er, yes
+03:36:47 <onintza> is it possible to use arrays in haskell?
+03:37:13 <jedai> onintza: Remember [] is a linked list in Haskell, though we have arrays, I guess we could use a MVector (mutable array) to do your proposed algorithm efficiently
+03:38:09 <lpaste> allenj12 pasted “cant even finish this mess...” at http://lpaste.net/313125
+03:38:11 <jedai> onintza: but it still wouldn't be as efficient as the MultiSet (Map) algorithm, probably longer and imperative instead of short and purely functional
+03:39:23 <jedai> allenj12: that looks complicated ? maybe use my version ? reformatted ?
+03:41:06 <jedai> > let f xs = concatMap (\n -> replicate (min (m M.! n) (m M.! (10 - n))) (n,10-n)) (filter (<5) $ M.keys m) ++ replicate ((m M.! 5) `div` 2) (5,5) where m = M.fromListWith (+) (map (,1) xs) in f [1,9,2,8,1,9, 5, 5]
+03:41:08 <lambdabot>  [(1,9),(1,9),(2,8),(5,5)]
+03:41:31 <jedai> Ha ! TupleSections is activated on lambdabot :)
+03:48:11 <allenj12> jedai: still going through your work, M.! is hashmap index?
+03:48:52 <jedai> allenj12: I'm using Data.Map but in your case, Data.IntMap should be best (the interface is mostly the same anyway)
+03:50:52 <jedai> allenj12: basically, my code create as many pairs (n, 10-n) that the minimum of occurences of n and 10-n in the initial list, and that for all numbers n from 1 to 4 that are in the initial list.
+03:51:32 <jedai> allenj12: plus half as much (5,5) pairs that there was 5 in the initial list. all those lists of pairs are concat()enated
+03:51:58 <younder> What does the ! in !Double mean?
+03:52:19 <jedai> allenj12: for efficiency, I create a multiset m (using Data.IntMap for instance) to access the count of each element 
+03:53:00 <jedai> younder: normally that's used in a data constructor, it means that Double is strict in this constructor
+03:54:29 <jedai> younder: so "data StrictPair = Pair !Double !Double" is strict in its argument, "Pair undefined 5"  is undefined, unlike (undefined, 5) which you can use as long as you don't look at the first element
+03:56:04 <younder> jedai: thx: found it under https://wiki.haskell.org/Performance/Data_types (searching haskell strict constructor)
+03:57:45 <jedai> younder: Right, there are several advantages to using strict constructors, they can be packed (all the data is put together instead of having pointers to the content), they also impose that their arguments be immediately evaluated if the constructor is evaluated
+03:58:19 <jedai> younder: for many types that just make sense since they're useless if this element is undefined
+03:59:20 <jedai> younder: the disadvantage of course is that they are less lazy and even if it would make sense to delay or not do the evaluation of an element, you can't do that
+03:59:22 <allenj12> jedai: intereesting im not getting repeats like in your example
+03:59:38 <allenj12> λ> pairsOfTen [1,1,1,9,3,7,5]
+03:59:38 <allenj12> [(1,9),(3,7)]
+03:59:38 <allenj12>  
+03:59:53 <jedai> allenj12: I don't know what you mean ? My last version is correct
+04:00:05 <jedai> allenj12: Right, that's normal 
+04:00:23 <allenj12> jedai: im an idiot, haha i must be getting tired
+04:13:21 <allenj12> jedai: fully understand the example now, it actually is quite nice
+04:13:42 <allenj12> definantly better the the guards I was using, that was almost mimicing and imperitive style
+04:19:00 <ertesx> allenj12: BTW, if you program in a compositional style, this one can be a one-liner
+04:19:42 <allenj12> ertesx: how so?
+04:20:01 <allenj12> I cleaned it up a little bit, ill paste it.
+04:20:23 <lpaste> allenj12 pasted “cleaned up” at http://lpaste.net/313200
+04:20:58 <allenj12> barely cleaned up, still a little confused how you could make it a one liner
+04:20:59 <ertes> allenj12: if i'm not mistaken, this function should return pairs that sum to 10, right?
+04:21:08 <allenj12> ertes: yea
+04:21:09 <ertes> without duplicates
+04:21:16 <allenj12> with duplicates
+04:21:27 <allenj12> λ> pairsOfTen [1,1,1,9,9,3,7,5]
+04:21:28 <allenj12> [(1,9),(1,9),(3,7)]
+04:21:41 <ertes> that's missing a few then, isn't it?
+04:22:20 <ertes> i would expect to see (1,9) six times
+04:22:21 <allenj12> where?
+04:22:52 <allenj12> o no, every individual 1 gets paired with every individual 9, if theres leftover, we exclude it
+04:23:17 <allenj12> so I guess that is without duplicates, misunderstood if thats what you ment
+04:23:35 <ertes> but then it's wrong, too, because in that case i would expect to see (1,9) only once
+04:24:22 <allenj12> ertes: no becauset there is 2 1s and 3 9s so every one of the 1s has a pair 9, with one leftover 9 that is not included
+04:25:12 <ertes> not sure i understand…  let me label the numbers:  [1a, 1b, 1c, 9a, 9b, 3, 7, 5]
+04:26:02 <ertes> the result should be either [(1, 9), (3, 7)] (for any label) or [(1a, 9a), (1a, 9b), (1b, 9a), (1b, 9b), (1c, 9a), (1c, 9b), (3, 7)]
+04:26:18 <ertes> depending on whether you keep or discard duplicates
+04:26:28 <ertes> am i misunderstanding the problem?
+04:27:10 <allenj12> ertes: I defined the problem more like if the numbers were dating. ever girl (lets say 1) pairs with a boy (9) to make a couple. it dosnt matter which boy goes with which girl.
+04:27:25 <ertes> ah
+04:27:39 <ertes> so [(1a, 9a), (1b, 9b), (3, 7)]
+04:27:47 <ertes> and then 1c is left over
+04:27:48 <allenj12> yes
+04:27:52 <allenj12> exactly
+04:28:50 <ertes> ok, that's not a nice one-liner =)
+04:29:08 <allenj12> ertes: but if you wanna present your one liner id like to see it. Im doing these as interview questions I already did in java. I wanna be prepaired just incase dream haskell job comes along :P
+04:29:12 <allenj12> gotcha
+04:29:12 <allenj12> haha
+04:29:35 <ertes> the algorithm i thought would be a one-liner
+04:30:20 <allenj12> yea, theres alot of ways the problem could be formed. This is just the form I have seen before
+04:31:17 <ertes> > [ (x, y) | (x:ys) <- tails [1,1,1,9,9,3,7,5]; y <- ys; x + y == 10 ]
+04:31:18 <lambdabot>  <hint>:1:45: error: parse error on input ‘;’
+04:31:27 <ertes> > [ (x, y) | (x:ys) <- tails [1,1,1,9,9,3,7,5], y <- ys, x + y == 10 ]
+04:31:29 <lambdabot>  [(1,9),(1,9),(1,9),(1,9),(1,9),(1,9),(3,7)]
+04:31:50 <ertes> > [ (x, y) | (x:ys) <- tails (nub [1,1,1,9,9,3,7,5]), y <- ys, x + y == 10 ]  -- discarding duplicates
+04:31:52 <lambdabot>  [(1,9),(3,7)]
+04:32:20 <ertes> allenj12: the pairing version i would probably do using Map
+04:32:54 <allenj12> ertes: yea, which is what pairsOfTen uses, not much of a better way it seems
+04:33:20 <ertes> ah, yeah
+04:34:11 <allenj12> jedai: really pulled through, my code, although would have been efficient was turning into a mess to write/read
+04:39:26 <ertes> allenj12: are equals allowed?  like (5, 5)
+04:40:09 <allenj12> ertes: yea, 5 is treated the same logically, if there are two 5s then you include that pair if there are 4 5s there are two pairs
+04:46:34 <ertes> allenj12: here is how i would have written it: https://gist.github.com/esoeylemez/cc9234bd31997faa7e051e4d31d52fdb
+04:47:02 <ertes> there is probably a much nicer version of this using view patterns
+04:47:11 <ph88> can someone help me glue the pieces of my pseudo-code together? https://paste.fedoraproject.org/462752/74158314/
+04:47:37 <ph88> i think i should work in the IO monad because of shuffleM
+04:47:52 <onintza> It's funny how such an apparently simple problem is more complex than it seems
+04:48:13 <ph88> onintza, what's the problem ?
+04:48:25 <onintza> ph88: i meant the one allenj12 and ertes are talking about
+04:48:39 <ph88> well i just got into the channel so i wouldn't know ^^
+04:49:11 <ph88> but ye that gists looks complicated alright
+04:49:29 <onintza> given a list of integers, return a list of pairs (x, y) so that x + y == n
+04:49:31 <flyt> 1
+04:49:49 <allenj12> onintza: yea i agree, it actually pretty straight forward imperitavly though, although it was a decent chunk of pure conditionals
+04:50:13 <onintza> allenj12: it is straight forward imperativelly, but the straight forward solution is not efficient
+04:50:37 <adeohluwa> hello guyz
+04:50:39 <allenj12> onintza: if you use a map with state and just alter it its O(n)
+04:50:39 <adeohluwa> new to haskell
+04:50:44 <ertes> allenj12: my solution should perform at O(n * log n), which the straightforward imperative solution probably doesn't
+04:51:14 <ertes> allenj12: you're making assumptions…  i'd say O(n) isn't even possible
+04:51:48 <onintza> ertes: how not? you could create a map of counts, traversing the list only one. then you just have to traverse the map, which isn't dependent on n
+04:52:08 <allenj12> ertes: why not, run through the list, check if its in the hashmap 0(1) if it is add it to the pair else put that number in the hashmap
+04:52:34 <ertes> onintza: it's in the "create a map of counts" bit
+04:52:56 <onintza> ertes: but to create a map of counts, or to do what allenj12 says, you only need to traverse the list one
+04:53:02 <ertes> you could probably get "amortised O(n)"
+04:53:05 <onintza> the lookup into the map isn't dependent on n
+04:53:11 <ertes> using a hash map
+04:53:18 <onintza> it's dependent on the size of the domain, 10 in this case
+04:54:53 <allenj12> onintza: i feel like you should be able to write a recursive function that would act the imperative solution and make it clean using the state monad, but unsure
+04:55:32 <onintza> i feel the same :þ
+04:56:12 <allenj12> lol, an adventure for some other time, I wanna get done with this list of interview problems
+04:56:19 <younder> onintza, use the source
+04:56:38 <ertes> here is a nicer version: https://gist.github.com/esoeylemez/cc9234bd31997faa7e051e4d31d52fdb
+04:57:37 <jedai> ertes: My version is better though :)
+04:57:43 <ertes> jedai: where is it?
+04:57:47 <onintza> younder: what source?
+04:57:51 <allenj12> ertes: jedai: DAYUM
+04:57:54 <allenj12> its my version
+04:57:59 <allenj12> i stole it, now its mine
+04:58:10 <ertes> jedai: in what way is it better?
+05:01:42 <ertes> ah, i see
+05:01:58 <jedai> ertes: you only lookup each number once (whatever the number of occurences)
+05:02:36 <ertes> yeah, i saw
+05:02:44 <adeohluwa> whats haskell's unique strength?
+05:02:59 <jedai> ertes: of course yours is generalized (not just for 10), that should be possible for mine too though
+05:03:14 <allenj12> adeohluwa: type system, laziness, immutability,  to name some
+05:03:28 <jedai> adeohluwa: clarity of abstraction ? due to purity, lazyness, type system
+05:03:36 <ertes> jedai: at least for even sums, yeah
+05:03:55 <ertes> you'd probably have to write a separate version for odd sums
+05:04:06 <jedai> ertes: uneven is easier in fact, you don't have the ugly warts at the end
+05:05:03 <adeohluwa> does that translate to been able to write fast programs fast?
+05:05:11 <adeohluwa> and is it general purpose?
+05:05:15 <jedai> ertes: no you just put ++ (if even s then replicate (m ! (half) `div` 2) (half, half) else [])
+05:05:51 <jedai> adeohluwa: Haskell is often used for prototype, but that depends on your field and your proficiency
+05:06:04 <jedai> adeohluwa: It is definitely general purpose
+05:07:03 <ertes> jedai: i just fixed mine
+05:07:12 <jedai> adeohluwa: Haskell has been used for everything (note that embedding Haskell code is not a good idea but even in this field, Haskell has been used (really ! by big industry !) to write a DSL which generate embedded code)
+05:08:31 <ertes> jedai: i kind of feel stupid for not doing that right away: https://gist.github.com/esoeylemez/cc9234bd31997faa7e051e4d31d52fdb
+05:08:38 <adeohluwa> got it, thanks @allenj12 & @jedai
+05:09:27 <allenj12> adeohluwa: if you want some examples im doing some interview questions now for practice. let me finish this one and ill paste the 3.
+05:09:55 <jedai> ertes: you should probably delete rather than insert n - dn though
+05:10:12 <adeohluwa> @allenj12 bless you man
+05:10:12 <lambdabot> Unknown command, try @list
+05:10:23 <ertes> jedai: yeah, but then i'd need to figure out, which of the two to delete
+05:10:29 <jedai> ertes: both
+05:10:31 <allenj12> how do i get lamdabot to go do stuff for me
+05:10:47 <ertes> jedai: of course…
+05:11:24 <bjs> allenj12: you can just query lambdabot with stuff if you want to do a lot privately
+05:11:44 <jedai> allenj12: You prefix your code with >
+05:12:00 <jedai> allenj12: though this is limited to what you could do with ghci
+05:12:04 <bjs> otherwise it "just works" for anyone else
+05:12:17 <ertes> jedai: yeah, if i keep going on, it will just reduce to your version
+05:12:26 <bjs> > map (+1) [1..10]
+05:12:28 <ertes> except for the integer arithmetic stuff
+05:12:28 <lambdabot>  [2,3,4,5,6,7,8,9,10,11]
+05:12:34 <bjs> allenj12: ^ like that :)
+05:12:37 <allenj12> > let x = [1,2,3] in zipWith (++) tails x inits x
+05:12:39 <lambdabot>  error:
+05:12:39 <lambdabot>      • Couldn't match expected type ‘([a2] -> [[a2]]) -> [Integer] -> t’
+05:12:39 <lambdabot>                    with actual type ‘[[a0]]’
+05:12:54 <allenj12> > let x = [1,2,3] in zipWith (++) $ tails x $ inits x
+05:12:56 <lambdabot>  error:
+05:12:56 <lambdabot>      • Couldn't match expected type ‘[[Integer]] -> [[a]]’
+05:12:56 <lambdabot>                    with actual type ‘[[Integer]]’
+05:13:07 <MarcelineVQ> use parens :>
+05:13:22 <MarcelineVQ> > let x = [1,2,3] in zipWith (++) (tails x) (inits x)
+05:13:24 <lambdabot>  [[1,2,3],[2,3,1],[3,1,2],[1,2,3]]
+05:13:27 <allenj12> > let x = [1,2,3] in zipWith (++) (tails x)  (inits x)
+05:13:29 <lambdabot>  [[1,2,3],[2,3,1],[3,1,2],[1,2,3]]
+05:14:38 <ph88> MarcelineVQ, you mind having a look at my code ?
+05:14:47 <allenj12> > let x = [1,2,3] y = [2,3,1] in any (==y) . zipWith (++) (tails x)  (inits x)
+05:14:49 <lambdabot>  <hint>:1:19: error:
+05:14:49 <lambdabot>      parse error on input ‘=’
+05:14:49 <lambdabot>      Perhaps you need a 'let' in a 'do' block?
+05:15:32 <MarcelineVQ> try this stuff in a /query with lambdabot first allenj12
+05:16:31 <allenj12> gotcha, sorry :P
+05:16:40 <jedai> > let x = [1,2,3]; y = [2,3,1] in any (==y) . zipWith (++) (tails x)  (inits x)
+05:16:42 <lambdabot>  error:
+05:16:42 <lambdabot>      • Couldn't match expected type ‘a -> [[Integer]]’
+05:16:42 <lambdabot>                    with actual type ‘[[Integer]]’
+05:16:56 <MarcelineVQ> ph88 I don't really have time, sounds like you want replicateM though, have a look at some of the functions in Control.Monad
+05:16:59 <jedai> > let x = [1,2,3]; y = [2,3,1] in any (==y) . zipWith (++) (tails x) $  (inits x)
+05:17:01 <lambdabot>  True
+05:17:22 <jedai> allenj12: you have to separate each definition by ;
+05:17:40 <allenj12> jedai: why did that $ fix it there, sometimes syntax gets me in haskell lol
+05:18:16 <jedai> allenj12: (.) is a composition of two functions
+05:18:38 <MarcelineVQ> ph88 I'm probbaly off with that recommendation since you seem to be mapping rather than repeating
+05:18:39 <jedai> allenj12: "zipWith (++) (tails x)  (inits x)" is not a function, it's a list
+05:18:49 <ph88> ya i think so too ^^
+05:18:52 <jedai> allenj12: so you can't compose it
+05:19:11 <allenj12> jedai: o you could have just replaced the first (.) with $, gotcha
+05:19:26 <jedai> though "ipWith (++) (tails x)" is a function . Right I could have done that too
+05:19:37 <ph88> so if i want to map 500 numbers over a function that takes an int and returns something inIO monad should it be   [1..500] <$> func  ?  or do i need the special monad functions like bind ?
+05:20:19 <jedai> allenj12: generally I like the "f . g . h $ x" look because it's easy to extract a part of the pipeline to make it an auxiliary function with a better name for comprehension
+05:21:03 <jedai> allenj12: but here that was just my habit speaking, directly putting a ($) instead of (.) would probably have been better
+05:21:48 <lpaste> allenj12 pasted “haskell examples” at http://lpaste.net/313320
+05:21:48 <onintza> ph88: i think just `map func [1..500]`, and you would get back a list of IO monads
+05:22:10 <allenj12> adeohluwa: there are your examples
+05:22:20 <onintza> ph88: that would not execute the IO though
+05:22:23 <allenj12> adeohluwa: feel free to ask me questions
+05:22:26 <MarcelineVQ> you apply functions to values not values to functions, you're probably after mapM though if you're wanting to go from (Int -> IO a) -> [a] -> IO [a]
+05:22:30 <jedai> ph88: map func [1..500] would give you a list of IO a, you would use sequence to execute it
+05:22:47 <ertes> jedai: ok, mine is now better than yours: https://gist.github.com/esoeylemez/cc9234bd31997faa7e051e4d31d52fdb =)
+05:22:51 <ertes> more generic and faster
+05:22:55 <jedai> ph88: or sequence_ if you don't care for the result and just want the side effect
+05:23:14 <MarcelineVQ> alternatively called mapM_, but given his exmaple paste earlier he does want the result
+05:23:24 <adeohluwa> thanks
+05:23:33 <jedai> ph88: of course sequence . map is just mapM
+05:23:40 <ph88> ooh really
+05:23:43 <ph88> ok
+05:23:48 <ph88> i used mapM before but not sequence
+05:24:08 <allenj12> ertes: good one
+05:24:29 <dibblego> (sequence .) . fmap
+05:25:07 <onintza> ertes: wow, i would have to go over it to understand it, but what a change from the initial versions
+05:26:13 <allenj12> ertes: much easier to understand at first glance to
+05:26:31 <ertes> yeah, i was just being stupid in the first version
+05:26:34 <jedai> ertes: ok, it's good but you should probably do a takeWhile on your assocs (if not you traverse the whole list instead of half, and you get the useless GT case ) but that's pretty good, more readable than my first one-liner ;)
+05:27:23 <ph88> this is from ghci https://paste.fedoraproject.org/462774/47774399/ i'm trying to use a pure function on the f BV
+05:27:40 <jedai> ertes: the list monad is nice :)
+05:28:19 <Stuart> is r -> (a -> b) the same as r -> a -> b 
+05:29:03 <ertes> jedai: using takeWhile seems wrong
+05:29:16 <ertes> jedai: pairsOf 10 [-1, 11] = [(-1, 11)]
+05:29:19 <ph88> what's f even ? shouldn't that be m for monad ?
+05:29:31 <ertes> jedai: in fact i just found that your variant crashes on that one
+05:31:02 <ph88> why do i have to double evaluate this? https://paste.fedoraproject.org/462778/77442101/ i expected a to give back 0b000 .. but now it's "it"
+05:31:20 <jedai> > let f xs = concatMap (\n -> replicate (min (m M.! n) (m M.! (10 - n))) (n,10-n)) (filter (<5) $ M.keys m) ++ replicate ((m M.! 5) `div` 2) (5,5) where m = M.fromListWith (+) (map (,1) xs) in f [-1, 11]
+05:31:21 <allenj12> ertes: im getting some errors when pasted this in, "couldnt match type 'a' with 'M.Key' it works for you as is?
+05:31:22 <lambdabot>  [(-1,11)*Exception: Map.!: given key is not an element in the map
+05:32:15 <jedai> ertes: that has nothing to do with the -1 though or the takeWhile, it's just there's no 5...
+05:32:25 <jedai> > let f xs = concatMap (\n -> replicate (min (m M.! n) (m M.! (10 - n))) (n,10-n)) (filter (<5) $ M.keys m) ++ replicate ((m M.! 5) `div` 2) (5,5) where m = M.fromListWith (+) ((5,0) : map (,1) xs) in f [-1, 11]
+05:32:27 <lambdabot>  [(-1,11)]
+05:33:04 <jedai> > let f xs = concatMap (\n -> replicate (min (m M.! n) (m M.! (10 - n))) (n,10-n)) (takeWhile (<5) $ M.keys m) ++ replicate ((m M.! 5) `div` 2) (5,5) where m = M.fromListWith (+) ((5,0) : map (,1) xs) in f [-1, 11, -5, 15, 1, 9 , 1, 9]
+05:33:07 <lambdabot>  [(-5,15),(-1,11),(1,9),(1,9)]
+05:33:58 <ertes> allenj12: it works for me, yeah
+05:34:14 <allenj12> does the ''' do anything in xs'
+05:34:55 <ertes> allenj12: no, it's part of the name
+05:35:16 <allenj12> ertes: but you have ... <- M.assocs xs
+05:35:19 <zyhn> Stuart: yes. -> is right associative
+05:35:22 <allenj12> xs has no ' there
+05:35:37 <allenj12> o im dumb
+05:35:38 <allenj12> sorry
+05:36:08 <allenj12> ertes: what is M hashmap or intmap?
+05:36:19 <Stuart> zyhn: Thanks
+05:38:10 <Stuart> How can I implement (<*>) :: Reader r (a -> b) -> Reader r a -> Reader r b
+05:39:21 <allenj12> :t M.assocs
+05:39:22 <lambdabot> M.Map k a -> [(k, a)]
+05:42:47 <lpaste> jedai revised “cleaned up”: “cleaned up” at http://lpaste.net/313200
+05:42:54 <allenj12> ertes: i think im getting yelled at because its expecting x1 to be a M.Key but you treat it as a integer
+05:44:13 <lpaste> jedai revised “cleaned up”: “oops” at http://lpaste.net/313200
+05:45:31 <jedai> ok, this one should work. But I think ertes version is more readable (the list monad is nice) though I would add a takeWhile (probably not too much of a problem anyway, this algorithm is pretty fast)
+05:46:04 <allenj12> jedai: it returns duplicate 5s
+05:46:11 <allenj12> λ> pairsOf 10 [1,9,1,1,9,9,11,-1,5]
+05:46:12 <allenj12> [(-1,11),(1,9),(1,9),(1,9),(5,5),(9,1),(9,1),(9,1)]
+05:46:12 <allenj12> λ> 
+05:47:35 <lpaste> jedai revised “oops”: “priority of div” at http://lpaste.net/313200
+05:48:19 <jedai> allenj12: turns out "s + 1 `div` 2" means "s + (1 `div` 2)" ... :(
+05:48:53 <jedai> That's pretty logical from every pov so I have no excuse ! (look at the end of your list)
+05:49:10 <ertes> allenj12: i used: import qualified Data.Map.Strict as M
+05:49:24 <ertes> allenj12: you can probably get extra speed by using a more appropriate type
+05:50:22 <allenj12> jedai: it works now :D
+05:51:28 <allenj12> ertes: that explains the error
+05:52:50 * hackagebot mole 0.0.5 - A glorified string replacement tool  https://hackage.haskell.org/package/mole-0.0.5 (wereHamster)
+05:54:28 <Stuart> I am having troubles implmenting applicative for Reader How can I implement (<*>) :: Reader r (a -> b) -> Reader r a -> Reader r b
+05:56:43 <jedai> allenj12: well there's still an error in my version so... probably ertes' is a better bet
+05:56:56 <Stuart> Is Reader r (a -> b) -> Reader r a -> Reader r b equivalant to (r -> a -> b) -> (r -> a) -> (r -> b) 
+05:57:08 <allenj12> jedai: interesting, whats the error?
+05:57:19 <jedai> > let f xs = concatMap (\n -> replicate (min (m M.! n) (m M.! (10 - n))) (n,10-n)) (takeWhile (<5) $ M.keys m) ++ replicate ((m M.! 5) `div` 2) (5,5) where m = M.fromListWith (+) ((5,0) : map (,1) xs) in f [-1, 11, -5, 15, 1, 9 , 1, 9, 2]
+05:57:22 <lambdabot>  [(-5,15),(-1,11),(1,9),(1,9)*Exception: Map.!: given key is not an element i...
+05:57:51 <jedai> allenj12: this is easy to repair but ertes' is more readable anyway
+05:58:21 <allenj12> jedai: yea, both were much further than I would have gotten in cleanliness 
+06:02:16 <lpaste> jedai revised “priority of div”: “final correction” at http://lpaste.net/313200
+06:02:33 <jedai> still had to correct myself :)
+06:02:56 <Stuart> (Reader f) <*> (Reader g) = Reader $ \r -> (f r) $ (g r) 
+06:03:20 <Stuart> Does that look ok for the Applicative monad for (<*>) :: Reader r (a -> b) -> Reader r a -> Reader r b	 	
+06:03:53 <ertes> jedai: i can't think of a way to improve my version without changing its type
+06:03:53 <Stuart> Any ideas about applicative monad for reader monad
+06:04:44 <ertes> Stuart: there is only one well-typed way to implement (<*>)
+06:04:51 <ertes> so if it type-checks, it's correct
+06:04:55 <jedai> ertes: yours is good ? I would just have added a takeWhile on the assocs m to avoid handling the GT case
+06:05:12 <ertes> jedai: yeah, but i don't see how
+06:05:24 <ertes> jedai: i'd need 'div'
+06:05:47 <ertes> Stuart: style note:  (f r) $ (g r) = f r (g r)
+06:06:19 <jedai> ertes: Right, you did it on Num rather than Int
+06:06:33 <Stuart> ertes: why is the second one better
+06:08:00 <ertes> jedai: i just tried it, but it barely made a difference…  it seems the bottleneck is M.fromListWith
+06:08:15 <allenj12> looks like i got disconnected accidentally, i should go to bed anyway thakns alot jedai ertes onintza 
+06:08:30 <ertes> allenj12: you're welcome
+06:08:42 <jedai> allenj12: you're welcome :)
+06:09:18 <ertes> also i haven't tried actually compiling this =)
+06:10:00 <jedai> ertes: No, I guess it wouldn't make much of a difference (at best that would be a factor of two on the O(n) part but fromListWith is O(n log n) anyway...)
+06:12:51 * hackagebot github-webhook-handler-snap 0.0.7 - GitHub WebHook Handler implementation for Snap  https://hackage.haskell.org/package/github-webhook-handler-snap-0.0.7 (wereHamster)
+06:12:53 * hackagebot org2anki 0.1.0 - Basic org to anki exporter  https://hackage.haskell.org/package/org2anki-0.1.0 (mroman42)
+06:13:37 <ertes> i guess the more general type is preferable then, because it seems quite useful that it also works on Rational
+06:14:01 <jedai> ertes: Right, though using it on Float or Double wouldn't be a good idea
+06:14:29 <ertes> i have no idea for what i'd use that function anyway =)
+06:15:16 <jedai> ertes: ... We never asked allenj12... It will remain a mistery ! o_O 
+06:15:53 <ertes> but it does give us insights into the mind of allenj12!
+06:16:09 <Stuart> Ok I think I have implemented all the functions in the Haskell book for Reader applicative, functor, bla bla. How do I use it. What's the point of it if I am using using ReaderT
+06:16:36 <ertes> Stuart: Reader is pretty much pointless
+06:16:48 <ertes> Stuart: it's just a nice exercise to do
+06:17:10 <ertes> to learn type-level interactions and dealing with functions
+06:17:20 <Stuart> Ok it was nice. It was nice to do
+06:17:34 <jedai> ertes: Well from time to time you get to use ReaderT when you have to bring an environment with you for many functions
+06:17:39 <ertes> Stuart: (i'd go as far as to say that ReaderT's utility is highly questionable, too)
+06:18:03 <ertes> jedai: i was referring specifically to Reader
+06:18:09 <jedai> Though you often have a specialized monad at this point 
+06:18:24 <ertes> i think ReaderT in isolation isn't really useful
+06:19:06 <Stuart> Interesting. It definitely seems so. Good that I am not only one
+06:19:23 <jedai> ertes: Sure, was just trying to expose some usages (ReaderT is rarely used in isolation though)
+06:20:08 <jedai> ertes: Mostly you want State, sometimes Writer... Of course you generally want a mix
+06:20:33 <Stuart> So I am thinking I should go to the next chapter state
+06:20:37 <ertes> i've tried to use it in isolation a few times in my earlier days of haskell, mostly to pass application configuration around, but it always turned out to be less convenient than just passing an argument (or doing something fancier like reflection)
+06:22:05 <jedai> ertes: Right, but it's more often used in libraries that provide a monad that needs to keep some configuration around in addition to doing something useful (so not in isolation, as you said)
+06:22:19 <ertes> sure
+06:23:34 <ertes> i can see how a "database transaction" monad carries a connection handle around, and it wouldn't be too useful to pass that one explicitly
+06:23:34 <Stuart> Ok, what do you guys think. Go to the next chapter about state or put effort into learning the usage of Reader
+06:23:52 <ertes> Stuart: put effort into learning the usage of Reader
+06:24:00 <Stuart> Ok
+06:24:08 <jedai> but not too much either :)
+06:24:22 <ertes> even if you'll never use it, learning how to use it is useful knowledge anyway =)
+06:24:28 <ertes> not about Reader, but about haskell
+06:24:42 <Stuart> Ok, I will do that. 
+06:25:01 <Stuart> Any good resourses. 
+06:25:09 <jedai> Right, besides it help to understand the similarities and the differences with State afterward
+06:25:40 <ertes> Stuart: oh, if your book doesn't go any deeper, don't bother…  it probably showed you everything it wanted to show
+06:27:24 <Stuart> Ahh ok, I think Haskell book written by Chris Allen put the Reader monad in order to understand the state monad
+06:27:47 <ertes> most likely, yeah
+06:28:40 <Stuart> The book already a huge book. I guess he didn't want to put everything in
+06:29:32 <ertes> i don't know how it's structured
+06:29:49 <Stuart> Read the end and then onto state. I might look at the usages later. Just out of curiousity do know any good usages on the reader monad on github
+06:30:26 <ertes> i think the most common abusage of reader monads is for point-free style
+06:30:32 <ertes> > liftA2 (+) sin cos 5
+06:30:35 <lambdabot>  -0.6752620891999122
+06:31:12 <ph88> as i see it state = reader + writer so you get two for the price of one
+06:31:14 <ertes> and you'll mostly see that abusage here on #haskell, not in any real code (because it makes code a nightmare to read)
+06:31:25 <ertes> ph88: that's not really true
+06:31:35 <ph88> well it's true that i see it that way :P
+06:31:43 <MarcelineVQ> You'll use something called ReaderT later on for a more advanced exercise so be sure not to skip anything :>
+06:31:46 <ertes> reader and writer together can't model state semantics
+06:31:53 <ertes> try implementing 'modify'
+06:33:06 <Stuart> ertes: what do you mean by point free style
+06:33:13 <ertes> (however, state can model both reader and writer, and in the latter case you should prefer state anyway) =)
+06:33:28 <ertes> Stuart: "point" = argument
+06:33:41 <ertes> f x = g (h x)  -- regular style
+06:33:49 <ertes> f = g . h  -- point-free style
+06:33:57 <ertes> "argument"-free
+06:34:05 <Stuart> I prefer point free style
+06:34:06 <Stuart> too
+06:34:20 <ph88> there are actually more dots in point free style
+06:34:57 <Stuart> I didn't write in point free. I still find difficult. I guess I have to write more haskell:)
+06:35:05 <ertes> Stuart: would you prefer (liftA2 (+) sin cos 5) over (sin 5 + cos 5)?
+06:35:45 <ertes> or rather:  would you prefer (f = liftA2 (+) sin cos) over (f x = sin x + cos x)?
+06:35:47 <hpc> i wouldn't use liftA2, if only because ((+) <$> sin <*> cos) 5 reads a bit better
+06:36:04 <Stuart> Hmmm, actually I correct that. Maybe don't know what talking about because I would find (sin 5 + cos 5) easier to read
+06:36:25 <ertes> it does for some people, but not for others (me)…  but i think we can agree that (sin x + cos x) reads better *in general* =)
+06:37:39 <Stuart> I think I would like to be able write both styles with ease and the pick the one based on the scenario which is appriopriate on ease of reading or maybe peformance
+06:37:58 <Stuart> not sure if write it differently would make perfance difference though
+06:38:39 <Stuart> I am guessing it would but my understanding of haskell is limited
+06:39:10 <Stuart> ertes: thanks for your help. On to state tomorrow
+06:39:28 <ph88> this haskell code so odd .. sometimes you are just don't know what you're doing and sometimes it just makes sense o_O
+06:39:46 <Stuart> It's 12.30am here
+06:39:58 <Stuart> actually haskell today;)
+06:40:07 <Stuart> again after I wake up
+06:41:12 <ertes> Stuart: in general, if you need applicative style to write point-free style, that's a good indication that you shouldn't write point-free style =)
+06:41:24 <ertes> and if you need Monad, it's even clearer
+06:42:18 <ertes> i'd limit point-free style to simple things like (.) and sections
+06:44:25 <Stuart> ertes: I read to bottom of the chaptor and now I found the last exercise I need to use ReaderT. Anyway I give a go.
+06:44:49 <Stuart> Ertes: good points there. I will keep it in mind
+06:46:51 <ph88> why does this work as seperate functions but not combined into function average?  https://paste.fedoraproject.org/462826/77487661/
+06:51:28 <MarcelineVQ> change the $ to explicit (  ) and see if it clears up
+06:52:17 <MarcelineVQ> what you've written results in the middle being (sum lst / fromIntegral) which is not likely to be what you intended
+06:54:10 <ph88> like a sunray through a cloudy sky
+06:55:06 <ph88> hero
+06:57:20 <adarqui> i was about to do a quick heart rate max formula, then i noticed the popular 220-age calculation was developed by: Haskell and Fox .... funfact of the day
+07:00:22 <xcmw> Is it possible to type q? http://lpaste.net/313518
+07:03:16 <ertes> xcmw: looks possible to me, but you need RankNTypes
+07:03:29 <ertes> because you instantiate the lens at different types
+07:04:16 <ertes> hmm, wait
+07:06:13 <ertes> xcmw: i'm not entirely sure (some domain-specific knowledge would help), but it's possible *in principle*
+07:06:27 <ph88> hows that possible that i can use <$> on monads ? i thought i had to use >>=  ??
+07:07:01 <geekosaur> all Monad-s are Functor-s and Applicative-s
+07:07:15 <geekosaur> >>= is what Monad provides *beyond* those
+07:07:40 <geekosaur> it adds the ability to inspect the result of the left action, which neither Functor nor Applicative can do
+07:08:59 <ph88> oooh ok
+07:10:35 <xcmw> ertes: If it is possible, how can I do it? In my application there are more properties and different types but the idea is the same.
+07:17:36 <ph88> i'm getting a bit confused here https://paste.fedoraproject.org/462870/77506211/
+07:19:35 <ph88> inner x = mapM (algo1 <$> getBits x) [1..500]   gives about the same error
+07:19:59 <lyxia> what is algo1
+07:20:46 <lyxia> Rand g BV -> Int ?
+07:20:56 <ph88> algo1 :: BV -> Cnt
+07:21:09 <ertes> xcmw: the general idea is that you take a *polymorphic* lens as argument:  f :: (forall a. Lens' s a) -> …
+07:21:11 <ph88> type Cnt = Int
+07:21:25 <ertes> xcmw: in most cases that only makes sense if 'a' is a member of some class
+07:21:39 <ertes> xcmw: f :: (forall a. (SomeClass a) => Lens' s a) -> …
+07:22:13 <ertes> because otherwise you will have a hard time writing such a lens
+07:22:30 <lyxia> ph88: (algo1 <$> getBits x) has type f Cnt, and since you are passing it as argument to mapM it unifies f with (a0 ->)
+07:22:36 <Jedai__> ph88: (al... x) doesn't look like a function 
+07:22:42 <xcmw> ertes: Ok, I will try that
+07:22:50 <ph88> lyxia, what do you mean "unifies" ?
+07:23:00 <lyxia> ph88: specialize?
+07:23:28 <lyxia> ph88: the point is that you did not pass a function to mapM here.
+07:23:51 <ph88> aaah
+07:24:13 <ph88> ok i changed it to this now:  inner x = mapM (\_ -> algo1 <$> getBits x) [1..500]
+07:24:21 <ph88> i just need to do that 499 times
+07:24:34 <exio4> forM_ [1..500] $ \_ -> :P
+07:25:24 <lyxia> replicateM 499 (algo1 <$> getBits x)
+07:25:38 <ph88> cute
+07:25:49 <lyxia> [1 .. 500] has 500 elements.
+07:27:32 <ph88> alright :P
+07:28:41 <ph88> this is the resulting working code for the ones who are interested .. https://paste.fedoraproject.org/462910/14777512/
+07:29:09 <ph88> it's quite slow
+07:31:33 <ph88> gonna refactor it a bit first
+07:39:02 <ph88> so now i have a list of tupels like   (Fractional a, Integral b) => [(a, b, a)]    i'm gonna find a plotting library
+07:42:10 <Athas> GHC is stalling on 'Renamer/typechecker' (according to -v) on one of my modules.  Is there a way to take a closer look at what's going on?
+07:46:12 <osa1> Athas: usual steps are 1) try to generate a single-module, as small as possible example 2) try to understand which part of the code is causing the problem by removing stuff and checking if GHC is still stalling
+07:47:43 <Athas> osa1: well, I know exactly which part of the code is causing the problem, but it seems to be related to a reference to an imported name.
+07:48:14 <osa1> Athas: maybe you can generate a two-module example then :)
+07:48:30 <osa1> Athas: I mean, have something that can be shared. sharing 100kloc program won't help.
+08:02:01 <aranea> Some years ago, ghci used to require permission to create RWX mmaps, until this was fixed by ghc 7.6 (afair). But now, ghc 8 seems to need those again. Any idea why?
+08:04:01 <ph88> i saw that ghc option unfolding-use-threshold is 60 by default .. and for optimization 16 was given .. what does it mean though that number ?
+08:11:21 <osa1> ph88: see https://github.com/ghc/ghc/blob/master/compiler/coreSyn/CoreUnfold.hs#L837
+08:12:28 <ph88> hhmm so you would think if i set this number higher it will become more performant, no?
+08:13:27 <osa1> ph88: no, it's a delicate business. if you inline but can't do follow up simplifications you end up bloating generating code for no performance gains.
+08:13:41 <osa1> generated code*
+08:14:05 <ph88> ye that sounds pretty delicated ^^
+08:14:32 <osa1> instead of playing with parameters you can add {-# INLINE ... #-} to your functions and see how it changes the performance
+08:23:40 <ph88> what does it mean when a function has a slow path ?
+08:26:21 <osa1> ph88: sometimes when a special condition occurs a function can return/do its thing faster, that's called a fast path.
+08:26:44 <ph88> hmm
+08:32:44 <jedai> ph88: thinks of or() this is a function that doesn't always have to process the whole list before knowing the answer
+08:33:09 <jedai> > or [False, False, False, True]
+08:33:11 <lambdabot>  True
+08:33:29 <jedai> ph88: here or() had to go to the end of the list but :
+08:33:43 <jedai> > or [True, False, False]
+08:33:45 <lambdabot>  True
+08:34:05 <ph88> so if you factor out the slow path ghc might be able to do some optimizations on it
+08:34:13 <Vyn> [False, False, False, True] = 4
+08:34:26 <jedai> here from the first element the answer was already determined, so or() didn't look at the end
+08:34:27 <ph88> or at runtime resolve the thunk only once
+08:34:30 <jedai> proof :
+08:34:46 <jedai> > or ([True] ++ repeat False)
+08:34:48 <lambdabot>  True
+08:35:11 <jedai> see, on this infinite list, or() is able to provide the answer
+08:35:19 <ph88> > or (repeat False ++ [True])
+08:35:25 <lambdabot>  mueval-core: Time limit exceeded
+08:35:48 <osa1> ph88: ususally you can have different assumptions in different paths, if you could use those you can do different optimizations. e.g. `if <cond> then <path1> else <path2>` if the optimizer can make sense of `<cond> here the fact that it's true in <path1> may be used for optimizations
+08:36:12 <osa1> ph88: for example, if <cond> is `null lst`
+08:36:41 <osa1> ph88: you inline `null` to see that it returns true when lst is []. so now you have constant propagation opportunity in <path1> for `lst`
+08:38:04 <ph88> didn't know things had to be inlined for that kind of optimization to work
+08:38:21 <osa1> they do, in GHC
+08:38:31 <ph88> expected the data flow analyses to go cross function boundary
+08:38:50 <osa1> in theory you could do interprocedural analysis
+08:39:02 <osa1> yeah we don't do that in GHC Core
+08:39:33 <ph88> alright
+08:39:38 <osa1> but note that interprocedural analysis is already very limited without control flow analysis in functional languages
+08:39:48 <osa1> so you'd need to do that too
+08:39:55 <ph88> if i have an AST from another language can i use ghc stuff to perform analysis and optimizations on it ?
+08:40:14 <osa1> ph88: not easily
+08:40:36 <ph88> i would have to express that other language as Core, wouldn't i ?
+08:40:43 <jedai> ph88: ghc knows to do things with certain kinds of AST
+08:40:48 <osa1> ph88: even then GHC doesn't have a way to get external Core and compile it
+08:40:58 <ph88> ^^
+08:41:08 <osa1> you could do some hacks to load a Core in a GHC plugin maybe
+08:41:16 <osa1> but there isn't a supported way at the moment
+08:41:23 <osa1> so it's hard to use it as a backend unless you generate Haskell
+08:41:33 <jedai> osa1: there's no support in the GHC API for that ? too bad
+08:41:41 <osa1> jedai: no, there isn't a Core parser
+08:42:06 <ph88> i wanted to have the programmer ask some questions about the code ... like: what is causing this .. or what is the data flow from variable A to B
+08:42:18 <ph88> all kinds of stuff the compiler has the answers for
+08:42:30 <ph88> but how to get them out of the compiler
+08:42:30 <jedai> osa1: but if you build the Core AST yourself you can compile it, no ?
+08:42:47 <osa1> ph88: you need to implement your analyzer in the front-end language, probably. so GHC can't help here.
+08:42:59 <ph88> ok
+08:43:04 <osa1> jedai: I believe that's possible, in the worst case you may need to export some functions from GHC API I think
+08:43:18 <ph88> is there anything that core AST will give me over llvm IR ?
+08:43:32 <osa1> ph88: Core is very high level compared to LLVM IR
+08:43:41 <ph88> oh
+08:43:55 <osa1> ph88: it's called System_FC sometimes, if you're familiar with that
+08:44:02 <ph88> i've read about it
+08:44:14 <osa1> it's basically lambda calculus with coercions and some extra other stuff. very high level compared to other compiler IRs
+08:44:15 <jedai> ph88: probably not (depends on the language you're starting from, if it is purely functional maybe)
+08:44:28 <ph88> i thought it only needed just a few transformation from there to spitting out llvm ir
+08:44:50 <osa1> ph88: no, a great deal of work is done on Core
+08:44:57 <osa1> ph88: the whole optimizer operates in Core
+08:45:03 <osa1> Stg has no optimizations
+08:45:08 <osa1> Cmm has some basic dataflow optimizations
+08:45:09 <ph88> starting with a synchronous imperative language
+08:45:10 <jedai> ph88: no, llvm ir and core are really differents
+08:45:14 <osa1> most stuff is done in Core
+08:45:17 <ph88> ok
+08:45:22 <ph88> Cmm ?
+08:45:31 <jedai> C--
+08:45:38 <ph88> Stg ?
+08:45:40 <osa1> ph88: read about GHC compilation pipeline, it has 3 intermediate languages
+08:45:47 <ph88> i've read about it
+08:45:59 <ph88> the entire document
+08:46:00 <osa1> and you haven't heard about Cmm ?
+08:46:05 <geekosaur> or stg?
+08:46:08 <ph88> i only know it as C--
+08:46:10 <ph88> and forgot about Stf
+08:46:13 <ph88> Stg
+08:46:18 <osa1> read again maybe :)
+08:46:44 <ph88> oh ye i remember now the level below core
+08:46:51 <geekosaur> (how do you forget about the graph reduction engine in a demand evaluation language?)
+08:47:23 <ph88> is ghc by default using ncg or llvm ?
+08:47:28 <osa1> ncg
+08:47:52 <ph88> any advantages of using llvm with ghc ?
+08:47:57 * hackagebot xlsx-tabular 0.2.0 - Xlsx table decode utility  https://hackage.haskell.org/package/xlsx-tabular-0.2.0 (KazuoKoga)
+08:48:00 <osa1> some programs get faster
+08:50:02 <pie__> i have ghc 7.10 installed via stack somehow, how can i get this to work with leksah? is there even a way?
+08:50:45 <pie__> on an unrelated note, i like how theres more people in here than the c || c++ channel
+08:50:59 <pie__> err , c ^ c++
+08:51:41 <ph88> way more friendlier as well
+08:52:52 <osa1> pie__: you may want to try leksah mailing list
+08:53:06 <pie__> ph88, ;)
+08:53:26 <pie__> osa1, ive never really used mailing lists but i guess i can try...
+08:57:57 * hackagebot rattletrap 0.1.1 - Parse and generate Rocket League replays.  https://hackage.haskell.org/package/rattletrap-0.1.1 (fozworth)
+08:59:11 <ph88> i have  Fractional a => M [(Int, a, Int)]   i would like to run zip on it so that i get the first Int from the tuple and an index   should i use something like zipM ?
+09:09:25 <c0dehero> ph88: couldn't you just do `zip (map fst fractions) [1..]`?
+09:09:59 <c0dehero> oh wait
+09:09:59 <c0dehero> it's not a pair, lol
+09:11:20 <c0dehero> well `zip (map (\(a,_,_) -> a) xs) [1..]` would still work
+09:12:31 <ph88> c0dehero, but it's in a monad ..
+09:12:38 <c0dehero> oh sorry. i'm dumb
+09:12:40 <c0dehero> lol
+09:12:42 <ph88> lol
+09:14:21 <c0dehero> i couldn't find zipM but zipWithM seems to be a thing
+09:14:48 <c0dehero> @type zipWithM
+09:14:49 <lambdabot> Applicative m => (a -> b -> m c) -> [a] -> [b] -> m [c]
+09:15:42 <ph88> zipWithM (\(a,b,c) -> a) list [1..]
+09:17:10 <c0dehero> no, that's wrong i think
+09:17:17 <c0dehero> you want a tuple
+09:17:23 <ph88> i think so too, i just tried that and it doesn't work
+09:17:28 <c0dehero> so the first argument should be a function that creates a tuple
+09:17:47 <ph88> id then
+09:18:24 <c0dehero> no, not id
+09:18:54 <ph88> well maybe i should try to return ((a,b,c), index) first before i try to extra a from (a,b,c)
+09:19:15 <c0dehero> maybe
+09:19:28 <ph88> how did you know it's not id though 
+09:19:29 <ph88> ?
+09:20:33 <c0dehero> well, for one you give the function a triple tuple
+09:20:44 <c0dehero> id just returns the same thing, but zip produces pair tuples
+09:21:07 <ph88> i misread zipWithM even .. i thought it operate on the start tuple .. but it operate on the tuples which are created by zip
+09:21:32 <ph88> my next try:  zipWithM (\(a,b,c) idx -> (idx, a)) list [1..]
+09:23:08 <c0dehero> i'll see if i can figure this out in ghci
+09:23:40 <ph88> https://paste.fedoraproject.org/463301/77758194/
+09:26:01 <c0dehero> zipWithM (\(a,b,c) d -> return (a,d)) [(1,1.5,2)] [1..] okay this works
+09:26:38 <glguy> Do you know about zipWith ?
+09:27:59 * hackagebot lightning-haskell 0.1.0.3 - Haskell client for lightning-viz REST API  https://hackage.haskell.org/package/lightning-haskell-0.1.0.3 (cmoreside)
+09:28:35 <c0dehero> glguy: yeah, but ph88 wanst to zip a list in a monad
+09:29:12 <c0dehero> i would suppose you could use bind to get the list into the zipWithM function but i'm not exactly sure how
+09:29:42 <EvanR> sequence :: [m a] -> m [a]
+09:30:13 <c0dehero> the list is already m [a] if i understood correctly
+09:30:18 <ph88> hmm i try with return i get this  https://paste.fedoraproject.org/463329/58587147/
+09:30:28 <glguy> c0dehero: That's not relevant in this case. If you're just using "return" in the first argument of zipWithM, you don't need zipWithM
+09:30:29 <ph88> list :: (Fractional a, MonadRandom m) => m [(Cnt, a, Cnt)]
+09:30:48 <c0dehero> glguy: oh really?
+09:30:52 <glguy> really
+09:30:57 <c0dehero> huh
+09:31:05 <c0dehero> so just use regular zipWith?
+09:31:24 <ph88> i want to go from m [a] to m [b]  where a is (Cnt, x, Cnt) and b is (Int, x)
+09:31:42 <ph88> maybe zipWith with <$>
+09:31:46 <glguy> yeah
+09:31:59 <EvanR> fmap :: ([a] -> [b]) -> m [a] -> m [b]
+09:32:29 <ph88> we have a winner:  zipWith (\idx (a,b,c) -> (idx, a)) [1..] <$> list
+09:32:45 <c0dehero> cool
+09:34:06 <c0dehero> and it works with monads?
+09:34:19 <c0dehero> oh yeah, cool
+09:34:23 <c0dehero> huh
+09:34:46 <EvanR> fmap works with monads, because monads are functors
+09:35:23 <c0dehero> oh, yeah
+09:35:37 <c0dehero> i'm not too comfortable with monads yet, lol
+09:35:47 <ph88> c0dehero, yes as i understood it  the monad is like a container  so you can use <$>  but then if you want to execute the actions of the container you have to use >>=
+09:36:26 <ph88> at first i thought <$> and >>= where the same but just for different container types
+09:36:26 <c0dehero> yeah, i see why <$> works now
+09:36:40 <EvanR> container...
+09:37:28 <c0dehero> lol
+09:37:48 <EvanR> a random monad isnt conceptually like a container to me, its an environment where you can repeatedly ask for a random number and you get a different one each time
+09:37:49 <ph88> >>= says something about the sequence of things is it not ?
+09:38:07 <c0dehero> a monad is just a monoid in the category of endofunctors
+09:38:10 <EvanR> well not necessary different. but not necessarily the same
+09:38:20 <ph88> to me a monad is a container with an IO action inside
+09:38:27 <EvanR> what??
+09:38:34 <EvanR> thats way off
+09:38:57 <Rembane> A monad is a way to represent computations.
+09:39:06 <EvanR> > join [[1,2,3],[4,5,6],[7,8,9]]
+09:39:08 <lambdabot>  [1,2,3,4,5,6,7,8,9]
+09:39:15 <hpc> a monad is a type m with join :: forall a. m (m a) -> m a
+09:39:23 <EvanR> container... with no IO action inside
+09:39:24 <hpc> that's also an applicative functor
+09:39:41 <ph88> Rembane, applicative is computation, monad is optional computation  in my book at least :>
+09:40:34 <hpc> that even more less right
+09:40:47 * Clint chuckles.
+09:41:39 <lyxia> What an odd book.
+09:41:41 <c0dehero> i think we've reached the daily quota of monad arguments
+09:41:55 <ph88> EvanR, hhmmm [1,2,3] is the same action as [1,2,3,4,5,6,7,8,9]
+09:42:10 <Rembane> ph88: Well, it could be, but those properties don't hold for all monads. 
+09:42:26 <hpc> > [1, 2, 3] >> "x"
+09:42:28 <lambdabot>  "xxx"
+09:42:35 <hpc> > [1, 2, 3, 4, 5, 6, 7, 8, 9] >> "x" -- not the same
+09:42:37 <lambdabot>  "xxxxxxxxx"
+09:44:00 <c0dehero> lol what
+09:44:06 <EvanR> monads are an exercise in testing the IT communities ability to dish out misleading information with a straight face, and then what to do if its detected
+09:44:21 <c0dehero> :D
+09:44:22 <amx> EvanR++
+09:44:22 <Clint> i thought they were an exercise in making me hungry for burritos
+09:44:56 <ph88> but if you are using monads on pure value and functions you should be thinking in applicative instead imo
+09:45:50 <c0dehero> why?
+09:45:55 <ph88> this   join [[1,2,3],[  is not a good demonstration of what monad gives you on top of applicative
+09:46:15 <Lokathor> EvanR, a complete version of curses gets closer and closer
+09:46:26 <EvanR> the unabridged curses?
+09:46:31 <c0dehero> i'm pretty sure monads are still good for keeping state while still being pure
+09:46:48 <ph88> are you talking about the State monad ?
+09:46:50 <Lokathor> EvanR, no, complete in the "none of the functions say 'undefined' in their defintion" sense
+09:46:51 <hpc> Monad is useful for loads of things
+09:47:07 <hpc> monadic parsers are more powerful than applicative parsers
+09:47:13 <EvanR> ph88: actually that is really useful, im using it to search and filter the valid moves of chess
+09:47:13 <hpc> Monad gives you list comprehensions
+09:47:46 <hpc> join is a useful operation on just about every type that supports it
+09:48:04 <hpc> > join (Just Nothing)
+09:48:05 <lambdabot>  Nothing
+09:48:19 <hpc> > join (+) 5
+09:48:19 <ph88> > Data.List.concat [[1,2,3],[4,5,6],[7,8,9]]
+09:48:21 <lambdabot>  10
+09:48:21 <lambdabot>  [1,2,3,4,5,6,7,8,9]
+09:48:56 <c0dehero> well. list is just one monad
+09:48:58 <EvanR> yeah you may have noticed doing a lot of concat and map while processing lists
+09:49:49 <ph88> c0dehero, well you know what i just realise .. maybe monad will be most useful in mixing data with code like lisp
+09:49:57 <simukis_> is there an `until` which applies the function, then checks for condition and depending on condition returns either the old value or the new one
+09:50:08 <ph88> simukis_, takeWhile ?
+09:50:21 <hpc> simukis_: what type do you want it to have?
+09:50:26 <c0dehero> ph88: huh? what do you mean mixing data with code?
+09:50:43 <simukis_> ph88: that’s what I’m using now, but actually exracting data becomes fallible
+09:50:55 <simukis_> potentially
+09:51:31 <patsToms> morning. How this pattern works - "f (x:xs)"? What really it is matching?
+09:51:46 <Rembane> patsToms: It matches a list of at least one item.
+09:51:59 <athan> patsToms: data [a] = [] | a : [a]
+09:52:00 <ph88> c0dehero, actually about applicative, you can have containers with computation (code) and containers with data
+09:52:20 <athan> it's matching the second case, where `x::a` and `xs :: [a]`
+09:52:47 <c0dehero> ph88: you mean like abstract syntax trees?
+09:53:17 <simukis_> alternatively, is there `last' :: [a] -> Maybe a`?
+09:53:46 <patsToms> oh, thanks Rembane, athan 
+09:55:35 <EvanR> ph88: not sure if we have first class code. but applicative's type variable could be a function type, or the applicative itself could be a function in different ways
+09:56:25 <EvanR> actually in all useful cases youre using an applicative parameterized by a function
+09:59:10 <simukis_> what was the secret incantation to invoke the pointfree bot again?
+09:59:22 * simukis_ remembers there being one years ago, is it still up?
+09:59:29 <c0dehero> @help
+09:59:30 <lambdabot> help <command>. Ask for help for <command>. Try 'list' for all commands
+09:59:30 <MarcelineVQ> ​@pl
+09:59:40 <simukis_> thanks!
+10:00:40 <Rembane> patsToms: No worries, good luck!
+10:02:16 <bollu> how do I convert Float to Double
+10:02:17 <bollu> ?
+10:02:26 <monochrom> realToFrac
+10:02:27 <MarcelineVQ> simukis_:  there's safe versions of functions in various libs or you can roll your own, safeLast would be pretty straightforward and possibly fun to make yourself
+10:02:35 <bollu> oh right
+10:02:41 <bollu> god damn I forget it often
+10:02:47 <monochrom> :)
+10:03:53 <MarcelineVQ> simukis_: http://hayoo.fh-wedel.de/?query=[a]+->+Maybe+a
+10:03:53 <simukis_> MarcelineVQ: ah right, my hands are kinda bound wrt using external libraries, so I used a `last . (default:)` for now
+10:03:58 <bollu> :t realToFrac
+10:04:00 <lambdabot> (Real a, Fractional b) => a -> b
+10:04:11 <bollu> wait, Double is a Fractional?
+10:04:52 <bollu> monochrom: what about Int -> Float?
+10:04:59 <monochrom> fromIntegral
+10:05:08 <bollu> right, thanks :)
+10:05:25 <monochrom> both Double and Float are both Real and Fractional
+10:06:36 <monochrom> @quote monochrom fromIntegral
+10:06:36 <lambdabot> monochrom says: You've got an Int / But you want Double / Who do you call? / "fromIntegral!"
+10:08:25 <MarcelineVQ> simukis_: I'm not sure what default is, with a no-externals restricton I'd go with something like: lastMay [] = Nothing; lastMay x = Just (last x)
+10:08:49 <simukis_> MarcelineVQ: just some default value I would otherwise use with fromMaybe
+10:09:39 <simukis_> so I’ve essentially got myself a `last' :: a -> [a] -> a`
+10:10:00 <simukis_> good enough for the simplicity of implementation :)
+10:10:15 <monochrom> yeah that's nice too
+10:10:19 <MarcelineVQ> :>
+10:16:39 <ph88> how do i get this MonadRandom to work with IO ??   https://paste.fedoraproject.org/463396/77761355/
+10:21:41 <lyxia> ph88: the third argument of toFile has type EC r () which is a synonym for StateT r (State CState) a, which is not MonadRandom
+10:22:08 <lyxia> Wrap it in RandT.
+10:22:38 <ph88> is this about monad transformers ?
+10:23:04 <lyxia> StateT and RandT are monad transformers.
+10:23:46 <ph88> i'm thinking i should read about monad transformers firts to solve this piece
+10:25:50 <Lokathor> oh no it can't handle terminal resizing :(
+10:26:00 <lyxia> ph88: actually you can also run points before calling toFile
+10:26:13 <lyxia> ph88: points >>= \pts -> toFile ...
+10:26:23 <ph88> easy !
+10:28:09 <ph88> lyxia, seems something else wrong with that though  https://paste.fedoraproject.org/463403/62028147/
+10:29:05 <lyxia> ph88: points :: ... => f [(t, Cnt)]   you should tell it how to instantiate t.
+10:29:17 <ph88> as Int
+10:29:20 <ph88> ah ok
+10:30:04 <ph88> points = zipWith (\idx (a,b,c) -> (idx, a)) [(1:: Int)..] <$> (runAlgo algo1)    i thought this would fix it
+10:30:05 <ph88> but no
+10:30:19 <ph88> i just change t to Int that was enough
+10:31:41 <ph88> weee i have the result of my program !
+10:34:10 <heebo> ive just used criterion to compare Map.lookup with List.lookup (associated list) and found list to be faster, is this expected or do i need to check my code for errors?
+10:34:35 <lyxia> that doesn't sound right
+10:36:32 <ph88> lyxia, small syntactical question .. right now i have  points >>= \pts -> toFile C.def "mychart.png" $ do .. more lines ..  what if i want to do >>= after the do block? can i put it at the end of the return statement ?
+10:37:19 <lyxia> What do you mean, after the do block?
+10:40:32 <ph88> i mean like this   https://paste.fedoraproject.org/463419/14777628/
+10:40:46 <heebo> the result of a do block is a monad , if you want to feed it into something else best to use () $ to end the expression alternatively bind it to a new name for clarity
+10:40:47 <ph88> that you can mix do-return blocks with >>=
+10:43:57 <lyxia> I'm not sure what you're trying to do, but >>= does not mix well with $
+10:45:10 <ph88> alright ^^
+10:45:43 <ph88> any obvious things to do here to speed up this program?? https://paste.fedoraproject.org/463430/77763094/
+10:46:17 <ph88> this is the graph i get https://imgur.com/a/r3SYQ i would like it to be a bit more accurate
+10:57:05 <heebo> you could try making runAlgo pointfree
+10:57:14 <heebo> *algo1
+10:57:49 <heebo> this looks trivial to do and ghc may cache results on the heap
+10:57:50 <polo> Why and [] gives True?
+10:58:06 <heebo> polo: que?
+10:58:46 <glguy> polo: Because and checks that there are no False elements in your list
+10:58:49 <glguy> [] has none
+10:58:58 <polo> heebo: I mean adn [True, True,False] gives False but [] has no True or False
+10:59:08 <sim642> I just saw a weird thing happen. Using the classic fibs = 0 : 1 : zipWith (+) fibs (tail fibs) is nice and fast. If I add in fibs :: (Integral a) => [a] it becomes insanely slow. Why?
+10:59:38 <sim642> using iterate to generate fibs doesn't suffer from this slowdown even with the explicit type
+11:00:50 <polo> glguy: then why or [] gives False?
+11:00:57 <glguy> sim642: Because if the type of fibs is polymorphic, then the results are no longer cached
+11:01:08 <glguy> and you devolve to exponential time
+11:01:11 <hpc> sim642: polymorphism like that breaks the knot tying, fibs is a different fibs every time
+11:01:23 <glguy> polo: or checks that this list as at least one True, [] has none
+11:01:26 <xa0> ah thought so, so memoization is failing on it
+11:01:29 <hpc> because it's behind a type class dictionary
+11:02:07 <hpc> sim642: what happens if you tweak it a bit
+11:02:21 <hpc> fibs = let fibs' = 0 : 1 : zipWith (+) fibs' (tail fibs') in fibs'?
+11:02:21 <heebo> polo im inclined to agree, although one can think of the implementation of and as defaulting to true and waiting to be proved false
+11:02:46 <heebo> likewise or would probably default to false and exit early as soon as its proved true
+11:03:02 <glguy> polo: This behavior is nice, it means we can think of these two as equivalent:  and xs && and ys  === and (xs ++ ys)
+11:03:15 <glguy> and   or xs || or ys  === or (xs ++ ys)
+11:03:19 <sim642> hpc, that indeed looks as performant
+11:03:38 <hpc> as performant as polymorphic or monomorphic?
+11:03:39 <Lokathor> EvanR, https://github.com/Lokathor/fullainth/blob/master/lib/Terminal/Hexes.hs
+11:03:57 <Lokathor> resizing the terminal does not work at all right now, it just crashes the program >_<
+11:04:00 <sim642> as the monomorphic one
+11:04:04 <hpc> cool
+11:04:43 <sim642> Although it looks somewhat confusingly redundant now
+11:05:02 <hpc> it is a bit, but the trick to it is that fibs' is "monomorphic"
+11:05:15 <sim642> I think I'll end up keeping the iterate version because I'm going to need pairs of consecutive fibs anyway
+11:05:35 <hpc> @src iterate
+11:05:35 <lambdabot> iterate f x = x : iterate f (f x)
+11:06:31 <Hijiri> heebo: how many elements did you put in the list / map?
+11:07:05 <Hijiri> also if lookups were for elements closer to the front of the list, that could make it shorter
+11:10:46 <glguy> polo: Do you see how and and or mapping [] to the identity element for their corresponding boolean relations make sense when related to ++ ?
+11:11:54 <polo> glguy: yes I see, thanks!
+11:35:04 <juri_> niche question: I'm a Free Software Zealot, and I'm looking at porting a haskell program to run on GPUs. what GPU is best supported by the accelerate package using just Free Software?
+11:40:15 <hpc> the cuda backend and open-source drivers perhaps
+11:41:25 <hpc> it's damn near impossible to do anything with GPUs without at least a little proprietary stuff
+11:42:43 <hpc> or the experimental opencl backends
+11:42:50 <hpc> which.... nvidia still supports better
+11:43:04 * hackagebot sbv 5.13 - SMT Based Verification: Symbolic Haskell theorem prover using SMT solving.  https://hackage.haskell.org/package/sbv-5.13 (LeventErkok)
+11:51:17 <polo> Hello, can someone please help me with no. 4? I've been trying this from yesterday but I'm just not getting how to do it.http://lpaste.net/294377
+11:55:44 <pie__>  juri_ possibly related, i just got linked this earlier, though its not haskell, https://www.cs.indiana.edu/~eholk/papers/hips2013.pdf
+11:56:17 <pie__> hm i just noticed thats from 2013
+12:00:11 <hpc> polo: start by writing a function that does a small part of it, and takes all the parameters you could possibly want
+12:00:28 <hpc> polo: repeat for other small parts and combining them until you have everything
+12:04:18 <Athas> juri_: none of them.
+12:04:25 <ph88> heebo gone ?
+12:04:48 <Athas> juri_: if you want a free-software approach to GPUs, the Intel Beignet driver is the only one I know of.  Although AMD may get there.
+12:05:02 <EvanR> what is a good or conventional name for an operation which is like "you provide no arguments, you get a value of type a, and it causes side effects"
+12:05:27 <daey_> dontUseMe? :P
+12:05:42 <EvanR> like getChar falls into this category
+12:05:46 <monochrom> polo: You will need recursion, not while-loop. You will need passing parameters, not incrementing a variable.
+12:05:47 <Rembane> Procedure, if you're oldschool
+12:05:49 <EvanR> but "getter" is something else
+12:06:11 <EvanR> procedure has not as specific connotation
+12:06:24 <Rembane> That's true.
+12:06:41 <monochrom> procedure.
+12:07:06 <EvanR> a procedure might not have any side effects or return anything
+12:07:12 <EvanR> and it might take arguments
+12:07:13 <monochrom> anything of type "x :: IO Blah" has no specific connotation either.
+12:07:42 <monochrom> No, realistic procedures have effects.
+12:08:02 <EvanR> readChan, takeMVar, readTVar, getChar, supply
+12:08:05 * hackagebot rattletrap 0.1.2 - Parse and generate Rocket League replays.  https://hackage.haskell.org/package/rattletrap-0.1.2 (fozworth)
+12:08:12 <EvanR> theres no commonality in the nameing here
+12:08:28 <EvanR> dequeue, but that conjures image of a pure queue
+12:08:52 <EvanR> random
+12:09:17 <monochrom> No, "dequeue" sounds purely functional to a purely functional person, mutating to an imperative person.
+12:09:31 <EvanR> good / conventional name for haskell
+12:10:10 <EvanR> i will also accept the answer "this idea exists and we dont have a name for it" too
+12:10:34 <monochrom> You have had two votes for "procedure", and 0 votes for any other alternative. While you should still wait for more votes to come in, I'm ready to bet cdn$1 the winner will be "procedure". Despite all your philosophical argument.
+12:10:58 <EvanR> thats a terrible name for this, because void fireMissiles(target) is a procedure and not what im talking about
+12:11:06 <monochrom> This idea exists and I have already called it "procedure" and it has been like that since 1988.
+12:11:08 <EvanR> its almost the exact opposite thing
+12:12:40 <monochrom> OK, if you zero-in on the zero-arguments case, we say "action" in Haskell contexts.
+12:12:47 <EvanR> maybe if i come up with laws for the operation we might not feel as comfortable calling it a procedure
+12:13:09 <EvanR> but actions may not return anything useful
+12:13:21 <Rembane> EvanR: What about the word generator?
+12:13:22 <amx> how about IO Input Action for lack of a better name
+12:13:32 <Rembane> What=How
+12:13:38 <EvanR> word generator?
+12:13:46 <EvanR> input?
+12:14:27 <Rembane> No, let me add more punctuation: "generator" as a word for denoting some side effect inducing action that returns something.
+12:14:40 <EvanR> oh
+12:14:56 <EvanR> right generator is what this is called in language x
+12:15:15 <EvanR> but not sure thats appropriate in haskell
+12:15:30 <Rembane> It might mean something else.
+12:15:40 <EvanR> lazy lists are generators, algebras have generators
+12:16:09 <Rembane> Could you use conduit terminology for it?
+12:16:24 <EvanR> and its all in all weird to call the operation itself a generator
+12:16:26 <amx> IO producer?
+12:16:58 <EvanR> its not necessarily IO, but "produce" sounds about right
+12:17:16 <EvanR> sor of
+12:17:30 <Rembane> If you shake the word producer hard enough you get the word procedure. :D
+12:18:04 <EvanR> > (sort "procedure", sort "producer")
+12:18:06 <lambdabot>  ("cdeeoprru","cdeoprru")
+12:18:11 <EvanR> nah
+12:18:47 <EvanR> or we could take those to be the same on the basis of english american spelling split
+12:19:24 <Rembane> Seems legit.
+12:19:37 <EvanR> cdeoprru it is
+12:20:03 <amx> with that name you could claim it comes from old lisp terminology
+12:20:16 <EvanR> at first i thougt "take" no, "get" no, "deqeueu" no...
+12:20:27 <EvanR> queue
+12:20:48 <EvanR> plenty of good already allocated things
+12:20:52 <Rembane> "In the great language of ancient lisp, it is called cdeoprru"
+12:21:34 <EvanR> hmm, pop
+12:22:10 <pie__> i always think defun means remove fun
+12:22:15 <pie__> :(
+12:23:01 <monochrom> it is true. more code is less fun.
+12:34:43 <jmnoz> can I get a recommendation for what to use to download HTTPS?
+12:35:00 <Rembane> jmnoz: wreq is quite nice.
+12:36:07 <jmnoz> Rembane: OK thanks! 
+12:36:12 <amx> curl works too
+12:54:30 <ph88> hey guys, when i run my program with too many iterations i get: [1]    4224 killed     stack exec regs
+12:54:35 <ph88> why does the program not finish ?
+12:55:20 <amx> type: dmesg
+12:56:39 <ph88> out of memory
+12:57:11 <ph88> [28487.660877] Out of memory: Kill process 4224 (regs) score 671 or sacrifice child
+12:57:11 <ph88> [28487.660887] Killed process 4224 (regs) total-vm:10853356kB, anon-rss:7111428kB, file-rss:0kB
+12:57:18 <EvanR> you probably have a bug
+12:57:23 <ph88> :(
+12:57:29 <ph88> what kind of bug ?
+12:57:39 <dmwit> Nice, you allocated 10GB!
+12:57:43 <ph88> :D
+12:58:08 <EvanR> a space leak
+12:58:12 <dmwit> You might like Neil Mitchell's tips for tracking down space leaks (assuming your problem doesn't actually need 10GB to run).
+12:58:21 <ph88> how you know it's a leak and not just the normal operation of the program ?
+12:58:29 <dmwit> http://neilmitchell.blogspot.com/2015/09/detecting-space-leaks.html
+12:58:31 <EvanR> just a guess
+12:58:35 <ph88> oki
+12:58:36 <ongy> do you think it should go up to 10GB?
+12:58:37 <dmwit> ph88: I was careful not to make that claim. =)
+12:58:37 <monochrom> I don't.
+12:59:02 <ph88> well .. 100 bits * 10000 iterations
+12:59:06 <monochrom> err, I don't know whether it's a leak or a bug or normal
+12:59:21 <ph88> * 100
+12:59:35 <dmwit> > 100 * 10000 / 8 / 1024 / 1024 / 1024
+12:59:35 <monochrom> especially since I don't know the specification
+12:59:37 <ongy> 100bits? that doesn't sound like something ghc does
+12:59:37 <lambdabot>  1.1641532182693481e-4
+12:59:54 <dmwit> ph88: 0.0001GB /= 10GB
+13:00:00 <monochrom> and you know what, even if I know the specification, I still don't know whether the specification is right or wrong to begin with
+13:00:22 <EvanR> you need a cumulative hierarchy of specifications
+13:00:23 <ph88> well i think it's alocating much more than 1 bit for 1 bit .. using Data.BitVector
+13:00:40 <monochrom> Do not think. Collect evidence.
+13:00:51 <dmwit> monochrom: por que no las dos?
+13:01:13 <monochrom> I don't know. What is por que no las dos? I think I only know "que".
+13:01:19 <dmwit> monochrom: Why not both?
+13:02:48 <monochrom> Because expert's thinking is right, beginner's thinking is flawed.
+13:03:05 <slack1256> dmwit: porfin! alguien mas que habla español :-D
+13:03:28 <monochrom> The tragedy of expert advice is that experts give advices that work for only experts.
+13:04:07 <monochrom> (hrm why am I changing singular to plural in the middle? in fact why do I even think that it could be plural?)
+13:07:44 <jmcintosh> Hi all. Just jumping into Haskell, enjoying it. I figured trying to implement a basic implementation of todotxt.com's todo.txt would be a good starter.
+13:08:30 <jmcintosh> Already have basic show implemented, though not sure if it's proper/can be improved.
+13:08:41 <jmcintosh> See https://gist.github.com/anonymous/e194f9607685132fb7f952e951ea2433, for the curious
+13:08:44 <dmwit> slack1256: I know enough Spanish to understand what you just said, but actually I just speak fluent meme.
+13:09:18 <slack1256> dmwit: well, spanish it is kind of a meme language already, so good on you
+13:09:19 <monochrom> it's all latin to me
+13:10:06 <Tuplanolla> Why break `read . show = id`, jmcintosh?
+13:10:35 <monochrom> there is a read to break?
+13:10:38 <dmwit> jmcintosh: Normally, people recommend that `Show` produce valid Haskell code.
+13:11:03 <dmwit> jmcintosh: That's not a hard-and-fast rule, but generally pretty-printing stuff is put in a separate class.
+13:11:31 <glguy> You don't even need a class; you can just have some function renderTodo
+13:11:34 <dmwit> jmcintosh: Other than that this looks fairly clean to me.
+13:11:50 <dmwit> jmcintosh: `intercalate " "` might be better as `unwords`
+13:12:36 <dmwit> glguy: Sure, though it's sometimes pretty to have a single `render` function that works on all your types.
+13:12:49 <dmwit> s/function/name/ I guess
+13:13:22 <EvanR> and it works because its all based on Generic deriving
+13:13:24 <vise890> hi all .. how can i specify a default command in optparse-applicative?
+13:18:37 <Vq> @type fix flip
+13:18:38 <lambdabot> a -> a -> c
+13:18:53 <xa0> ooh
+13:18:58 <xa0> what does that do
+13:19:31 <Tuplanolla> Nothing useful.
+13:19:54 <xa0> yeah
+13:19:59 <xa0> figures
+13:21:32 <Tuplanolla> :t fix id
+13:21:34 <lambdabot> a
+13:23:08 * hackagebot postgresql-simple-bind 0.3.0.0 - FFI-like bindings for PostgreSQL stored functions  https://hackage.haskell.org/package/postgresql-simple-bind-0.3.0.0 (zohl)
+13:37:27 <Lokathor> any way to stick haddock onto the lenses made by ''makeLenses?
+13:37:29 <Lokathor> I suspect not
+13:39:59 <lyxia> Might as well put your docs on the fields themselves.
+13:40:30 <jmcarthur> You could make wrapper lenses with documentation.
+13:40:41 <kirillow> https://gist.github.com/anonymous/fb2edea1acf8fbbfe685ce152766a33d why do I get an error expecting one more argument?
+13:41:32 <jmcarthur> kirillow: Eq expects a type, not just a type constructor (which expects a type argument)
+13:42:04 <jmcarthur> kirillow: So it needs to look like   Eq (Pair a)    which will still have a type error, but perhaps one you will have an easier time understanding? If not, just ask about it.
+13:43:07 <kirillow> jmcarthur: Thank you!
+13:43:11 <glguy> Lokathor: http://lpaste.net/314491
+13:43:29 <glguy> You can write haddocks for makeLenses generated code that way
+13:43:50 <jmcarthur> glguy: Ah, that's nice.
+13:44:08 <Lokathor> fancy
+13:46:55 <glguy> Type constructor describes a name, it doesn't have to do with expecting an argument
+13:49:10 <jmcarthur> glguy: I meant "not just any type constructor".
+13:49:36 <jmcarthur> glguy: Ah, it was the parenthetical that was wrong. I phrased it poorly.
+13:51:45 <jmcarthur> I feel like there should be a name for things of kind k1->k2. Maybe I should just use "type function" for that, but that seems to suggest power I don't intend.
+13:56:08 <Lokathor> so can i make the generated haddock link to another site for all modules that aren't the module it's currently generating documentation for?
+13:56:35 <Lokathor> in other words, i want the docs for, Int say, to link to the hackage version of that docs
+13:58:02 <Tuplanolla> You can have them link to local versions, Lokathor.
+13:58:09 * hackagebot hylogen 0.1.5.0 - GLSL embedded in Haskell  https://hackage.haskell.org/package/hylogen-0.1.5.0 (sleexyz)
+13:58:11 * hackagebot hylide 0.1.5.0 - WebGL live-coding environment for writing shaders with Hylogen  https://hackage.haskell.org/package/hylide-0.1.5.0 (sleexyz)
+13:58:17 <Tuplanolla> That's one more reason to install local docs.
+13:58:22 <Lokathor> but then i have to generate all those local versions
+14:01:20 <EvanR> jmcarthur: function makes sense to me
+14:01:44 <EvanR> just having a function type doesnt mean you can have arbitrary functions, it has to be definable
+14:02:43 <jmcarthur> EvanR: Of course, but a lot of people are still going to think I'm talking about type families or type level lambdas or some crazy thing.
+14:03:09 * hackagebot hylogen 0.1.5.1 - GLSL embedded in Haskell  https://hackage.haskell.org/package/hylogen-0.1.5.1 (sleexyz)
+14:03:11 * hackagebot hylide 0.1.5.1 - WebGL live-coding environment for writing shaders with Hylogen  https://hackage.haskell.org/package/hylide-0.1.5.1 (sleexyz)
+14:03:49 <younder> I'm having a problem with ByteStringCompat see http://lpaste.net/314551 .  Why s this library  package contain an error?
+14:04:07 <EvanR> jmcarthur: well, a type family isnt a function on kinds
+14:04:20 <EvanR> and theres no type level lambdas
+14:04:48 <EvanR> * -> * really is a function from * to *
+14:05:02 <EvanR> type
+14:05:04 <EvanR> "type"
+14:05:26 <jmcarthur> no?     Prelude> type family Foo a    Prelude> :k Foo    Foo :: * -> *
+14:05:36 <EvanR> right
+14:05:38 <glguy> younder: Try adding ()s:  #if !(MIN_VERSION_bytestring(0,10,0))
+14:05:58 <EvanR> thats the kind it gets... which is unfortunate
+14:05:59 <jmcarthur> I don't think anything I said implied that type families were functions on kinds
+14:06:22 <jmcarthur> Ah, you're trying to draw some distinction I didn't make (and don't understand).
+14:06:23 <EvanR> you said you thouht people would think of it that way, since type families usually are described as functions
+14:06:38 <EvanR> im saying we shouldnt accept that ;)
+14:06:47 <EvanR> type families arent defined on the entire domain
+14:06:57 <EvanR> so theyre really functional relations between types
+14:07:13 <jmcarthur> They aren't general enough to be relations though.
+14:07:27 <jmcarthur> Wait, do we have injective type families yet?
+14:07:30 <EvanR> functional relations
+14:07:37 <EvanR> yes
+14:07:43 <EvanR> and that adds another restriction
+14:07:49 <jmcarthur> Now I need to rethink.
+14:08:32 <dgpratt> anyone use spacemacs + intero? I'm reading docs that claim that REPL commands are available via `SPC m i`, but I don't see such a menu
+14:08:49 <younder> glguy, The problem is I didn't write it, and I can't even find it.
+14:09:34 <dgpratt> I do have a `SPC m s` command "haskell/repl", which makes me wonder if I don't have things configured as I intended
+14:09:41 <glguy> younder: Well, you'll have to download the package and find it if you want to build that package on the old environment you're using
+14:10:23 <younder> glguy, yes, I guess
+14:12:15 <jmcarthur> dgpratt: Sounds like it's not configured correctly.
+14:12:25 <jmcarthur> dgpratt: I indeed have a ,i prefix.
+14:12:40 <dgpratt> ok, thanks jmcarthur
+14:12:57 <jmcarthur> dgpratt: When you load a *.hs file does it say anything about configuring intero or anything?
+14:13:21 <jmcarthur> dgpratt: Maybe intero only becomes active if you are using the auto-completion layer? I know the haskell layer treats it as an auto-completion backend.
+14:13:41 <jmcarthur> dgpratt: (Which I think is a little weird, but I use auto-completion anyway, so I don't mind.)
+14:17:15 <Lokathor> whee, docs! http://lokathor.com/fullainth/Terminal-Hexes.html
+14:18:16 <dgpratt> sans comments, my spacemacs layer config looks like this: https://gist.github.com/anonymous/ded8f4b6ce3b15fdb70b8aaa9e68ed30
+14:22:53 <lyxia> younder: https://github.com/marcoy/ParConcHaskell/blob/febae4840f5c0978483db6b83e0db28ce46e7d7e/Ch03/src/ByteStringCompat.hs ?
+14:23:25 <younder> lyxia, looks like it
+14:24:32 <lyxia> younder: Are you doing stuff with "Parallel and Concurrent Programming in Haskell" ?
+14:24:51 <jmcintosh> Thanks dmwit, Tuplanolla et al for comments.
+14:26:33 <younder> lyxia, Yes I was tryng a example in parconc-examples, but they seem to heva forgotten about ByteStringCompat.hs and  since that is in several other libraries as well I got confused
+14:26:59 <voidrays> Dear all, does emacs flycheck work with GHC 8.0.1? If so, does anyone have a config for it?
+14:27:14 <jmcarthur> dgpratt: Your haskell variables should go with the haskell layer, not the auto-completion layer.
+14:27:24 <younder> lyxia, They have a seperate download of just the examples, not organised by chapter
+14:27:37 <jmcarthur> dgpratt: That doesn't looks like legal syntax for the auto-completion layer.
+14:27:57 <jmcarthur> dgpratt: (haskell :variables haskell-completion-layer 'intero)
+14:32:10 <voidrays> My flycheck says this: Suspicious state from syntax checker haskell-ghc: Flycheck checker haskell-ghc returned non-zero exit code 1, but its output contained no errors: <command line>: cannot satisfy -package extensible-exceptions
+14:32:17 <voidrays> I'll post .emacs in a second
+14:33:11 * hackagebot resolve-trivial-conflicts 0.3.2.3 - Remove trivial conflict markers in a git repository  https://hackage.haskell.org/package/resolve-trivial-conflicts-0.3.2.3 (EyalLotem)
+14:34:06 <voidrays> https://github.com/methylaldehyde/dotfiles/blob/master/_emacs#L81-L84 here is the relevant section. Any help from Emacs users is highly appreciated.
+14:35:14 <EvanR> jmcarthur: also the k's make me think were talking about type level stuff, and in haskell that implies were definitely not talking about value level, so no confusion about functions (cross fingers)
+14:35:50 <coleman> Anyone know how to eval a line or function in haskell-mode without switching to the repl?
+14:35:53 <coleman> in emacs
+14:37:55 <voidrays> Haha, welcome to #emacs (I've just asked an emacs-related question here)
+14:38:10 <coleman> ha okay
+14:38:53 <voidrays> Same problem with 7.10.3
+14:51:47 <mtn_> This is not strictly a haskell question, but I'm working on a parser and am nto sure what the difference between a terminal and a nonterminal symbol would be?
+14:52:02 <mtn_> Would a terminal symbol be like ")" and a nonterminal "<)" or something?
+14:52:18 <voidrays> It turns out that flycheck works, but it keeps spamming with this "Suspicious" thing.
+14:53:00 <johnw> mtn_: a non-terminal refers to other terminals and nonterminals
+14:53:06 <voidrays> mtn_: evening on not strictly haskell questions on #haskell. I'm not sure about the context, but terminal thingies in grammars are things that terminate parsing. 
+14:53:09 <johnw> mtn_: a terminal is something atomic to the parser
+14:53:11 * hackagebot rattletrap 0.1.3 - Parse and generate Rocket League replays.  https://hackage.haskell.org/package/rattletrap-0.1.3 (fozworth)
+14:53:25 <int-e> mtn_: the terminology refers to parse trees; terminal symbols are the leafs of the parse tree (typically tokens; for simple parsers, characters); non-terminals are the inner nodes of the tree (which have subtrees)
+14:53:46 <voidrays> And a non-terminal is a set of either term... well, others answered faster.
+14:53:47 <johnw> yes, that's a good way to say it
+14:54:01 <kadoban> http://hackage.haskell.org/package/data-memocombinators-0.5.1/docs/src/Data-MemoCombinators.html#bool How does this memoize ... anything? It's not giving a name to f True or f False, right? Shouldn't that be how it's done? Confused.
+14:55:04 <mtn_> got it, thanks for the explanations
+14:55:40 <johnw> kadoban: I believe it's based on the fact that thunks are replaced by their value exactly one
+14:55:52 <johnw> or I should say "their evaluation"
+14:55:54 <mtn_> So, for example, a integer would be a terminal and an operator like multiplcation would be a nonterminal
+14:57:34 <kadoban> johnw: Isn't this the same as expecting an arbitrary function application to be memoized though ... which I thought wasn't done?
+14:57:52 <johnw> kadoban: how do you mean?
+14:58:13 <kadoban> johnw: Okay, so if I do  f 2 + f 2, that's likely going to not be shared, right?
+14:58:24 <johnw> that's a different question
+14:58:33 <johnw> GHC mainly doesn't do common sub-expression elimination
+14:58:36 <johnw> so those are two separate thunks
+14:58:47 <johnw> (well, since the arguments to + are strict, there's no thunk, but you get the idea)
+14:59:09 <johnw> Memo is forcing sharing
+14:59:18 <johnw> so that all the shared calls result in a single evaluation
+14:59:28 <kadoban> I don't see where it's forcing sharing :-/
+14:59:46 <johnw> whel you say "x = bool f", you can now reuse x multiple times
+15:00:02 <johnw> but there will only ever be a single evaluation made of either f True or f False behind the scenes
+15:01:05 <EvanR> if you use memocombinators
+15:01:23 <johnw> this is no different than memoizing in any other language by using a data structure that references a computation, and then caches the result of the computation after the first use and thereafter just returns you the cached value
+15:01:34 <johnw> it's just that in the case of Haskell, this happens to describe the evaluation strategy for laziness!
+15:01:42 <kadoban> Would this be any different than  bool f = \x -> if x then f True else f False ?
+15:02:06 <EvanR> (x True, x True) is still 2 thunks
+15:02:24 <lyxia> yes, because f True and f False are created after the parameter x is passed.
+15:03:02 <EvanR> oh nevermind
+15:03:38 <kadoban> What about bool f = let tr = f True; fa = f False in \x -> if x then tr else fa  ?
+15:04:04 <lyxia> that one memoizes
+15:04:13 <xcmw> How can I combine both q signatures? http://lpaste.net/314646
+15:04:25 <kadoban> Hmm. Alright, thanks all. Still kind of confused, but maybe less so.
+15:04:31 <minn> Is there a standard notation for the "proper supremum" (the smallest element greater than every element in a set) for sets where the concept makes sense?
+15:04:56 <EvanR> least upper bound?
+15:05:08 <EvanR> lub
+15:05:10 <lyxia> aren't they synonymous
+15:05:15 <lyxia> supremum and lub
+15:05:40 <minn> Isn't the sup/lub of a set the smallest element greater than or equal to every element in the set?
+15:06:26 <EvanR> sup(x) lub(x) (re: notation) ?
+15:06:28 <lyxia> Ah, you want an element outside the set.
+15:06:34 <thoughtpolice> kadoban: Just think of it like this -- if you have 'f True', that gets evaluated every time you use it. If I say "g (f True) (f True)", then it's evaluated twice. If you give a name such as 'x = f True', and use 'x', then that value is only ever forced once. The difference between your two examples is then pretty obvious.
+15:07:12 <minn> Yeah, I'm just calling it the "proper sup" (by analogy with "proper subset" and so forth), but I'd rather have a standard notation if one exists.
+15:07:17 <kadoban> thoughtpolice: Right, I think I understand why my second example works and why my first doesn't now. Still not quite clear on why the original thing (in the link) works though.
+15:07:47 <Tuplanolla> I don't see the point. The supremum of a subset may be outside.
+15:08:05 <kadoban> I think I kind of see it, but ... I dunno, might just have to think about it a bit more and experiment.
+15:09:36 <minn> I'm working with totally ordered countable sets represented as binary trees, so sometimes I want to talk about something like "the smallest element greater than x" (does this have a name) or "the smallest element greater than or equal to x" (which is the supremum).
+15:09:50 <yaxu> hi all, I have some code that runs fine via 'runhaskell' but not when compiled with 'ghc -threaded'. I don't get error messages, but somehow network messages do not get sent.
+15:10:12 <minn> well, binary search trees, i mean
+15:10:29 <EvanR> so the next element
+15:10:42 <EvanR> the successor
+15:11:07 <yaxu> anyone have ideas why that might be? this is running on a single core computer (a pi zero)
+15:11:07 <Tuplanolla> So you're looking for an upper bound and a strict upper bound, minn.
+15:11:23 <Tuplanolla> A single element doesn't have a supremum. It's a property of a substructure.
+15:11:33 <minn> Tuplonalla: Right, "strict uper bound" is the word I was looking for.
+15:11:45 <EvanR> the least strict upper bound
+15:11:48 <EvanR> ?
+15:11:52 <Tuplanolla> Well, yes, EvanR.
+15:11:59 <Tuplanolla> That's a mouthful.
+15:12:02 <isd> There seem to be a handful of different packages implementing a monad transformer around Either. Is there a consensus on which to use?
+15:13:59 <thoughtpolice> kadoban: Well, think of this. Even if you have "let x = k v", and let's say k takes two arguments -- so 'x' is actually a function --"v" will only still get evaluated once. Now, what does "bool f" mean? It means "cond (f True) (f False)". So by giving a name, like, "f' = bool f", we're saying "f' = cond (f True) (f False)". the "f False" and "f True" only
+15:13:59 <thoughtpolice> need to be evaluated once.
+15:14:17 <MarcelineVQ> isd: most often I see ExceptT mentioned
+15:14:47 <minn> I've always used ekmett's either package, but maybe that's not the community consensus
+15:16:33 <kadoban> thoughtpolice: Hmm, thanks, yeah that makes sense
+15:17:11 <lyxia> The plan for either is to be deprecated https://github.com/ekmett/either/issues/7
+15:18:12 * hackagebot cairo 0.13.3.1 - Binding to the Cairo library.  https://hackage.haskell.org/package/cairo-0.13.3.1 (HamishMackenzie)
+15:19:30 <lyxia> xcmw: I wonder whether that is at all possible
+15:21:24 <qlql> What is the relationship between using comonads for interpreters (a la http://dlaing.org/cofun/) and using f-algebras and recursion schemes?
+15:21:58 <thoughtpolice> kadoban: Also, once you understand this, it becomes more clear why GHC is extremely conservative about floating out common subexpressions. It's very hard for the compiler to tell when it's OK to give a name to something so it can "cache" the expression, because by giving it a name you effectively introduce a scope under which it stays evaluated.
+15:22:12 <haskell525> Hello, why in buildList attack defend defTeam    |(hp defPoke) <= 0 = tail(defTeam)   |otherwise = defPoke:tail(defTeam), defPoke will be out of scope?
+15:22:50 <hpc> where is defPoke defined?
+15:23:12 * hackagebot glib 0.13.4.1 - Binding to the GLIB library for Gtk2Hs.  https://hackage.haskell.org/package/glib-0.13.4.1 (HamishMackenzie)
+15:23:14 <thoughtpolice> kadoban: If "f True" and "f False" are like, really huge things on the heap for example, "bool f" may actually be a pessimization -- because the heap values stay in scope as long as f' is in scope, in "f' = bool f" is in scope. Which might be forever. it may be way better to just run "f True" every time vs holding onto the heap references.
+15:23:14 * hackagebot pango 0.13.3.1 - Binding to the Pango text rendering engine.  https://hackage.haskell.org/package/pango-0.13.3.1 (HamishMackenzie)
+15:23:17 <Tuplanolla> It's this exercise again.
+15:24:08 <isd> thanks
+15:25:43 <kadoban> thoughtpolice: Right, understood, yeah it makes sense why this would often be a terrible idea, and why GHC doesn't do it automatically always.
+15:26:41 <haskell525> hpc: sorry I just get anxious easily.I guess I should be more patient :) 
+15:28:11 <voidrays> Regarding my question from before — I forgot to build the project at least once for haskell-ghc checker to have dependencies known :)
+15:28:12 * hackagebot gio 0.13.3.1 - Binding to GIO  https://hackage.haskell.org/package/gio-0.13.3.1 (HamishMackenzie)
+15:28:37 <voidrays> flycheck works as intended (with my config) with both 7.10.3 and 8.0.1. Sorry for a dumb question. :)
+15:31:56 <haskell525> so I have a data type "group" which is ambiguous with Main.group but I want to keep it anyway.How do I do that?
+15:32:17 <EvanR> import Prelude hiding (group)
+15:32:36 <EvanR> erm, lowercase group cant be a datatype
+15:33:13 * hackagebot gtk3 0.14.6 - Binding to the Gtk+ 3 graphical user interface library  https://hackage.haskell.org/package/gtk3-0.14.6 (HamishMackenzie)
+15:34:21 <haskell525> EvanR: No data type is data Trainer = Trainer {name::String, pokes::[Pokemon]} where I defined: group = Trainer "PGroup" [pikachu, snivy, tepig]
+15:34:39 <EvanR> ok
+15:34:57 <EvanR> by type you mean value
+15:35:24 <haskell525> EvanR: I'm getting parser error on "import" as I did  import Prelude hiding (group) 
+15:35:38 <EvanR> lpaste 
+15:35:39 <haskell525> EvanR: Yes value sorry.
+15:36:43 <haskell525> http://lpaste.net/294377
+15:37:07 <EvanR> you have to put imports at the top
+15:37:42 <dgpratt> jmcarthur: are you on the develop branch of spacemacs?
+15:40:07 <haskell525> EvanR: when I call my "combat group turtles" function on the shell, I get error for Main.group still.
+15:40:26 <haskell525> EvanR: I mean on ghci
+15:40:51 <pie__> its turtles all the way down
+15:41:27 <EvanR> that sucks
+15:41:43 <EvanR> i cant imagine what the error is at this point
+15:43:40 <haskell525> EvanR:http://lpaste.net/294377
+15:44:03 <EvanR> http://lpaste.net/294377
+15:44:13 <EvanR> (i couldnt just click on that)
+15:44:40 <EvanR> it says you imported Data.List
+15:45:31 <haskell525> EvanR: I see now, Thanks.
+15:49:36 <jmcarthur> dgpratt: I have been before, but am not right now.
+15:49:55 <jmcarthur> dgpratt: Did my earlier suggestion not work?
+15:50:25 <dgpratt> jmcarthur: maybe I missed it; I shall scroll back
+15:51:56 <joncol> I'm trying to solve Traversable exercises from the Haskell book (Chapter 21). Currently wondering about how to implement foldr for the Foldable instance for Tree (data Tree a = Empty | Leaf a | Node (Tree a) a (Tree a)). foldMap was much easier; how can I combine the results of the left, node and right foldr:s without having a Monoid instance for the accumulated values?
+15:52:03 <dgpratt> jmcarthur: just /s/backend/layer ?
+15:52:42 <dgpratt> oh
+15:52:46 <dgpratt> I see the other bit
+15:56:51 <dgpratt> jmcarthur: it looks like I was following instructions here: https://github.com/syl20bnr/spacemacs/tree/master/layers/%2Blang/haskell#completion-support
+15:57:02 <dgpratt> are those wrong or out of date?
+15:57:27 <jmcarthur> It looks like somebody may have just typed it wrong.
+15:57:39 <jmcarthur> But I claim that looks wrong.
+15:58:14 * hackagebot gtk 0.14.6 - Binding to the Gtk+ graphical user interface library.  https://hackage.haskell.org/package/gtk-0.14.6 (HamishMackenzie)
+16:01:40 <jmcarthur> dgpratt: Actually, no, it's right. You (and I, just now) misread it.
+16:01:58 <dgpratt> ohhh
+16:02:11 <dgpratt> I think I see what you mean
+16:02:28 <EvanR> inaccurate math has the curious side effect that it cant be reversed
+16:02:41 <dgpratt> that's the entire layers config
+16:03:02 <EvanR> i wonder if thats an inherent quality of being inaccurate
+16:03:14 * hackagebot gtkglext 0.13.1.1 - Binding to the GTK+ OpenGL Extension  https://hackage.haskell.org/package/gtkglext-0.13.1.1 (HamishMackenzie)
+16:03:34 <EvanR> if not, can we have inaccurate (tacitly for the purpose of performance) and reversible
+16:04:47 <carter> jmcarthur: welcome back to the Internet :)
+16:04:48 <EvanR> we have accurate and reversible, accurate and irreversible, inaccurate and irreversible, complete this pattern
+16:05:04 <jmcarthur> I never disappeared :P
+16:13:14 * hackagebot gtksourceview2 0.13.3.1 - Binding to the GtkSourceView library.  https://hackage.haskell.org/package/gtksourceview2-0.13.3.1 (HamishMackenzie)
+16:13:42 <Tuplanolla> Inaccurate and inaccurately reversible?
+16:13:53 <EvanR> no
+16:14:34 <EvanR> satisfies f(g(x)) = g(f(x)) = id
+16:14:58 <EvanR> spelled right
+16:16:20 <EvanR> but i guess you do have to clarify inaccurate and "usefully inaccurate" and then clarify that
+16:18:15 * hackagebot gtksourceview3 0.13.3.1 - Binding to the GtkSourceView library.  https://hackage.haskell.org/package/gtksourceview3-0.13.3.1 (HamishMackenzie)
+16:18:16 * hackagebot gtk3-mac-integration 0.3.3.1 - Bindings for the Gtk/OS X integration library.  https://hackage.haskell.org/package/gtk3-mac-integration-0.3.3.1 (HamishMackenzie)
+16:18:19 * hackagebot gtk-mac-integration 0.3.3.1 - Bindings for the Gtk/OS X integration library.  https://hackage.haskell.org/package/gtk-mac-integration-0.3.3.1 (HamishMackenzie)
+16:19:02 <Tuplanolla> Is there a sorted partitioning function for `Vector` somewhere?
+16:23:07 <dgpratt> @tell jmcarthur forgot to say that things appear to be in order now, thanks!
+16:23:08 <lambdabot> Consider it noted.
+16:23:15 * hackagebot svgcairo 0.13.1.1 - Binding to the libsvg-cairo library.  https://hackage.haskell.org/package/svgcairo-0.13.1.1 (HamishMackenzie)
+17:24:05 <mtn_> I'm looking at a document on parsing with haskell, and there's mention of an infix operator <|> that represents "choice." I'm not sure why it is has to be defined as right-associative. Can someone explain? (lmk if this question is unclear)
+17:24:45 <benzrf> mtn_: maybe so that `foldr' works how you'd expect?
+17:24:47 <benzrf> i dunno
+17:24:59 <Lokathor> does the document say it has to be right-associative?
+17:25:15 <mtn_> They just say it's a better choice: http://roman-dushkin.narod.ru/files/fp__jeroen_fokker_001.pdf
+17:25:42 <Cale> mtn_: Well, it's good to give it *some* associativity so that you can combine multiple things
+17:25:49 <Lokathor> i mean, it has to be right-associative, left-associative, or non-associative. The last option is no good fairly obviously
+17:26:51 <mtn_> I've tried tracing them to get a sense, but honestly i'm not really seeing where it would make a difference. probably has to do with my low level of understanding of parsers in general though
+17:27:18 <Cale> It may or may not matter, depending on the type of parser you're dealing with
+17:28:33 <Cale> For the sort of parser where you're producing a list of parses, and <|> is implemented in terms of (++), it can be extremely important for the <|>'s to be associated to the right
+17:28:52 <Cale> xs ++ ys takes O(length xs) time to evaluate fully
+17:29:09 <mtn_> Ah yes, that is it
+17:29:15 <mtn_> Sorry didn't notice there were solutions
+17:29:18 <mtn_> " As <|> is a lifted version of ++, it is more eciently evaluated right associative "
+17:29:23 <Cale> So if you build up a left-associated expression comprised of many (++)'s, you spend quadratic time evaluating it
+17:30:08 <mtn_> BEcause you are have to pass over the entire part you are adding each time you ++, right?
+17:30:17 <Cale> yeah
+17:30:31 <Cale> You have to pass over the entire left part
+17:30:33 <Cale> @src (++)
+17:30:34 <lambdabot> []     ++ ys = ys
+17:30:34 <lambdabot> (x:xs) ++ ys = x : (xs ++ ys)
+17:30:34 <lambdabot> -- OR
+17:30:34 <lambdabot> xs ++ ys = foldr (:) ys xs
+17:31:03 <mtn_> got it. thanks so much
+17:36:54 <lingxiao> hey all
+17:37:04 <lingxiao> does any one here use python and know if it has something like stack?
+17:39:07 <grantwu> There's virtualenv, which is worse because it doesn't do sharing 
+17:49:59 <benzrf> 零小
+17:53:18 * hackagebot webkitgtk3 0.14.2.1 - Binding to the Webkit library.  https://hackage.haskell.org/package/webkitgtk3-0.14.2.1 (HamishMackenzie)
+18:08:19 * hackagebot vtegtk3 0.13.1.1 - Binding to the VTE library.  https://hackage.haskell.org/package/vtegtk3-0.13.1.1 (HamishMackenzie)
+18:13:19 * hackagebot vte 0.13.1.1 - Binding to the VTE library.  https://hackage.haskell.org/package/vte-0.13.1.1 (HamishMackenzie)
+18:18:19 * hackagebot webkitgtk3-javascriptcore 0.14.2.1 - JavaScriptCore FFI from webkitgtk  https://hackage.haskell.org/package/webkitgtk3-javascriptcore-0.14.2.1 (HamishMackenzie)
+18:18:21 * hackagebot webkit-javascriptcore 0.14.2.1 - JavaScriptCore FFI from webkitgtk  https://hackage.haskell.org/package/webkit-javascriptcore-0.14.2.1 (HamishMackenzie)
+18:18:23 * hackagebot webkit 0.14.2.1 - Binding to the Webkit library.  https://hackage.haskell.org/package/webkit-0.14.2.1 (HamishMackenzie)
+18:18:41 <paulmcpaul> hey guys, im a newbie to haskell and so far im loving it. was looking for a few recommendations as to what to use for editor. for other languages i use eclipse, sublime & notepad++. any cool suggestions? the sublime haskell package runs like crap on this old machine sadly
+18:19:28 <grantwu> Is it just not performant or is it broken?
+18:19:51 <grantwu> My friend was unable to get it actually working
+18:20:13 <mandeep> grantwu: with the default build system?
+18:20:33 <grantwu> With stack
+18:20:43 <grantwu> Well I dunno if we were using stack at the time
+18:20:43 <benzrf> paulmcpaul: i like vim for almost everything, but idk if its any good on windows
+18:21:11 <paulmcpaul> i've used vim and nano but i've never gotten used to all the tricks to be productive at the level i am with the other m&k editors 
+18:21:26 <paulmcpaul> im not sure if learning both haskell and a CLI editor at the same time is a good idea
+18:21:39 <grantwu> Atom works well for me but it's a resource hog too
+18:21:53 <paulmcpaul> dang, i really need to update this laptop
+18:21:55 <benzrf> nano is garbage
+18:22:01 <benzrf> it's basically notepad
+18:22:03 <paulmcpaul> 2gb ram and a crappy dual core
+18:22:31 <paulmcpaul> benzrf: its good enough to edit settings files via ssh, probably not to use as an ide
+18:22:42 <paulmcpaul> though i've done it a bit when needed
+18:23:06 <paulmcpaul> im gonna try atom and see how it runs
+18:24:44 <mandeep> if your laptop cant run sublime, no way it runs atom
+18:25:01 <paulmcpaul> dang
+18:26:00 <mandeep> paulmcpaul: what issue with ST were you having?
+18:27:09 <kirillow> https://gist.github.com/anonymous/802944bb23a32e294e9743b2513f36b4 I really do not understand this
+18:30:24 <juri_> Athas: thanks for the reply. I'll avoid GPUs for now.
+18:33:08 <paulmcpaul> kirillow: instance (Eq a, Eq b) => Eq (Tuple a b) where  ...
+18:33:11 <paulmcpaul> that worked for me
+18:33:29 <kirillow> Aaaaaaah
+18:33:53 <kirillow> thank you!
+18:35:59 <benzrf> paulmcpaul: just install gnu/linux and use vim :]
+18:36:27 <paulmcpaul> benzrf: is there a haskell vim plugin or something?
+18:36:34 <benzrf> i mean
+18:36:38 <benzrf> if you want super tooling
+18:36:39 <benzrf> use emacs
+18:36:41 <benzrf> >:(
+18:37:13 <paulmcpaul> idk i just want the really basic stuff, autocomplete, syntax hilighting, etc
+18:37:22 <paulmcpaul> not an integrated debugger or project manager
+18:39:03 <kirillow> http://www.stephendiehl.com/posts/vim_2016.html
+18:46:01 <ReinH> @google vim haskell
+18:46:02 <lambdabot> http://www.stephendiehl.com/posts/vim_2016.html
+18:46:02 <lambdabot> Title: Vim and Haskell in 2016
+19:03:58 <Clint> how should https://github.com/bos/wreq/blob/master/tests/UnitTests.hs#L44 be fixed?
+19:16:12 <AlainODea> what should I call an insertion-ordered map data structure?
+19:28:55 <AlainODea> I'm going with sequence map or list map.
+19:29:22 <lingxiao> hey all
+19:29:36 <lingxiao> does anyone know how to find out where stack installed my .exe file?
+19:29:38 <lingxiao> sometihing like ...
+19:29:40 <lingxiao> stack install which .exe
+19:30:48 <Welkin> lingxiao: .stack-work/dist/build/yourprojectname/yourprojectname
+19:30:51 <Welkin> or something similar
+19:31:06 <Welkin> that is for `stack build`
+19:31:18 <Welkin> for `stack install` it places it in your ~/.local/bin
+19:31:20 <Welkin> or similar
+19:31:30 <lingxiao> sorry im thinkin there'sa  command that you can type so that i'll output the long and ungodly path?
+19:31:39 -lingxiao(~lingxiao@2607:f470:6:400d:c949:2b77:a5d5:8700)- it should be under my project dir
+19:31:45 <Welkin> not sure
+19:31:51 <geekosaur> ... why was that a notify
+19:31:51 <Welkin> yeah
+19:31:54 <Welkin> .stack-work
+19:31:56 <Welkin> look in there
+19:33:00 <Welkin> mine are under this: ".stack-work/dist/x86_64-osx/Cabal-1.22.4.0/build/projectname/projectname"
+19:33:31 <Welkin> but like I said, if you us `stack install` it will copy that to your ~/.local/bin
+19:34:20 <geekosaur> if you did 'stack install' then try: stack exec -- where myproject
+19:35:02 * EvanR imagines lingxiao suddenly becoming a giant with booming voice
+19:35:29 <EvanR> to say something mundane
+19:35:30 <geekosaur> or, "stack path" will tell you all the places it puts things
+19:35:33 <lingxiao> yeah i dont know when i put "dir" the whole text became yellow
+19:35:35 <lingxiao> hello dir
+19:35:45 <Welkin> geekosaur: is this like a dr seuess book?
+19:35:46 <lingxiao> or not this time.. i mustv done stometihing else
+19:35:58 <geekosaur> ("local bin path" is where stack install puts things)
+19:36:20 <lingxiao> ok got it
+19:36:24 <lingxiao> i see a buch so far
+19:42:24 <lingxiao> thanks@
+19:42:25 <lingxiao> !
+19:47:53 <SolitaryCypher> Hey, is it bad practice to do something like "let sf = either show show"
+19:48:09 <SolitaryCypher> That's not the context I'm using it in, but its similar
+19:48:24 <EvanR> :t either show show
+19:48:26 <lambdabot> (Show a1, Show a) => Either a a1 -> String
+19:48:40 <EvanR> seems legit
+19:48:41 <pavonia> Why would it be bad practice?
+19:48:49 <SolitaryCypher> Dunno. It feels wrong
+19:49:24 <SolitaryCypher> But I'm inexperienced in FP, so I want to refer to someone who knows what they are talking about
+19:49:35 <Clint> feels like you don't care what's Left and what's Right
+19:49:45 <SolitaryCypher> yeah
+19:50:02 <SolitaryCypher> I do care at an earlier point, but when I am using the value I don't care
+19:50:23 <Clint> then what's the problem
+19:51:09 <SolitaryCypher> from my point of view there is none, but I want to see if that type of code is indicitive of bad design or of an antipattern or something
+19:51:42 <EvanR> you have to explain more of your project for people to explain how bad it is
+19:52:49 <grantwu> What are you supposed to be using sf for?
+19:54:47 <SolitaryCypher> I'll give some more context. I have a "game server" which decides if a move is valid or not. When its valid I use Right, when its invalid I use Left. There is another part of the code that decides on routing and on when to change state, and thats when Right/Left is useful. When I ping the message back to the user I don't need it in the context of "Either", so its more useful to send the underlying data
+19:55:04 <jle`> SolitaryCypher: 'either show show' is perfectly fine
+19:55:10 <jle`> it's sort of similar to working with dependent sums
+19:55:40 <jle`> but, if the two branches are the same type, might as well just use (Bool, a)
+19:55:59 <jle`> Either a a ~ (Bool, a)    -- or some more useful type than Bool
+19:56:20 <SolitaryCypher> They are not the same type. The "server" can handle multiple games, but the error messages are more generic
+19:56:28 <EvanR> SolitaryCypher: in that case, youre using Show for application level stuff, which isnt common for a production project. but its up to you
+19:56:43 <EvanR> Show is recommended for debugging, now formatted text or pretty printing
+19:57:00 <jle`> oh yeah, the fact that it's 'show' is the weird thing
+19:57:10 <SolitaryCypher> It's not actually show, but its an encoding function
+19:57:11 <EvanR> now that the purpose has been revealed
+19:57:15 <EvanR> oh
+19:57:18 <EvanR> switcheroo
+19:57:30 <SolitaryCypher> Its the _same_ encoding function for both cases
+19:57:45 <jle`> but yeah, 'either f g' can be thought of a way of "merging" one of two types into a value of one composite type
+19:57:48 <SolitaryCypher> but I used show to illustrate the statement
+19:57:53 <EvanR> is it? but its a type class
+19:58:02 <jle`> so either show show is a way of condensing either an 'a' or a 'b' and representing them both as a String
+19:58:20 <alviprofluvium> hello
+19:59:01 <alviprofluvium> does 'all' stop evaluating after encounters a 'false'?
+19:59:22 <jmcarthur> > all [False, undefined]
+19:59:24 <lambdabot>  error:
+19:59:24 <lambdabot>      • Couldn't match expected type ‘a -> Bool’
+19:59:24 <lambdabot>                    with actual type ‘[Bool]’
+19:59:30 <jmcarthur> I fail.
+19:59:32 <jmcarthur> :t all
+19:59:34 <lambdabot> Foldable t => (a -> Bool) -> t a -> Bool
+19:59:37 <jmcarthur> > all id [False, undefined]
+19:59:39 <lambdabot>  False
+19:59:49 <jmcarthur> Looks like for lists it terminates early.
+20:00:09 <jmcarthur> > any id [False, undefined]  -- to show what would happen if it did not
+20:00:10 <lambdabot>  *Exception: Prelude.undefined
+20:00:31 <jmcarthur> > any id [True, undefined]  -- but of course any also has this behavior
+20:00:33 <lambdabot>  True
+20:00:50 <alviprofluvium> nice, thanks
+20:03:59 <Welkin> alviprofluvium: are you a pharmaceutical?
+20:05:53 <EvanR> question about semantics of FRP switcher, if anyone knows
+20:06:13 <EvanR> switcher :: Behavior a -> Event (Behavior a) -> Behavior a
+20:06:47 <EvanR> the paper says, switcher b e acts like b until e happens, and each time it happens, the behavior switches to the payloads behavior
+20:06:56 <EvanR> so it switches many times
+20:07:35 <EvanR> then it says... because the returned behaviors may be reactive in this way, the *switcher* may lose interest in some events and react to others
+20:08:13 <EvanR> does this seem wrong, since the switcher itself is unaffected by the contents of the event, as described earlier
+20:08:40 <EvanR> it will always be interested in its event
+20:09:03 <alviprofluvium> jaja no. Not the first one asking.. I may need to change my name...
+20:09:36 <alviprofluvium> it's just latin for diarrhea
+20:09:46 <alviprofluvium> kinda
+20:12:11 <EvanR> or its really talking about the "inner" events
+20:13:19 <SolitaryCypher> EvanR: can you link the paper?
+20:13:57 <EvanR> http://conal.net/papers/push-pull-frp/push-pull-frp.pdf
+20:14:08 <SolitaryCypher> Thanks.
+21:01:58 <kadoban> What does "Extensions" in .cabal do? Turn those extensions on for every .hs file or something?
+21:03:27 * hackagebot mockery 0.3.4 - Support functions for automated testing  https://hackage.haskell.org/package/mockery-0.3.4 (SimonHengel)
+21:04:12 <geekosaur> yes
+21:04:30 <kadoban> Is that ... recommended to use? Haven't seen it much.
+21:04:56 <geekosaur> also I think it was intended to allow convenient searching for what packages use what extensions, but I don't think many people actually bothered to use it so that kinda withered
+21:16:12 <ertes> kadoban: i don't recommend using it
+21:16:28 <ertes> kadoban: it makes using GHCi a lot more difficult
+21:17:01 <kadoban> I was hoping it wasn't some new thing everyone was going to be using, it seemed kind of confusing, heh.
+21:17:11 <geekosaur> although if you are using cabal or stack that's not much of a problem...
+21:19:33 <EvanR> does it make sense to want a feature which lets you implement a function-like data type, i.e. it has an apply operation, its kind * -> * -> *, and let it be applied with whitespace like a function 
+21:19:44 <EvanR> whitespace syntax sugar for application of function-like types
+21:19:57 <EvanR> (we have overloaded . for composition of function-like types)
+21:21:55 <EvanR> (and why is ArrowApply, which is basically this class im talking about, requiring Arrow)
+21:24:02 <EvanR> nevermind thats application internal the category of the arrow
+21:29:59 <laudiacay> hey, how would i use perl or php regexes in haskell?
+21:30:26 <laudiacay> preferably pcre
+21:31:47 <kadoban> laudiacay: Well, there are a few regex packages around in hackage. I'm not particularly sure which are good or not. A lot of what you use regexes for in other languages you instead use parser combinators for in haskell though. Like megaparsec, trifecta, any of those.
+21:33:09 <laudiacay> kadoban: what do you mean parser combinators?
+21:34:28 <kadoban> laudiacay: megaparsec and trifecta are examples, I'm not sure a good resource to learn about them at the moment, maybe someone else has an idea.
+21:35:03 <laudiacay> kadoban: ok thanks! i kinda need something in the prelude, so i'll probably just struggle through implementing it myself
+21:35:20 <grantwu> combinators for parsers; i.e. you have some primitive parsers (i.e. parse a reserved word, parse a number, parse a symbol, etc.) and then you can use these combinators to combine these parsers (i.e. parse this or parse that, parse this and then that, parse this and then optionally parse that)
+21:35:41 <laudiacay> grantwu: sounds like what im coding pretty much lol
+21:35:46 <laudiacay> infix calculator 
+21:35:55 <kadoban> laudiacay: Sounds pretty terrible. What requires you to use only what's in Prelude? (also ... not sure that's meaningful, you mean what comes with GHC, or?)
+21:36:26 <laudiacay> kadoban: it's for a class, i doubt the TA will install anything before they fail me haha
+21:36:50 <grantwu> Does the assignment prohibit outside libraries?
+21:37:06 <laudiacay> i was using a regex to match the first closed expression in parens, and basic regex doesn't do recursion for infinitely nested parens
+21:37:09 <grantwu> I'm not really sure regexes are what you want this
+21:37:12 <grantwu> *want for this
+21:37:27 <laudiacay> grantwu: i dont think it does, just im better at regex than haskell recursion and im very tired :(
+21:37:30 <grantwu> Additionally regexes aren't in the Prelude language so you're going to need to pull in a library either way
+21:37:50 <laudiacay> grantwu: ok thanks, i guess ill just actually implement it the way they wanted
+21:37:52 <grantwu> Well, I think there are guides for implementing a basic parser combinator
+21:37:57 <grantwu> What is the way they wanted?
+21:38:09 <laudiacay> probably just goofy recursive parsing
+21:38:33 <grantwu> I mean parser combinators are recursive parsers
+21:38:33 <laudiacay> like, for operators, i'm splitting across the lowest precedence operator in the expression to build sort of a tree off it
+21:39:08 <grantwu> I would honestly try making your own little parser combinators thing
+21:39:24 <grantwu> You're parsing arithmetic expressions + * - / ?
+21:41:28 <byorgey> it sounds to me like making a basic recursive descent parser will work fine.  "making your own little parser combinators thing" is quite a leap if you have never seen it done before.
+21:42:16 <grantwu> Actually, yeah I have no idea how to deal with precedence
+21:42:48 <byorgey> dealing with precedence in general is done with variants of the railyard shunting algorithm
+21:43:34 <byorgey> but if you have a small fixed set of operators with fixed precedence, it's much easier to just make a recursive descent parser
+21:44:15 <grantwu> So I went and looked at what my compiler is using
+21:44:23 <grantwu> https://hackage.haskell.org/package/megaparsec-4.0.0/docs/Text-Megaparsec-Expr.html 
+21:44:29 * grantwu sighs happily
+21:45:04 <byorgey> yep, I was just going to say that many parser combinator libraries come with a library function to parse expressions with specified infix operators and precedences
+21:45:13 <byorgey> which packages up the railyard shunting algorithm for you
+21:45:37 <byorgey> parsec has this too.  I would be surprised if trifecta doesn't have it as well.
+21:46:38 <laudiacay> byorgey: i'm not even using shunting yard :( we have to build an expression tree
+21:46:46 <laudiacay> like a legitimate tree
+21:46:51 <grantwu> I think shunting yard can do that
+21:47:07 <grantwu> "It can be used to produce either a postfix notation string, also known as Reverse Polish notation (RPN), or an abstract syntax tree (AST)."
+21:47:11 <laudiacay> i mean the actual algorithm makes more expressions, just prefix ones
+21:47:23 <laudiacay> oh i thought technically it was like make prefix/postfix stuff
+21:47:45 <laudiacay> eah i'm not doing anything with a stack
+21:47:57 <byorgey> laudiacay: typically the shunting yard algorithm is presented as converting infix into postfix.  But actually you can easily change it to output a tree instead.
+21:48:24 <laudiacay> byorgey: yeahhh i think i have that part down. the real issue is like grabbing nested parenthetical expressions
+21:50:31 <EvanR> i havent needed any shunting yard algorithm in the past, just chainl1
+21:50:55 <byorgey> laudiacay: I suggest making a function of type   String -> Maybe (Expr, String)  which returns *the rest of the input String* after parsing an Expr from the beginning
+21:51:46 <laudiacay> byorgey: hmmm that is a good idea actually
+21:52:05 <laudiacay> i mean so the rest of my algo just needs the first outer parens 
+21:52:13 <laudiacay> or like, whatever is inside them
+21:52:15 <byorgey> laudiacay: right
+21:52:21 <byorgey> laudiacay: you may find this helpful: http://ozark.hendrix.edu/~yorgey/360/modules/04-syntax-semantics.html
+21:52:51 <byorgey> this was an assignment from the class I am teaching now which walks you through the process of constructing such things
+21:53:18 <laudiacay> omg yes im going to look at that thank you
+21:54:11 <laudiacay> byorgey: where do you teach that does haskell as well?
+21:54:49 <byorgey> laudiacay: http://ozark.hendrix.edu/
+21:54:57 <byorgey> they do Haskell because I teach there =)
+21:55:46 <byorgey> there are a good number of places that teach Haskell actually, but more in Europe than in the US I think
+21:55:50 <laudiacay> oh cool! im at uchicago, all our honors intro CS is haskell
+21:56:14 <dmj`> laudiacay: with Stuart Kurtz? Or Ravi?
+21:56:14 <byorgey> oh, nice, I didn't know that.  Who teaches it?
+21:56:25 <laudiacay> dmj`: kurtz- are you in my class haha?
+21:56:36 <laudiacay> byorgey: kurtz and ravi
+21:56:42 <laudiacay> errr.... chugh
+21:56:44 <dmj`> laudiacay: nah, but know Kurtz :] 
+21:57:02 <laudiacay> dmj`: he's the coolest. generally is always mixing up programming languages, but still the coolest
+21:58:01 <dmj`> laudiacay: heh, yea, he's awesome
+21:59:47 <byorgey> laudiacay: cool, I haven't met them, but I'm very interested in Ravi Chugh's work on Sketch'n'Sketch
+22:00:37 <laudiacay> byorgey not gonna lie that looks terrifying
+22:00:55 <laudiacay> oh wow, my lab TA is the second coauthor.
+22:01:40 <grantwu> I wish my college taught a practical language :(
+22:01:45 <EvanR> java?
+22:01:52 <grantwu> ?
+22:02:13 <EvanR> im surprised it doesnt teach java
+22:02:28 <grantwu> There's basically only 1.5 classes that use Java, and both are electives
+22:02:44 <grantwu> actually, 0.25
+22:02:49 <kadoban> What impractical languages does it teach?
+22:02:58 <grantwu> Half of the time, distributed systems uses C + Java
+22:03:02 <grantwu> The other half, it uses Go
+22:03:04 <grantwu> SML
+22:04:34 <mrm> "CISC 348 - Systems programming with Coq"
+22:05:01 <grantwu> Coq is entirely practical
+22:07:23 <EvanR> is it?
+22:08:18 <grantwu> People have used it to prove the correctness of useful programs
+22:08:49 <EvanR> ah, i figured we were talking about proving the usefulness of correct programs!
+22:08:55 <yadorans> ciq
+22:09:01 <yadorans> coq wont get you a job
+22:09:14 <grantwu> Well, if the programs are mostly useful because they were proven correct
+22:09:37 <dmj`> yadorans: sure about that?
+22:09:37 <grantwu> Then it's not too far of a stretch to argue that the tool you used to prove them correct is useful
+22:10:17 <Rotaerk> hmm is there some function for repeating an IO action until some condition on its result, maybe:  IO Bool -> Bool
+22:10:22 <Rotaerk> not turning up anything on hoogle
+22:10:29 <Rotaerk> err
+22:10:32 <Rotaerk> IO Bool -> IO ()
+22:10:35 <yadorans> not like java will. as much as i like fp
+22:10:44 <EvanR> whileM or similar
+22:10:59 <yadorans> until?
+22:11:04 <Cale> Rotaerk: I usually just use recursion directly.
+22:11:04 <grantwu> Whereas sml... There's almost no community around it, afaict there's a oneliner that breaks the register allocator in SML/NJ, the documentation is pretty horrendous
+22:11:34 <Rotaerk> hmm whileM isn't turning up; might just do what Cale said
+22:11:38 <Cale> Rotaerk: There's probably something in the monad-loops package, but...
+22:11:47 <EvanR> and entire package for whileM sucks
+22:11:56 <EvanR> it should be in the prelude
+22:12:29 <Cale> The problem with having all those variations on loops in scope is that you end up needing to look them up to remember which one of them you have.
+22:13:03 <EvanR> thats a problem with convention
+22:15:06 <Cale> You have to question whether the loop is really easier to reason about or manipulate than just directly writing the recursive thing.
+22:15:13 <xpika> is there an easy way to use the Either monad to build a list of IO Strings from a list of FilePaths ?
+22:15:38 <Cale> xpika: Why Either?
+22:15:47 <EvanR> just writing the recursive thing 'inline' requires an extra where block or in-do let or writing a whileM as a top level helper
+22:15:50 <EvanR> or using fix
+22:16:13 <EvanR> and i hate putting where after a big do block
+22:16:34 <EvanR> so i usually have whileM top level helper
+22:17:15 <byorgey> map readFile :: [FilePath] -> [IO String]   -- xpika, like this?  I also don't see what Either has to do with it
+22:17:21 <Cale> xpika: Perhaps you're using try to catch exceptions?
+22:17:21 <xpika> Cale: I want [FilePath] -> Either FilePath [String] with the left value as the offending filepath
+22:17:32 <Cale> ahh
+22:19:13 <Cale> Well, you won't be able to get that of course, but you could get  [FilePath] -> IO (Either FilePath [String])
+22:20:50 <xpika> Cale: Yes, I will need IO as well
+22:21:00 <Cale> I suppose you could use the Either monad to help collapse a list [Either FilePath String]
+22:21:24 <Cale> :t sequence :: [Either FilePath String] -> Either FilePath [String]
+22:21:26 <lambdabot> [Either FilePath String] -> Either FilePath [String]
+22:21:43 <Cale> However, having such a list means that you've attempted to load all the files already.
+22:22:20 <Cale> So if you don't mind the fact that you're not going to shortcut on error, then the Either monad instance might be useful.
+22:22:39 <Cale> You could also just throw an exception containing the filepath
+22:22:58 <Cale> data LoadError = LoadError FilePath
+22:23:08 <Cale>   deriving (Show, Typeable)
+22:23:14 <Cale> instance Exception LoadError
+22:24:02 <Cale> and use throwIO to throw it, and try to catch it
+22:24:05 <Cale> :t try
+22:24:06 <lambdabot> Exception e => IO a -> IO (Either e a)
+22:24:10 <xpika> Cale: exceptions are not safe enough for my liking
+22:24:46 <Cale> This usage of exceptions is pretty safe.
+22:25:18 <xpika> Cale: if a function throws an exception its not present in the type signature
+22:25:46 <Cale> Yeah, but you're going to put it in the type signature
+22:26:08 <Cale> Because the point is to apply try so that it'll return an Either :)
+22:26:43 <Cale> You could also use EitherT, though it's a little bit silly, because IO kind of already has that built-in.
+22:28:20 <Cale> There ought to be a dual to try, something like  insist :: Exception e => IO (Either e a) -> IO a
+22:28:55 <Cale> (insist = either throwIO return)
+22:29:03 <Cale> er
+22:29:21 <Cale> Rather the composite of that and (>>=)
+22:30:34 <roo> hello
+22:30:38 <Cale> hello!
+22:31:04 <Guest91037> whoops
+22:31:25 <grantwu> How can I wait on a thread?
+22:31:34 <grantwu> i.e. forkIO off a thread, then wait on the thread to finish
+22:31:35 <xpika> This almost works
+22:31:39 <xpika> fmap sequence . sequence $ [putChar 'a' >> return (Right 1), putChar 'a' >> return (Left 3),putChar 'b' >> return  (Right 2)]
+22:31:50 <Cale> grantwu: I suppose you could use async for that
+22:32:08 <Cale> https://hackage.haskell.org/package/async-2.1.0/docs/Control-Concurrent-Async.html
+22:32:17 <xpika> but it is not lazy enough
+22:32:22 <grantwu> Hrm... I suppose
+22:33:26 <Cale> xpika: Well, being able to apply sequence for the Either monad means that you have a list of Either FilePath String results
+22:33:40 <Cale> xpika: Which means you must have already run all the actions which read the files
+22:39:16 <Cale> grantwu: Another good way is to use STM and a TVar Bool, or an MVar ()
+22:40:08 <grantwu> Hrm...
+22:40:12 <grantwu> How does STM actually work?
+22:40:46 <grantwu> Does it require Intel TSX?  Can it even use TSX?
+22:40:53 <Cale> If an STM action reads some TVars and then executes retry, it isn't retried until those TVars are written to
+22:41:14 <Cale> The implementation doesn't require anything but compare and swap, as far as I'm aware
+22:41:27 <byorgey> grantwu: no, it doesn't use TSX.  fryguybo1 is working on getting to take advantage of TSX.
+22:41:48 <grantwu> Hrm, yeah, just happened upon http://transact2014.cse.lehigh.edu/yates.pdf
+22:42:14 <byorgey> yes, fryguybo1 = Ryan Yates
+22:42:19 <grantwu> heh
+22:42:28 <grantwu> I think async is probably what I want
+22:43:23 <Nekro> Hello friends I Could use some help
+22:43:49 <Nekro> Would anyone be willing to help me
+22:44:13 <grantwu> Don't ask to ask, just ask
+22:44:26 <Cale> Nekro: Nobody can know if they want to help until they know what you need help with
+22:44:38 <Nekro> I am a college student. New to VBA. I need to correct a code it seems. I have little knowledge
+22:44:42 <Nekro> The code given to me was
+22:44:47 <grantwu> This is not a VBA channel
+22:44:50 <ab9rf> VBA?
+22:44:55 <ab9rf> people still use that?
+22:44:57 <Nekro> https://thepb.in/p/zmh8XQ5DkmOhZ
+22:44:58 <grantwu> Also do not paste the code, use lpaste, but don't use either if you have a VBA question
+22:44:59 <Cale> This channel is for discussion of the functional programming language Haskell.
+22:45:13 <Cale> Nekro: How did you find your way here with a VBA question?
+22:45:21 <Nekro> I was digging through google
+22:45:25 <ab9rf> you are definitely not in the right place
+22:45:27 <Nekro> If anyone would be kind enough to help me.
+22:45:55 <ab9rf> Nekro: how much are you willing to pay?
+22:46:01 <grantwu> c.c
+22:46:15 <Nekro> Im not paying @ab9rf just need some help to understand
+22:46:22 <ab9rf> ok, have fun
+22:46:27 <Nekro> Ok....
+22:46:41 <ab9rf> i'm not sure freenode has a vba channel
+22:46:42 <grantwu> Nekro: This is not the place to ask VBA questions.  I'm not sure how you ended up here, but this is the wrong place
+22:46:52 <ab9rf> but this is definitely not it
+22:47:16 <Nekro> OH I see. I tried joining VBA i dont think there is a channel. if anyone here has any experience in vba I would be grateful for some help
+22:47:40 <Cale> If you have questions about where to find resources for learning Haskell, we might be able to help you with that
+22:47:55 <EvanR> ask #csharp
+22:48:01 <Cale> haha
+22:48:03 <ab9rf> yeag, at least the right platform
+22:48:05 <ab9rf> :)
+22:48:05 <Nekro> I dont even know what haskell is :c sorry for troubling you all. I thought I might try my luck here
+22:48:17 <Cale> Nekro: It's a very different programming language
+23:04:29 <grantwu> Can someone explain how this works? http://lpaste.net/315568
+23:04:53 <grantwu> It's nondeterministic whether a or b gets the first line, it seems, which makes sense
+23:05:07 <grantwu> but how is this safe at all?  Are there locks behind the scenes in putStrLn and getLine
+23:07:24 <EvanR> yeah
+23:07:39 <EvanR> something like that
+23:07:57 <EvanR> the i/o manager only operates on that handles at most once at a time
+23:08:01 <EvanR> handle
+23:11:20 <EvanR> data Handle = .... !(MVar Handle__) ...
+23:11:35 <Koterpillar> just submitted my first GHC bug, is there anything I can make it easier to reproduce it? https://ghc.haskell.org/trac/ghc/ticket/12783
+23:17:52 <EvanR> grantwu: looking into that, its kind of scary all thats going on... like the implicit encode decode of strings
+23:18:12 <EvanR> a buffer management
+23:18:47 <EvanR> good thing everythings utf8
+23:18:50 <grantwu> EvanR: Into the code I wrote, or what
+23:19:23 <EvanR> no the ghc implementation
+23:19:30 <grantwu> ah
+23:19:31 <EvanR> er, base library, Handle
+23:35:26 <grantwu> how do I repeat an IO action over and over again (i.e. I have a function a -> IO a) with an initial input?
+23:35:40 <EvanR> ah, iterateM ?
+23:36:34 <grantwu> Hrm....
+23:36:52 <grantwu> http://hackage.haskell.org/package/monad-loops-0.4.3/docs/Control-Monad-Loops.html#v:iterateM_ has an iterateM_, but where is iterateM?
+23:37:02 <EvanR> there isnt one
+23:37:31 <grantwu> ah, I guess this makes sense because you can't get the result
+23:38:56 <EvanR> did you want a lazy list of results?
+23:39:05 <EvanR> like scanl
+23:40:08 <EvanR> theres unsafeInterleaveIO
+23:40:18 <grantwu> o
+23:40:22 <grantwu> *no
+23:45:28 <EvanR> hmm accursedUnutterablePerformIO seems to be gone
+23:46:36 <EvanR> hahaha https://www.reddit.com/r/haskell/comments/2cbgpz/flee_traveller_flee_or_you_will_be_corrupted_and/
+23:47:13 <grantwu> It's gone?
+23:47:39 <EvanR> i think it was "deprecated and unmentionable"
+23:47:55 <grantwu> Weren't some core libraries still using it, like ByteString
+23:48:06 <grantwu> http://lpaste.net/315717 Also, anyone know why this doesn't do what I want it to?
+23:49:58 <bollu> That's hilarious, I've never seen that before 
+23:50:55 <grantwu> I want to sleep for 1 second until I the amount of elapsed time exceeds 5 seconds
+23:51:16 <grantwu> well, the entire thing is essentially "Print hello world every 5 seconds"
+23:51:30 <EvanR> your code is kind of complex for that purpose
+23:51:37 <EvanR> what does it do wrong
+23:51:46 <grantwu> It prints hello world as fast as possible
+23:53:04 <EvanR> then the bool condition is always returning false
+23:53:28 <EvanR> so probably some arithmetic snafu
+23:53:40 <Cale> (and it's obvious why that would be, since probably less than 5 seconds have elapsed)
+23:54:15 <Athas> juri_: well, Intel GPUs are much better than you may think.
+23:54:35 <grantwu> Cale: I'm... not following
+23:54:36 <Athas> And if you program to an open standard (like OpenCL), then your code won't be tied to proprietary interfaces.  Just avoid CUDA.
+23:55:06 <grantwu> Oh, it executes it while it is true
+23:55:11 <bollu> Athas: But CUDA is much more performant in a lot of cases, no?
+23:55:19 <Athas> bollu: no, that is mostly a myth.
+23:55:25 <Cale> grantwu: You're misunderstanding what whileM_ does, which is exactly the kind of reason why I tell people to consider not using monad-loops
+23:55:50 <Athas> bollu: my own experience is that CUDA uses more aggressive optimisations by default (i.e. picking faster but less accurate instructions).
+23:55:57 <bollu> Athas: hm really? I dunno, I was interning at a research lab over the summer, and the image processing algos was consistently faster?
+23:56:01 <bollu> Oh, perhaps 
+23:56:24 <Athas> Also, most CUDA code is more well-written, because CUDA is much nicer to use than OpenCL is.
+23:56:25 <Cale> If you write the recursion directly, the program is about the same length, but the logic is more explicit
+23:56:39 <Athas> In principle, the CUDA compiler can also do more optimisation, because it has access to both host- and device-level code.
+23:56:49 <Athas> I only use OpenCL as a code generation target, so that does not matter to me.
+23:56:53 <EvanR> yeah for this, two loops is too complicated
+23:57:02 <EvanR> one that you write yourself should work
+23:57:23 <bollu> I see 
+23:57:26 <bollu> Hm
+23:57:35 <grantwu> I mean, I plan on doing a lot more
+23:58:22 <Cale> Also, any reason not to use Data.Time.Clock?
+23:59:30 <grantwu> NTP/daylight savings can screw with your timing
+23:59:33 <Cale> Well, I guess if you're being really really careful, NominalDiffTimes are not really what you want
+23:59:41 <Cale> That's fair enough
+23:59:54 <ab9rf> never know when a leap second will screw with you

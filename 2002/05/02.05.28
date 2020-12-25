@@ -1,0 +1,606 @@
+02:52:28 <exa> hi
+02:52:44 <Heffalum1> hi
+02:53:07 <exa> I have a code that I think mem leaks
+02:53:08 <exa> readStockInfoList h =
+02:53:09 <exa>   do
+02:53:09 <exa>   eof <- hIsEOF h
+02:53:09 <exa>   if eof then return [] else
+02:53:09 <exa>      do info <- readStockInfo h
+02:53:10 <exa>  rest <- readStockInfoList h
+02:53:12 <exa>  return (info:rest)
+02:53:28 <exa> This code is supposed to read a list of stocks
+02:53:39 <exa> each of which is read by readStockInfo h
+02:54:25 <exa> my problem is not with this one but a code that reads a large database of similar records
+02:54:46 <exa> i can't even read it, ghc process gets killed when it consumes about 270M of memory :/
+02:55:09 <exa> surely this isn't the right way to read a list of records?
+02:55:28 <Heffalump> how much do you process each record as you read it?
+02:55:54 <Igloo> Should the last 2 lines be 4 chars more indented?
+02:56:02 <Igloo> IM 7
+02:56:08 <exa> Yes, they should've been indented
+02:56:16 <exa> It happened like that when I pasted from emacs
+02:56:30 <exa> Heffalump: Okay, let me come up with some numbers
+02:56:54 <Heffalump> I assume that you're reducing the size of each record as you read it but think the original data from the file is being kept around too?
+02:59:20 <exa> SessionDB> a <- readSessionDB "HIS00218.DAT"
+02:59:20 <exa> reading "./data/stockData/binary-daily/HIS00218.DAT"
+02:59:20 <exa> (0.21 secs, 11219720 bytes)
+02:59:33 <exa> this much for one of the databases
+02:59:50 <exa> wow, it consumes that much memory?
+03:00:01 <exa> that shouldn't be the case
+03:00:06 <Heffalump> well, how big is the database file itself?
+03:00:15 <exa> orion:stockdb2txnset$ ll data/stockData/binary-daily/HIS00218.DAT
+03:00:15 <exa> -rw-rw----    1 exa      exa        156804 Aug 24  2001 data/stockData/binary-daily/HIS00218.DAT
+03:00:24 <Heffalump> ah.
+03:00:26 <Heffalump> that's bad.
+03:00:39 <Heffalump> is the memory used linear in the size of the file?
+03:01:11 <exa> seems to be
+03:01:37 <exa> 14439508 bytes for 201918\
+03:01:52 <Heffalump> and how much data do you think should actually be kept in memory for each file?
+03:02:18 <Heffalump> (remember that if you make a complex data structure for each record in the database there'll be quite a bit of overhead)
+03:02:21 <exa> maybe 2 times more since I use doubles instead of floats in the file
+03:02:33 <exa> the structure isn't complex :/
+03:02:37 <exa> it's a regular record
+03:02:40 <Heffalump> hmm.
+03:02:58 <Heffalump> are there any intermediate values constructed that could be leaking, then?
+03:03:55 <Igloo> Is that the space allocated or the peak space used?
+03:04:12 <exa> I think it ought to be peak
+03:04:13 <Heffalump> it's still a huge value for peak space usage
+03:04:43 <Igloo> Heff: DYM space allocated?
+03:05:03 <exa> readSessionDB reads a list of Session structures
+03:05:04 <Heffalump> oh, by allocated do you mean without subtracting stuff reclaimed by GC?
+03:05:06 <Igloo> total space allocated >= peak space actually used
+03:05:10 <Heffalump> right.
+03:05:11 <exa> data Session = Session {stockId, date, sessionId :: Int,
+03:05:12 <exa>    lowestValue, highestValue, lastValue, averageValue,
+03:05:12 <exa>    lot, volume :: Double} deriving (Eq, Show)
+03:05:13 <Igloo> Yes
+03:05:14 <Heffalump> that'd be more reasonable then
+03:06:04 <exa> And readSession reads each session from the binary stream
+03:06:09 <exa> readSession :: Handle -> IO (Maybe Session)
+03:06:32 <exa> It uses FFI functions, mallocArray, destructArray, peek/poke, etc.
+03:06:39 <Heffalump> hm.
+03:06:48 <exa> Maybe that is the problem but I'm not doing anything peculiar :/
+03:06:56 <exa> I think the problem is with the way I read the list
+03:07:12 <exa> It causes all intermediate values to be accumulated on the stack somehow
+03:07:13 <Heffalump> the fragment you gave looked fine to me
+03:07:25 <Heffalump> the stack isn't the problem here, is it?
+03:07:40 <exa> I mean stack==space
+03:07:48 <exa> I come from an assembly background after all ;)
+03:08:09 <exa> Within the readSession routine I have stuff like:
+03:08:17 <exa>   let sidptr = castPtr buf :: Ptr CShort
+03:08:17 <exa>       dateptr = castPtr (plusPtr buf 2) :: Ptr CUInt
+03:08:17 <exa>       sesptr = (plusPtr buf 6) :: Ptr CChar
+03:08:17 <exa>       ptr = castPtr (plusPtr buf 7) :: Ptr CLLong
+03:08:17 <exa>           in do stockid <- peek sidptr
+03:08:18 <exa>   date <- peek dateptr
+03:08:20 <exa>   sessid <- peek sesptr
+03:08:22 <exa>   rec <- peekArray 8 ptr
+03:08:24 <exa>   destructArray 73 buf
+03:08:26 <exa> ouch ;)
+03:08:52 <Igloo> Have you tried heap profiling it (although I don't know how well that will get on with FFI stuff)
+03:09:17 <exa> So there are intermediate values constructed, I think if I add these up it might hit that hard I dunno
+03:09:23 <exa> Igloo: No I didn't
+03:09:46 <Heffalump> do the castPtr and plusPtr calls lock memory so it can't be GCed?
+03:09:49 <exa> I have no idea how it is used
+03:10:15 <exa> no those are simply pointer arithmetic/conversion
+03:10:19 <Heffalump> hmm
+03:10:26 <Heffalump> does it get worse if you remove the destructArray?
+03:10:35 <Heffalump> cos it obviously should, but if it doesn't then it's not working
+03:10:39 <exa> good call
+03:12:01 <exa> it actually makes much things much worse!
+03:12:08 <Heffalump> right
+03:12:12 <exa> i mean destructArray
+03:12:13 <Heffalump> so it's something else
+03:12:21 <exa> if I remove it I save a lot of space
+03:12:25 <Heffalump> ugh!?
+03:12:33 <Heffalump> that's impressive.
+03:12:36 <exa> (0.43 secs, 5099240 bytes)
+03:12:43 <Heffalump> got to go, back in 10-20 mins
+03:12:44 <exa> when I disable destructArray
+03:12:52 <exa> (0.63 secs, 17264956 bytes)
+03:13:03 <exa> when I enable destructArray
+03:13:05 <exa> arrrrrrggghh
+03:13:08 <exa> that's not possible!
+03:16:07 <exa> Igloo: What the heck is heap profiling? ;)
+03:16:21 <Igloo> Assuming this is ghci I believe it is allocated space as I find it hard to believe last [1..100000] is really peaking at 11846756 bytes
+03:16:47 <Igloo> In which case destructArray may just be using a bit of space to execute in
+03:17:47 <Igloo> Compile with -prof -auto-all and run with +rTS -h or similar. Then run hp2ps -c on foo.hp to produce foo.ps. I may have the details wrong, more detail is in the docs
+03:17:52 <exa> I still think I'm doing a wrong thing by the following code
+03:17:58 <Igloo> +RTS, not +rTS
+03:18:00 <exa>    Just s -> do rest <- readSessionList h
+03:18:01 <exa>          return (s:rest)
+03:18:14 <exa> I first call recursively, and then compose the list
+03:18:27 <exa> Which causes all elements to be stacked together somewhere and then made into a list
+03:18:35 <exa> Which breaks the lazy evaluation strategy here
+03:18:57 <exa> I think that might be causing all temporary values to be kept in heap until the whole function terminates, no?
+03:19:43 <exa> Igloo: thanks for the info, btw
+03:20:08 <exa> :sePrelude> :set +s
+03:20:08 <exa> Prelude> 1
+03:20:08 <exa> 1
+03:20:08 <exa> (0.15 secs, 2894072 bytes)
+03:20:09 <Igloo> I need to go and do some revision rather than looking in depth at your problem, but heap profiling will tell you the answer
+03:20:27 <exa> Igloo: thanks
+03:20:43 * Igloo gets 0 bytes for that
+03:20:46 * Igloo disappears
+03:21:51 <exa> Prelude> sum [1..1000]
+03:21:51 <exa> 500500
+03:21:51 <exa> (0.01 secs, 0 bytes)
+03:21:57 <exa> lazy eval at its best
+03:26:56 * Heffalump back
+03:27:00 <Heffalump> hmm, so what is the 0 bytes?
+03:27:10 <Heffalump> cos 1..1000 has to create /some/ intermediate storage
+03:27:30 <exa> yea interesting
+03:29:19 <exa> it's perhaps just that haskell sucks at efficiency
+03:29:19 <exa> :/
+03:30:04 <Heffalump> it's quite hard to know what'll be efficient(ish) and what won't
+03:30:23 <exa> yea I know now :{
+03:30:53 <exa>     do sessionData <- mapM readSessionDB stocks -- read session data
+03:31:00 <exa> this is the code that blows up
+03:31:09 <exa> makes a list of those session databases
+03:32:36 <exa> it doesn't terminate
+03:40:58 <exa> ghc --make -prof -auto-all -cpp -i -package data -package lang -package posix test-stockdb.hs -o test-stockdb
+03:40:59 <exa> ghc-5.02.2: can't find module `Prelude'
+03:41:03 <exa> :(
+03:41:09 <exa> what am I doing wrong?
+03:43:58 <exa> ah i'm missing the profile libs
+04:17:01 <exa> i have to fix this space leak
+04:17:10 <exa> a 150K file takes 1MB in heap that's impossible
+04:17:36 <Heffalump> that actually isn't a hugely surprising overhead, given this is Haskell
+04:18:03 <exa> 10 times
+04:18:30 <exa> aSessionDB> a <- readSessionDB "HIS00197.DAT"
+04:18:31 <exa> reading "./data/stockData/binary-daily/HIS00197.DAT"
+04:18:31 <exa> SessionDB> length a
+04:18:31 <exa> 2282
+04:18:52 <exa> SessionDB> a!!0
+04:18:52 <exa> Session{stockId=197,date=33521,sessionId=1,lowestValue=150.5,highestValue=167.25,lastValue=150.5,averageValue=158.875,lot=1656480.0,volume=2.6317325e8}
+04:20:12 <exa> each of those records contain  3 Ints and 6 Floats
+04:21:05 <exa> The list should consume something like 50K in the memory
+04:21:13 <exa> does that sound correct to you?
+04:21:40 <exa> all temporary closures are trapped in the heap. this is a space leak. i'm unlucky :/
+04:23:13 <Heffalump> hmm.
+04:25:06 <dennisb> exa: each value in the list is boxed, so you have a pointer for all of those. Also every record have an infopointer. Then every cons cell also have an extra info-pointer. It's not 50k but also not 1M
+04:25:19 <dennisb> each value in the record I meant
+04:25:49 <exa> i'm measuring that now
+04:26:53 <exa>    putStrLn (show (length (replicate 3000 emptySession)))
+04:27:05 <Heffalump> how do you know the temporary closures are trapped in the heap?
+04:29:44 <exa> because memory consumption is huge
+04:30:14 <Heffalump> ah, ok
+04:30:22 <Heffalump> sorry, thought you had more specific info than that :-)
+04:30:27 <exa> no i didn't
+04:30:44 <dennisb> So you don't want to keep all list in memory but traverse it once?
+04:30:55 <exa> i want to read it into a list
+04:30:59 <exa> i want to keep the list
+04:31:07 <exa> but i don't want to keep the leak :)
+04:31:25 <exa> the problem is the way I try to use mapM with a leaking function
+04:31:36 <exa> sessionData <- mapM readSessionDB stocks -- read session data
+04:31:38 <dennisb> At least 200k this list would need
+04:31:43 <exa> readSessionDB clearly leaks
+04:32:14 <exa> 200k isn't a problem, i just have 400 of them
+04:32:22 <exa> i have that much RAM :)
+04:32:42 <Heffalump> heh
+04:32:45 <exa> since readSessionDB leaks the above combinator also leaks
+04:32:58 <exa> therefore the program explodes
+04:33:19 <exa> I think it would explode even if I did not return the list
+04:33:26 <exa> No it wouldn't then
+04:33:44 <exa> Because the memory leak is caused by my stupid return (x:xs) style
+04:34:01 <exa> There ought to be an alternative way to make a simple for loop!
+04:34:13 <Heffalump> errm, why is return (x:xs) going to cause a leak?
+04:34:29 <exa> Because preceding that xs is computed recursively
+04:34:56 <exa> At least it does so, best place to suspect that :)
+04:35:12 * exa is utterly confused now
+04:35:35 <exa> okay I gotta put it into CVS and butcher it
+04:37:47 <Heffalump> but the x:xs is just the list you want to end up with, isn't it?
+04:38:43 <exa> yea it is :(
+04:38:57 <exa> i don't anything anymore :/
+04:39:05 <exa> oh my brain is finally fried
+04:42:07 <exa> hm i put 'em in cvs now I can mod them ;)
+04:42:57 <Heffalump> :-)
+04:48:06 <exa> now I will see the target memory usage if I just return a dummy empty list, right?
+04:48:10 <exa> wise me, wise me
+04:49:18 <exa> ok, so it indeed is a space leak
+04:49:24 <Heffalump> cunning :-)
+04:49:29 <exa> now could anybody tell me how to implement a FOR loop?
+04:49:39 <exa> :)
+04:51:38 <Heffalump> if you want the result out, surely the way you said?
+04:51:55 <exa> i now have a funny looking heap profile
+04:52:16 <exa> it really takes about 50K or so, hmmm quite efficient then without the closures
+04:52:41 <dennisb> I think that sounds to little :-)
+04:52:47 <exa> yea me too
+04:52:53 <exa> anyway :P
+04:53:22 <exa> the strange thing is that the function that reads another database in a similar way first consumes some 400K bytes
+04:53:39 <exa> but its heap consumption gradually decreases -> garbage collection maybe
+04:53:54 <exa> perhaps I'm allocating things too fast, before GC catches up with me, is that possible?
+04:54:36 <exa> ah no not garbage collection, perhaps it's because of the code :/
+04:54:36 <Heffalump> if that was the case, then scaling it up shouldn't be a problem, because as it started running out of memory it'd force a GC
+04:54:48 <Heffalump> make sure you tell the run time system to use a restricted heap size, though
+04:55:05 <exa> really?
+04:55:12 <exa> ah i see
+04:55:19 <exa> the program is killed because it consumes all memory
+04:56:27 <Heffalump> I think the run time system now defaults to an unrestricted heap, which is rather bad :-)
+04:57:07 <exa> well it *should* complete withing 200M
+04:57:16 <exa> that's 100 times more than my amiga 1200's memory
+04:57:40 <exa> i think it was the GC process that crashed last time, is that possible?
+04:57:48 <exa> why else would the process get killed instantly?
+04:58:07 * exa pauses the music to hear the sound of the hard drive
+04:58:15 <exa> Heap exhausted;
+04:58:16 <exa> Current maximum heap size is 199999488 bytes;
+04:58:20 <exa> HAHA
+04:58:22 <exa> great
+04:58:30 <exa> now i'm finished
+04:59:02 <exa> this is something that's got to finish in 80MB at worst
+05:00:18 <Heffalump> processes will get killed by the kernel under linux 2.2 or 2.4 if the machine runs out of free physical + swap
+05:01:29 <exa> sensible
+05:01:57 <exa> it can't be this difficult no way
+05:02:25 <exa> i mean this is just a for loop that reads some data, doesn't even compute anything
+05:02:42 <exa> i was just about to put stuff in an index structure, grrrr
+05:03:36 * exa is pretty pissed
+05:14:51 <Heffalump> annoyed, or drunk? :-)
+05:15:15 <Heffalump> (pissed is American for annoyed but English for drunk, pissed off is English for annoyed)
+05:15:28 <clausen> australian == english in this respect, hehe
+05:15:50 <Heffalump> Australian is far closer to English than American is, in my experience
+05:33:32 <exa> American way :P
+05:34:14 <Heffalump> :)
+05:43:52 <exa> i posted to haskell-cafe maybe some help would come :)
+05:44:03 <exa> i'm stuck with this damn :)
+06:38:24 <dennisb> exa: when you say it should take 50K I think you are wrong. It should take about 250K (when fully evaluated in the end, maybe more while producing)
+06:39:30 <dennisb> Then if you have some values that are not fully evaluated they can take even more (things like fromIntegral that is lazy)
+06:49:14 <dennisb> exa: What if you make all the values in the Session to be strict (put a ! in front of the type)
+06:52:45 <dennisb> And then in the end if you really want to use less memory you should make them unboxed
+07:14:14 <dennisb> if you have 3000 elements in the list, each which have 9 pointers to the vales, then it's 3000 * (9*4) =~ 100K just for these pointers
+11:58:47 <panoplos> can someone help me with a rather simple question? 
+12:00:29 <dennisb> panoplos: maybe
+12:00:36 <dennisb> just ask the question
+12:00:41 <panoplos> where is it that inc in the following works? - add x y = x + y; inc = add 1 
+12:00:52 <panoplos> s/where/why
+12:01:09 <panoplos> changes the question a bit whilst typing
+12:01:38 <dennisb> it's a standard feature of haskell
+12:02:04 <dennisb> i'm not sure what kind of answere you want. I think the best way to learn is to look at the types
+12:02:25 <panoplos> where is the second param to inc?
+12:02:33 <dennisb> there is none :-)
+12:02:41 <dennisb> look at the type of add
+12:02:47 <panoplos> so, how would one use inc?
+12:03:15 <dennisb> I promise, the type of add will show it all!
+12:03:41 <dennisb> you can ask hugs or ghci for the type by writing :t add
+12:03:49 <dennisb> I guess you use one of these interpreters
+12:03:52 <panoplos> Integer -> Integer -> Integer
+12:04:12 <dennisb> Yes, and -> is right associative
+12:04:19 <dennisb> Integer -> (Integer -> Integer)
+12:04:45 <panoplos> right, but i guess the question is, what is inc?
+12:04:52 <dennisb> This is a type that says, give me an integer and you will get a function back of type Integer -> Integer
+12:05:04 <panoplos> i understand that
+12:05:20 <panoplos> ohh... i got it
+12:05:31 <dennisb> so, what is inc. it's the function you get back when giving add an integer
+12:05:32 <panoplos> inc is the returned function
+12:05:47 <dennisb> yes
+12:05:53 <panoplos> is this related to lazy evaluation
+12:05:54 <panoplos> ?
+12:06:02 <dennisb> no
+12:06:37 <panoplos> just curried functiona
+12:06:46 <panoplos> s/functiona/functions
+12:06:49 <dennisb> yes
+12:06:53 <panoplos> i see
+12:07:45 <panoplos> that is not so difficult to understand, just that the actual semantics of the curried function threw me off =)
+12:08:10 <dennisb> I agree, it's very natural
+12:08:51 <panoplos> so, add 1 is a half baked potato =)
+12:09:04 <dennisb> yes, a partially applied function
+12:09:17 <panoplos> and you throw in the curry with inc Integer
+12:09:56 <dennisb> yes, you got the functional spirit right there!
+12:10:00 <panoplos> but is it really applied, or just some sort of caching mechanism?
+12:10:50 <dennisb> hard to say
+12:11:10 <dennisb> in practice the code for the function is not run until all arguments are there of course
+12:11:39 <panoplos> i guess i think of it as caching register values to be used in a closure latter
+12:12:02 <panoplos> later, even
+12:12:18 <dennisb> bye
+12:12:30 <dennisb> aha, sorry
+12:12:40 * dennisb is tired
+12:12:48 <panoplos> no... just correcting my poor english =)
+12:13:01 <panoplos> me too
+12:13:06 <panoplos> 4am here
+12:14:09 <dennisb> what you get is a closure (piece of memory) that contains the function pointer and the argument supplied so far. This can be sent around, put in lists and so on. It's a function value
+12:14:27 <dennisb> and other stuff that it might need
+12:14:38 <panoplos> yeah, i figures
+12:14:45 <panoplos> figured
+12:33:58 <panoplos> if ':' is a list composite operator, is it different from '++' in that its operands are not lists?
+12:34:54 <dennisb> : is the primitive way to construct a list, it's a constructor
+12:35:13 <dennisb> ++ is a function that is defined in terms of : (and more)
+12:36:02 <dennisb> a constructor can be used as a function, but a constructor can also be used in pattern matching
+12:36:11 <panoplos> so a constructor is not a function?
+12:36:42 <dennisb> no, but it can be used as a function, it has a type and so on. But it can be used for more then other functions
+12:37:01 <dennisb> (that is, pattern matching)
+12:37:38 <dennisb> A constructor is a way to create a value in a datatype
+12:38:06 <panoplos> can you show me an example of pattern matching?
+12:38:23 <dennisb> f (x:xs) = x
+12:39:25 <panoplos> where the pattern being matched is a list (xs) and the first element of xs (x)?
+12:39:55 <dennisb> yes, almost. The list is x:xs where x is the first element and xs is the rest
+12:39:55 <panoplos> or just a list?
+12:39:56 <Logan> (x:xs) is actually a constructor for a list, so (x:xs) is also a pattern for decomposing a list.
+12:40:22 <dennisb> you should read about datatypes in general first maybe
+12:40:38 <panoplos> i see
+12:40:39 <Logan> For instance, a value of type Maybe Int can be constructed as Just x, where x is an Int.  The pattern (Just x) would decompose a value of Maybe Int.
+12:42:01 <panoplos> maybe it the difference between types and data that's not clear
+12:42:33 <panoplos> in the above add would be the type, and inc the data?
+12:43:11 <dennisb> just look at datatypes and it will be clear. Lists in haskell is nothing else but a normal datatype, with some extra syntax to make it easier
+12:43:35 <dennisb> no, add and inc are both values, data, functions.
+12:43:51 <dennisb> add has type Int -> Int -> Int,   inc has type Int -> Int
+12:44:18 <dennisb> or rather Integer instead of Int
+12:44:27 <Logan> The literal "3" is actually a constructor for an integral value that represents the quantity three.
+12:44:35 <Logan> So you can use a "3" as a pattern.
+12:44:35 <panoplos> so Int is the type, or data?
+12:44:43 <dennisb> Int is a type
+12:44:58 <panoplos> ok, thought so
+12:45:00 <Logan> You can call a constructor like a function (except constructors aren't curried) to yield a value.
+12:45:31 <panoplos> so, what is data?
+12:45:42 <Logan> The keyword or the concept?
+12:46:35 <panoplos> types are like signatures written against in contracts between data? 
+12:47:06 <panoplos> both
+12:47:14 <Logan> All data has a type.
+12:47:20 <panoplos> keyword and concept
+12:47:48 <panoplos> is this as simple as class-instance relationships?
+12:47:49 <Logan> I get the data and type and newtype keywords confused, but I think the data keyword declares a new data type and constructors for that data type.
+12:48:05 <Logan> panoplos: There are class-instance relationships for types, but not for values.
+12:48:20 <Logan> panoplos: That is, values are never polymorphic, but types can be.
+12:49:10 <panoplos> values are the primitive composites of data?
+12:49:46 <dennisb> forget data, there are just values and types
+12:50:01 <Logan> Yeah, the word "data" is too confusing here.
+12:50:22 <dennisb> You can declare your own datatypes in haskell using the data-construct.
+12:51:35 <Logan> data List a = Nil | Cons a (List a)
+12:51:36 <dennisb> but the concept is you have values that are of a certain type
+12:51:47 <panoplos> i need to get my bearings back here... does haskell employ the same definitions for these terms as other languages?
+12:52:03 <Logan> panoplos: Heh, which other languages? :P
+12:53:22 <panoplos> i still can't get the concept of data types that are not normal types
+12:53:31 <dennisb> List above is a good example. It's a new datatype (with name List) declared and the way you construct values in this datatype is by using the constructor Nil or Cons
+12:54:08 <Logan> panoplos: There are no special types.
+12:54:09 <dennisb> So, when you create a type you say what name it has, and how values are constructed
+12:54:14 <Logan> They are all "normal".
+12:54:38 <Logan> Although some of the basic ones (like lists and tuples) have unique constructors.
+12:55:48 <panoplos> i've been too poluted with procedural and oo langs..
+12:56:07 <Logan> I can try to explain from that perspective.
+12:56:30 <Logan> In most languages you're probably familiar with, you have lexical elements called literals, from which you can obtain values, correct?
+12:56:39 <panoplos> yes
+12:57:01 <Logan> Ok, Haskell takes this even further than the lexical level, letting you define your own structure for constructing literals.
+12:57:14 <panoplos> i got this much
+12:57:41 <Logan> When I say data List a = Nil | Cons a (List a), I define two ways to specify a literal list value.  I can say Nil to get an empty list, or Cons 3 (Cons 4 (Cons 5 Nil)) to get a list with 3 integral values in it.
+12:58:24 <panoplos> ok
+12:58:32 <Logan> When I use those constructors, I get a value of type List Int (technically it's (Num a) => List a, but no need to go into polymorphism yet)
+12:58:52 <panoplos> are these literals immutable?
+12:58:59 <Logan> I used type polymorphism in declaring that List type, though.  The a is a placeholder for any arbitrary data type.
+12:59:02 <Logan> Yes.
+12:59:11 <Logan> Everything is immutable in haskell.
+12:59:25 <Logan> (though I should qualify that by mentioning that there are some tricks to actually gain mutability)
+13:00:05 <Logan> Constructors do more than just building literals, however.  They let you decompose a value into its component parts, as well, by acting as patterns.
+13:00:20 <panoplos> also, does this new definition of Nil polute other namespaces that also define Nil?
+13:00:39 <Logan> For instance, I can define a function:   head Nil = error "empty list!",   head (Cons x (List y)) = x
+13:01:01 <Logan> panoplos: I'm not sure.  I know it defines an identifier Nil within the current namespace (that is, in the module where it's defined).
+13:01:18 <Logan> I can imagine you can use it in multiple ways.
+13:01:26 <Logan> But when you refer to Nil, you'd have to qualify its type if it's at all ambiguous.
+13:02:14 <panoplos> using the :: -> construct?
+13:02:34 <Logan> Ok, you can't have multiple declarations of Nil.
+13:02:50 <Logan> But, yeah, :: is how you specify that some expression has some particular type explicitly.
+13:03:02 <Logan> The -> operator in a type expression specifies a function mapping.
+13:03:23 <panoplos> and association
+13:03:26 <Logan> The :: basically says "Ok, we're going to talk about types instaed of values for a second now" until the end of the expression.
+13:03:30 <Logan> Association?
+13:04:11 <panoplos> (a->b) -> (b->c)
+13:05:09 <Logan> In type expressions, -> is a right-associative operator.
+13:05:22 <Logan> (a->b) -> (b->c) is equivalent to (a->b) -> b -> c
+13:05:43 <Logan> It would specify a type meaning a function that takes a function that takes an a and returns a b, and returns a function that takes a b and returns a c.
+13:06:30 <Logan> When you see that (a->b) -> (b->c) means the same thing as (a->b) -> b -> c, you might understand currying. :P
+13:07:33 <panoplos> hm..
+13:08:12 <Logan> Take for instance addition of integers... add :: Int -> Int -> Int
+13:08:14 * dennisb have a feeling this is to much and to fast
+13:08:37 <panoplos> why does f (a->b) return a b ?
+13:08:53 <Logan> You could think of it as a function that takes two ints and returns an int, but it's also the same as Int -> (Int -> Int), meaning if you give it just one int, you'll get back a new function.
+13:08:58 <panoplos> dennisb: no, i like it
+13:09:16 <Logan> f :: (a->b) -> (b->c) ?
+13:09:45 <panoplos> sorry, by bad syntax
+13:09:52 <panoplos> s/by/my
+13:10:38 <dennisb> panoplos: what was you question?
+13:10:46 <panoplos> (a->b) != f :: Int -> Int ??
+13:11:27 <panoplos> assuming Ints, of course
+13:11:46 <Logan> If you define a function f :: a -> b, then you can substitute anything for the a and antyhing for the b.
+13:11:55 <panoplos> i know
+13:12:06 <Logan> So in effect you have f :: Int -> Int
+13:12:06 <panoplos> i tried to qualify that
+13:12:34 <panoplos> so, how does f :: Int -> Int return a *and* b?
+13:12:39 <Logan> It doesn't.
+13:12:48 <Logan> The -> doesn't mean and, it means "maps to"
+13:12:58 <Logan> Like a mathematical function.
+13:13:04 <Logan> You're specifying the domain and the codomain.
+13:13:18 <dennisb> f is just a normal function that takes an Int as input and gives an Int as result
+13:13:21 <panoplos> then how does (a->b) return a *and* b?
+13:13:21 <Logan> You're saying that f can be applied to a value of type Int, the result being a value of type Int.
+13:13:33 <Logan> (a->b) is a function that takes a and returns by.
+13:13:35 <Logan> b.
+13:13:51 <dennisb> a -> b is a type, It does not return anything
+13:14:05 <Logan> Oops, I said that in a misleading way. :P
+13:14:19 <Logan> A value of type (a->b) is a function that takes a and returns b. :P
+13:14:46 <dennisb> a value if that type (a->b) takes something of type a (whatever it is) and gives something of type b (whatever it is)
+13:14:47 <dennisb> yes
+13:15:00 <panoplos> i understand basic math premise in Int -> Int, but i fail to see how (a->b) can return a *and* b as you said before
+13:15:31 <Logan> panoplos: You mean how a and b can both be placeholders for Int?
+13:15:41 <dennisb> panoplos: did he say that?
+13:16:06 <panoplos> no... "It would specify a type meaning a function that takes a function that takes an a and returns a
+13:16:09 <panoplos>                b, and returns a function that takes a b and returns a c.
+13:16:11 <dennisb> a function that takes an a and returns a b, and 
+13:16:17 <dennisb> yes, it's english a 
+13:16:20 <Logan> panoplos: It's hard to describe in English.
+13:16:33 <dennisb> it returns one b
+13:16:38 <dennisb> it returns _a_ b
+13:16:39 <panoplos>                b, and returns a function that takes a b and returns a c.
+13:16:48 <panoplos> no... "It would specify a type meaning a function that takes a function that takes an a and returns a
+13:16:52 <panoplos>                b, and returns a function that takes a b and returns a c.
+13:16:54 <Logan> panoplos: A value of type (a->b) -> (b->c) is a function that takes a function f and returns a function g.  f is a function that takes a value of type a and returns a value of type b.  g is a function that takes a value of type b and returns a value of type c.
+13:17:32 <panoplos> ok... it was the english
+13:17:37 <Logan> panoplos: This is equivalent to function of type (a->b) -> b -> c, which describes a function that takes a function f (as before) and a value of type b and returns a value of type c.
+13:17:41 <panoplos> i perfectly understand
+13:18:06 <Logan> If you only apply the function to f, you[ll get g as a result.  If you apply the function to f and a value of type b, you get a value of type c.
+13:18:19 <panoplos> i thought by "returns a b" you meant 'a' and 'b'
+13:18:27 <dennisb> there is a reson why we use programming languages to tall computers what to do, natural languages are not very precise :-)
+13:18:37 <dennisb> s/tall/tell
+13:18:53 <panoplos> well, there is just the namespace issue
+13:19:45 <dennisb> in the example Nil and Cons are introduced into the namespace and can not be used in other datatypes
+13:19:53 <Logan> dennisb: In that module. :P
+13:20:11 <dennisb> in that module, in the same program, on the same computer, and so on
+13:20:50 <Logan> Well, you can have Nil defined in various modules simultaneously, as long as its never exported, I think (or used without qualification if there is ambiguity?  I haven't experimented).
+13:21:13 <dennisb> modules work fine
+13:21:38 <Logan> Even if you import Nil into your namespace from multiple sources?
+13:21:45 <Logan> Or would that be the same as defining it twice?
+13:21:56 <dennisb> except in hugs where the error messages are hard to understand if you have the same thing in two modules because it does not print qualified names
+13:22:06 <panoplos> ok, if (a->b) -> (b->c), actually returns c, then why doesn't it return the function that takes b and returns c itself, or is this already evaluated by the time of the return?
+13:22:16 <dennisb> Logan: then you hide one or two of them and use qualified names
+13:22:18 <Logan> panoplos: It's the fundamental concept of currying.
+13:22:37 <Logan> panoplos: There really are no multiple-argument functions.  Multiple arguments are emulated by currying.
+13:22:57 <dennisb> or with tuples
+13:22:57 <Logan> panoplos: An example might clarify.
+13:23:06 <Logan> Yeah, tuples correspond to uncurried functions.
+13:23:24 <Logan> add x y = x + y
+13:23:28 <Logan> add 3 4 => 7
+13:23:30 <panoplos> i get it
+13:23:43 <Logan> add 3 => a new function that takes one argument and returns the value of that argument plus 3.
+13:24:00 <Logan> Since function application is left-associative, add 3 4 => (add 3) 4
+13:24:06 <panoplos> but why can't i have half baked return values?
+13:24:14 <Logan> What do you mean?
+13:26:01 <panoplos> since (a->b) -> (b->c) evaluates to the c return value, why can't i return the (b)->c of (b->c)?
+13:26:25 <panoplos> and have the user provide b?
+13:26:29 <dennisb> functions are normal values in functional values, it's as natural for a functional programmer to pass around functions as it is to pass around integers for a c programmer
+13:27:00 <dennisb> f = add 4
+13:27:06 <dennisb> f 3 + f 6
+13:27:16 <dennisb> f is the function we get back
+13:27:59 <panoplos> but if c is eventually an Int, then what if i want to return the actual function (b->c) instead of just the resultant c?
+13:28:46 <Logan> If you have fun :: (a->b) -> (b->c)
+13:28:47 <dennisb> you actually always returns the function
+13:28:56 <Logan> And you apply fun to just one argument, the result is a value of type (b->c)
+13:29:10 <Logan> E.g., fun x :: b -> c
+13:29:32 <Logan> let g = fun x, then fun x y => (fun x) y => g y
+13:30:10 <dennisb> (add 4) 5
+13:30:34 <dennisb> first you run add 4 which gives you a function back, that you run with the argument 5
+13:31:00 <panoplos> Logan: that is just reduction, no?
+13:31:05 <Logan> panoplos: Yep.
+13:31:14 <Logan> It's how functions are applied to their arguments.
+13:31:47 <Logan> Basically, function application only consists of binding a single value to a pattern.
+13:32:00 <Logan> f x y denotes _two_ function applications.
+13:32:12 <Logan> The result is still only a set of bindings, however, because of lazy evaluation.
+13:32:34 <panoplos> yeah, i got that, curried... but i have to change my thinking cap
+13:32:55 <Logan> You sure do.
+13:33:06 <Logan> Once you understand currying, you need to understand lazy evaluation.
+13:33:21 <panoplos> teach on wise one =)
+13:33:27 <Logan> Do you know what it means?
+13:33:38 <panoplos> lazy evaluation?
+13:33:41 <Logan> Yes.
+13:34:26 <panoplos> i think i do, but my jargon is off =)
+13:35:03 <panoplos> it means evaluating only what you need and returning the result, until you need more
+13:35:07 <panoplos> no?
+13:35:18 <Logan> Sorta.
+13:35:33 <Logan> That's the basic idea.
+13:35:36 <panoplos> then, please clarify =)
+13:35:47 <Logan> You really have to try writing some code to really get a feel for it, I think.
+13:36:11 <Logan> Instead of specifying what actions to take, as in imperative programming, you specify relations.
+13:36:37 <Logan> A lot of times you run into the model of a generating function.
+13:36:39 <panoplos> only thing is, i don't have either hugs or ghci now =)
+13:36:44 <Logan> Which can be plugged into a pipeline.
+13:36:49 <Logan> What OS do you run?
+13:36:53 <panoplos> linux
+13:36:57 <Logan> What distribution?
+13:37:04 <panoplos> gentoo
+13:37:17 <Logan> Not familiar with it, but there are probably packages.
+13:37:23 <Logan> In Debian I just apt-get install ghc-5
+13:37:26 <panoplos> no, there aren't
+13:37:27 <Logan> gentoo uses RPMs?
+13:37:47 <panoplos> i can just compile the tars, but i'm lazy today =)
+13:37:50 <Logan> Yeah.
+13:38:03 <Logan> I think ghc is written in haskell, though. :P
+13:38:21 <panoplos> no, gentoo uses an anvanced ports-like system written entirely in python
+13:38:34 <dennisb> but hugs is written i C, it's easier to compile
+13:39:13 <panoplos> ghc just translates to C, then compiles, no?
+13:39:28 <Logan> panoplos: Yes, or it can run as an interpreter.
+13:39:38 <dennisb> panoplos: it can do that or generate native code
+13:40:03 <panoplos> ohh... native to what?
+13:40:12 <dennisb> x86 or sparc
+13:40:30 <panoplos> ohhh... sparc, but no ppc... =P
+13:40:59 <dennisb> no, but you get like 5% faster or something. In some cases it might even be faster to compile via C
+13:41:41 <panoplos> i'm sorry if i seem a little silly with my questions... i have only been programming for about two and a half years now
+13:41:54 <Logan> I was asking dumber questions a few months ago.
+13:42:05 <Logan> And I've been programming for years.
+13:42:12 <Logan> Just not functionally. :P
+13:44:07 <panoplos> i program in C/C++, Perl, Ruby and Python at work, plus Bash and Perl at home.
+13:44:21 <panoplos> now i'm trying my hand with Haskell =)
+13:45:12 <panoplos> ohh.. also ARM/x86 ASM at work 
+13:45:28 <panoplos> but that's not really programming =)
+13:45:58 <panoplos> just optimisation and decompilation when we don't have the source =)
+13:46:03 <Logan> I don't think I can list languages on two hands any more. :P
+13:46:37 <panoplos> that's great =), the more tools, the merrier
+13:46:50 <panoplos> i hope to be there some day =)
+13:47:09 <dennisb> well, most of these languages are similar, haskell is much more fun
+13:47:22 <panoplos> haskell is beautful
+13:47:24 * dennisb also have programmed in a lot of languages
+13:47:27 <panoplos> beautiful
+13:47:59 <panoplos> just wish that i could use it to make money with =(
+13:48:38 <panoplos> actually, i determined to teach myself CS in order to get a better job to support my little family
+13:49:39 <panoplos> well... thanks for all the help. i'll see you around kater
+13:49:41 <panoplos> later
+13:52:51 <panoplos> bye all
+13:52:57 <dennisb> bye
+15:43:31 <exa> dennisb: I read your suggestion
+15:43:41 <exa> dennisb: I was away, sorry
+15:43:53 <exa> dennisb: Is it easy to strict-ify Session?
+15:44:23 <exa> dennisb: Will I put ! in front of function applications?
+20:28:30 <dennisb> exa: You put the ! in the datatype-declaration
+20:29:56 <exa> dennisb: yea and it worked for now. thanks :)
+20:31:54 <dennisb> exa: It did, good. How big difference was it?
+20:32:10 <exa> dennisb: pretty big. but not that big :)
+20:32:19 <exa> it still takes many many megabytes in the heap I think
+20:32:27 <exa> I didn't profile it last I think
+20:32:39 <exa> I'm about to give my last breath. A little sleepless :)
+20:32:58 <dennisb> Well, I think unboxing can give some more, but it changes the program a bit
+20:33:03 <exa> We went out and I missed my computer so I stayed up ;)
+20:33:13 <exa> dennisb: how do you do that?
+20:33:16 <dennisb> :-)
+20:33:37 <exa> there are two kinds of types in ghc, boxed - unboxed right?
+20:33:43 <dennisb> There are two kinds of values (integer for example)
+20:33:45 <dennisb> yes
+20:33:49 <exa> values okay
+20:33:56 <dennisb> Int# is an unboxed integer
+20:33:57 <exa> so boxed values mean <-- bound ?
+20:34:03 <exa> okay
+20:34:18 <exa> what's the difference?
+20:34:21 <exa> from Int? :)
+20:34:29 <dennisb> boxed means the value is in the heap and there is a pointer pointing on it
+20:34:41 <exa> Int# is on the stack?
+20:35:00 <exa> or somewhere more absolute :P
+20:35:18 <dennisb> Instead of a pointer to a value, an Int# is put where the pointer is in the case of Int
+20:35:38 <exa> so it's not in the heap
+20:35:39 <exa> makes sense
+20:35:47 <exa> more static bound values
+20:35:51 <exa> good for efficiency
+20:35:58 <exa> i think edison uses a lot of those then :)
+20:36:00 <dennisb> Now you have a record with nine pointers to the values, if you make them unboxed you should have a record with nine values
+20:36:24 <exa> is it okay to combine strict and unboxed?
+20:36:42 <dennisb> unboxed are always strict
+20:36:58 <exa> the upshot is that it might induce some overhead in certain operations?
+20:37:08 <dennisb> there are no closures, just a value. It's like an int in C
+20:37:11 <exa> like some copying of values instead of sharing the pointer/
+20:37:21 <exa> i mean like C++ copy constructors?
+20:37:44 <exa> i imagine if i'm passing around an unboxed value it's gonna be copied
+20:37:59 <dennisb> and no lazyness
+20:38:11 <exa> okay I get it
+20:38:16 <dennisb> I have almost never played with unboxed values, i'm no expert in this :-)
+20:38:21 <exa> thanks a lot for the advice
+20:38:37 <dennisb> but there should be a possibilty for improvement there
+20:38:43 <exa> i'm finding it hard to getting used to haskell after a perioid of inactivity :)
+20:38:48 <exa> certainly
+20:38:57 <exa> it must result in a drastic reduction in space
+20:39:10 <exa> since 9 pointers takes a lot of space :)
+20:39:14 <dennisb> I don't know how much the compiler can optimise when you put in the ! and how much extra you get by unboxing
+20:39:31 <exa> I see
+20:39:49 <dennisb> you could always let the compiler generate the core code and see what happend when you put in the !
+20:39:51 <exa> I'll check that when I regain consciousness
+20:39:59 <dennisb> it's like looking at the assembler from a c-compiler
+20:40:13 <exa> hmm :)
+20:40:27 <dennisb> I have no idea exactly what ghc does with it
+20:40:45 <exa> something fancy i'm sure :)
+20:40:51 <dennisb> I guess :-)
+20:41:44 <dennisb> I would think that ghc can unbox things automatically in some cases, I have to think about it though before I can say anything...
+20:42:44 <exa> yea haskell is like thinking for 20 minutes then writing a single line :)
+20:43:03 <exa> see ya. i have to get some sleep ;)
+20:43:12 <dennisb> well, I just woke up!
+20:43:21 <exa> heh :)
+20:43:26 <exa> l8r

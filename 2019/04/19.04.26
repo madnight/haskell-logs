@@ -1,0 +1,1483 @@
+00:16:48 <tsahyt> Given an AST composed of a bunch of nested types, with lenses and prisms generated, is there some neat way to walk through the AST and e.g. rename identifiers, which doesn't involve lots of manual traversal functions?
+00:17:00 <koz_> Plated maybe?
+00:17:28 <tsahyt> I've only used Plated in situations where I had only one type describing the AST, e.g. some Expr type
+00:19:31 <ski> @wiki Multiplate
+00:19:31 <lambdabot> https://wiki.haskell.org/Multiplate
+00:19:58 <tsahyt> hm, the wiki looks different
+00:20:08 <koz_> TIL that rank-3 polymorphic types have a use.
+00:20:27 <ski> koz_ : `callCC' ?
+00:20:44 <koz_> ski: Wait, callCC needs rank-_3_ polymorphism?
+00:21:06 <ski> *needs* would be an overstatement
+00:21:21 <ski> "can profit by" would be better
+00:21:28 <koz_> ski: Could you explain?
+00:21:35 <ski> @type callCC
+00:21:36 <lambdabot> MonadCont m => ((a -> m b) -> m a) -> m a
+00:21:40 <ski> consider instead
+00:21:53 <ski>   callCC :: MonadCont m => ((forall b. a -> m b) -> m a) -> m a
+00:22:14 <ski> now you can call the same captured continuation `k' in different contexts, with different monadic result types `b'
+00:23:05 <koz_> Why doesn't mtl do that though?
+00:23:14 <tsahyt> hm.. I guess I could also just add more antiquotation features to my quasiquoter instead of modifying the resulting AST
+00:23:17 <ski> (so, perhaps that would be "needs", in some particular use case ?)
+00:23:41 <ski> koz_ : dunno, perhaps they didn't think about it at the time, and noone has bothered to change it since ?
+00:23:55 <koz_> ski: Possibly. Just wondered if you knew.
+00:23:57 <ski> it's been mentioned on this channel over the years, though
+00:24:50 <ski> koz_ : so .. what was the rank-3 use you saw ?
+00:25:16 <koz_> k :: ((forall b. a -> m b) -> m a)
+00:25:23 <koz_> That's a rank 2 I think?
+00:25:31 <ski> no, if you have
+00:25:45 <ski>   callCC (\k -> do ..k..k..)
+00:25:46 <ski> then
+00:25:52 <ski>   k :: forall b. a -> m b
+00:26:08 <ski> and, of course
+00:26:18 <ski>   do ..k..k.. :: m a
+00:26:30 <ski>   callCC (\k -> do ..k..k..) :: m a
+00:27:14 <ski> so (this) `callCC' is rank-3, it's callback argument is rank-2, and `k' is rank-1, iow just ordinary polymorphic
+00:27:23 <ski> s/it's/its/
+00:27:29 <koz_> Yeah, that was where I was going, lol.
+00:27:31 <koz_> Sorry, bit tired.
+00:27:35 * ski btw doesn't want to call rank-2, *polymorphism*
+00:27:39 <ski> if you say
+00:27:56 <ski>   mystery :: (forall a. [a] -> [a]) -> [[String]] -> [[String]]
+00:28:06 <ski> then `mystery' isn't the least bit polymorphic
+00:28:17 <ski> (it's callback argument, otoh, is)
+00:28:30 <koz_> Well, what would you call it then? I'm just following convention (I think).
+00:28:46 <ski> so far, i've been saying just rank-2
+00:28:52 <koz_> Ah, OK.
+00:30:12 <ski> (but, perhaps, rank-3 could be said to be polymorphic in some sense .. because the choice of who picks `b' in that `callCC' is still the caller of `callCC', not the callee (being the implementation/definition of `callCC'))
+00:31:02 <ski> (more specifically, the caller pick which `b's to use, by providing a callback which will call `k' in different places, with (possibly) different monadic result types)
+00:58:55 <hololeap> based on a discussion here about an UnliftIO instance of `(Functor f, MonadUnliftIO m) => FreeT f m a`
+00:59:18 <hololeap> i made one for CofreeT: http://dpaste.com/0DP7RKX
+00:59:21 <dminuoso> hololeap: Curious, wouldn't such a FreeT be rather blant?
+01:00:10 <hololeap> where would be the best place to post this? i doubt the authors want another dependency for unliftio-core, but it seems useful
+01:07:44 <tsahyt> alright, multiplate did it. thanks!
+01:11:28 <hololeap> dminuoso: i'm pretty sure a FreeT instance is impossible, but CofreeT is another story
+01:18:10 <hololeap> the availability of an `a` is the key. a FreeF has `Free` and `Pure`, so there isn't a guarantee that `a` will be available. CofreeT can make that guarantee
+01:21:13 <dminuoso> hololeap: You dont need that guarantee
+01:21:29 <dminuoso> hololeap: Sine all unliftio things are just reader like, pure is conceptually just const
+01:22:16 <dminuoso> I dont understand CofreeT though
+01:22:37 <dminuoso> I dont understand what free means, just yet
+01:26:29 <hololeap> i can't relay the formal definition, but it basically means that you can "lift" a Functor to a Monad, or to a Comonad, depending on if you use Free or Cofree
+01:27:08 <hololeap> the transformer variants interleave a monad or comonad transformer stack
+01:27:10 <dminuoso> hololeap: Im rather looking for the formal definition. On some level I understand what `free` construction means in the sense of adjoint functors, but cofreeness I have not looked into yet.
+01:28:04 <hololeap> CofreeT is interesting in that it has a MonadTrans instance if the functor happens to be an Alternative
+01:29:03 <hololeap> Cofree also preserves the Representable class, which i think is relevant here
+01:30:04 <dminuoso> Dually, a cofree functor is a right adjoint to a forgetful functor.
+01:30:05 <dminuoso> I see.
+01:31:55 <hololeap> in that code i posted, `lift` and `fmap extr . runCofreeT` seem like an adjuntion. they couldn't be an isomorphism because extr loses data.
+01:32:17 <hololeap> but i'm not too good with CT
+01:32:46 <dminuoso> So if.. In general, if U:C → D is thought of as a forgetful functor and F:D → C is its left adjoint, then F(x) is the free C-object on an object x of D.
+01:33:15 <dminuoso> Then if F was its right adjoint, then F(x) is the cofree C-object of an object x of D?
+01:36:24 <ski> dminuoso : yes
+01:36:39 <hololeap> i suppose... it would make sense if `fmap extr . runCofreeT` was U and `lift` was F
+01:36:50 <dminuoso> ski: Great, cheers.
+01:37:03 <hololeap> `fmap extr . runCofreeT` seems like a forgetful functor and `lift` seems like a free functor
+01:37:05 <ski> tsahyt : cheers !
+01:37:15 <hololeap> but, idk
+01:41:57 <ski> hololeap : `lift' is a value (comparable to morphisms), not a type (comparable to categories, functors)
+01:42:33 <hololeap> `lift` is a natural transformation from `m a` to `t m a`
+01:42:41 <ski> `lift' is a natural transformation (in fact a monad homomorphism) from `m' to `t m'
+01:42:52 <ski> hololeap : almost. from `m' to `t m'
+01:43:11 <hololeap> ok, so how is it a value?
+01:43:20 <ski> it's a function
+01:43:41 <ski> you can't apply `lift' to types. `lift Integer' is nonsense
+01:44:04 <ski> `Maybe' is a functor, you can apply it to types, `Maybe Integer' makes sense
+01:44:21 <hololeap> fair enough, but what's your point?
+01:44:31 <ski> so, since `F' was supposed to be a functor, `lift' can't reasonably be `F', here
+01:44:42 <ski> contradicting
+01:44:44 <ski> <hololeap> i suppose... it would make sense if `fmap extr . runCofreeT` was U and `lift` was F
+01:44:56 <ski> (similarly for the `fmap extr . runCofreeT' part)
+01:45:38 <ski> oh, and also contradicting
+01:45:40 <ski> <hololeap> `fmap extr . runCofreeT` seems like a forgetful functor and `lift` seems like a free functor
+01:45:43 <ski> of course
+01:45:56 <hololeap> i see, well, what i meant was the two values have types that happen to both be monad homomorphisms? am i getting it right?
+01:46:13 <ski> sorry, no
+01:47:05 <ski> they *are* monad morphisms (at least `lift' is, i'd have to think about the other one). their types are no monad morphisms
+01:47:34 <ski> (`Int -> Bool' is not a function. it can be the type of a function. it is a type of functions)
+01:48:12 <hololeap> i'm trying to unpack all of this
+01:48:46 <ski> (yeah, the other one is also a natural transformation. so both are natural transformations. but their types are not natural transformations)
+01:49:32 <dminuoso> ski: Do you mind a followup question on cree/cofree?
+01:50:34 <ski> perhaps i'm mostly nitpicking here, and you didn't really mean what you said there. but picking such nits have, in the past, turned out to be surprisingly effective in helping people get a better grip on concepts, sharpen their understanding
+01:50:34 <hololeap> oh... i see the mistake. i said that `lift` _is_ F (and `...` _is_ U), but i more meant that i intuited a relationship between them
+01:51:08 <hololeap> ski: i appreciate it, actually
+01:51:36 <ski> (someone said recently here that for newbies, nitpicking on terminology can be extremely useful, in getting a better mental picture of what the relevant concepts are, and what important distinctions to uphold are)
+01:51:38 <dminuoso> ski: How is that pretense "we pretend that U has a left/right adjoint F" justified? What if there is no such adjunction?
+01:51:59 <ski> dminuoso : where is that written ?
+01:52:20 <dminuoso> ski: https://ncatlab.org/nlab/show/free+object
+01:52:28 <dminuoso> ski: "A free C-object on x with respect ..."
+01:53:22 <dminuoso> The definition via comma category seems fairly precise if I understood what a comma category was, so I dont think that I can use this.
+01:53:22 <ski> hololeap : right, i suspected so, but went through with the nitpicking anyway, because of [what i already said]. and perhaps, there's some kind of relationship of such a flavor, hiding there
+01:53:36 <hololeap> ski: it's cool :)
+01:55:07 <ski> dminuoso : i don't see "pretend" mentioned there
+01:55:45 <dminuoso> ski: Well it says that in that paragraph *and* the following that F need not exist.
+01:56:32 <ski> where was "we pretend that U has a left/right adjoint F" quoted from ?
+01:56:38 <ski> or was that a paraphrase ?
+01:56:42 <dminuoso> ski: That was a paraphrase.
+01:56:45 <ski> okay
+01:57:01 <ski> well, so
+01:57:42 <ski> you can have a construction for `F' that would make it an adjoint (pre or post) for `U', in case such an adjoint exists
+01:58:03 <dminuoso> ski: Does "pre/post" mean left/right?
+01:58:50 <ski> (e.g., as mentioned on that page. `F x' might be a free (/cofree) object over `x', for some of the possible `x' objects in the category, but not for all)
+01:59:40 <ski> by "pre adjoint" i mean what's usually called "right adjoint", and by "post adjoint" i mean what's usually called "left adjoint"
+01:59:57 <dminuoso> Alright.
+02:00:17 <ski> by "pre composition" i mean what's usually called "right composition" (or "composition on the right (with)"), and by "post composition" i mean what's usually called "left composition" (or "composition on the left (with)")
+02:00:53 <hololeap> dminuoso: just because you mentioned it earlier, CofreeT f w a ~ w (a, f (CofreeT f w a))
+02:02:14 <ski> (i just tend to prefer not using "left" and "right" because (a) i'd prefer not to rely on whether one's writing left-to-right or right-to-left (as in semitic scripts); and (b) (more practically relevantly, perhaps) i often write function arrows going to the left, as in `length :: Int <- [a]', and i still want my terminology to work properly)
+02:03:08 <dminuoso> ski: Oh fair enough. Ill try to keep translating pre to right and post to left in my head.
+02:03:42 <hololeap> the main difference between it and FreeT is that the functor `w` (or `m`) holds a sum type in FreeT and a product type in CofreeT
+02:04:24 <ski> dminuoso : anyway .. perhaps `F x' is not even a free (/cofree) object, wrt `U', for *any* object `x'. for the particular choice of `U'
+02:05:10 <dminuoso> ski: Hold on.
+02:05:40 <ski> dminuoso : in other words, perhaps we have some "mechanical" construction on an arbitrary `U' taken from some appropriate class, which constructs a corresponding `F' from `U'. but we're not assured that `F' is an adjoint of `U' (or even that `F x' is a free (/cofree) object, wrt `U', for any object `x')
+02:05:45 <ski> okay
+02:06:27 <__monty__> ski: Why? And, is (<-) = (->) or (<-) = flip (->)?
+02:06:36 <ski> __monty__ : the latter, obviously
+02:06:42 <ski> (otherwise, there'd be little point)
+02:07:14 <__monty__> Who am I to judge? : )
+02:07:20 <ski> (or, if you prefer, otherwise, it's only be a matter of which concrete syntactical token was used)
+02:08:23 <ski> anyway, point is, `A <- B' fits better with the practice of writing function application as `f(y)' (or `f y' in Haskell)
+02:08:43 <ski> (and `B -> A' would fit better with writing `(y)f', or `y f')
+02:09:18 <__monty__> Hmm, can't say I agree. Since that'd imply f has type `A`.
+02:09:34 <ski> no, `f' has type `A <- B' / `B -> A' here
+02:09:39 <ski> (and `y' has type `B')
+02:09:53 <dminuoso> ski: F(x) is a free C-object on x for every x if F -| U, right?
+02:10:15 <__monty__> Yeah but making the arguments line up with the types lines up the function with a type to. It's just a logical conclusion.
+02:10:40 <__monty__> Composition may look a lot more natural with that reverse order though.
+02:10:49 <ski> dminuoso : if `C' is the domain of `U' / `codomain' of `F', and that's free object wrt `U', yes
+02:10:52 <dminuoso> (This is intruducing two assumptions. A) namely that `F : D -> C` exists *and* that F -| U
+02:11:50 <ski> __monty__ : part of the point is also having `(* b)' be a left adjoint of `(<- b)'
+02:12:31 <ski> dminuoso : those are already presuppositions, yes
+02:13:50 <dminuoso> ski: Well they were not part of the initial definition
+02:13:53 <ski> __monty__ : the proper way to curry a morphism `f : A * B >---> C' would be either as `left_curried_f : A >---> (C <- B)', or as `right_curried_f : B >---> (A -> C)'
+02:13:57 <dminuoso> But okay
+02:14:27 <hololeap> ski: in (F: D -> C), is F a hom-set, or is it only related to a hom-set?
+02:14:33 <dminuoso> ski: So when you said "perhaps `F x` is not even a free ....", thats assuming that U has no left adjoint F?
+02:14:43 <ski> the former is talking about the adjunction `(* B) |--- (<- B)', the latter about the adjunction `(A *) |--- (A ->)'
+02:15:52 <ski> (and in case `*' is an asymmetric monoidal functor ("tensor"), then `C <- B' doesn't need to be isomorphic to `B -> C', so that these two arrows are really not the same thing)
+02:17:03 <ski> now, consider `(\x -> E) x  =  E' -- why is the two occurences of `x' not "beside" each other, in this "beta0" equivalence rule ?
+02:17:08 <dramforever> Anyone familiar with 'bound' and have an example of how to do typechecking with it?
+02:17:10 <__monty__> Sounds like it might make sense. I'm tapping out though, lack the mathematical jargon tbh.
+02:17:28 <ski> or, if you prefer, consider eta conversion/equivalence, `\x -> (E x)  =  E', same question
+02:17:34 <merijn> dramforever: I know *many* different ways to fail to typecheck with it? :D
+02:17:42 <dminuoso> gentauro: F is a functor
+02:17:45 <dminuoso> Err, hololeap ^-
+02:17:51 <merijn> dramforever: But that's not very helpful, I suppose :p
+02:18:02 <dramforever> I'm thinking of doing polymorphic recursion with a Map but that kind of misses the point because I have to have f (Var () a) anyway
+02:18:21 <dminuoso> hololeap: So `F : D -> C` is a functor from category D to C
+02:18:32 <dminuoso> Maybe : Hask -> Hask
+02:18:39 <ski> with `f :: A <- B', that'd suggest also `E <- x/' (or however you want to spell it), so that now eta and beta0 looks like `(E x) <- x/  =  E' resp. `(E <- x/) x  =  E'
+02:18:40 <dramforever> Then I can also instantiate variables with fresh integers but that misses the point even more
+02:19:17 <hololeap> oh, sorry i was taking D and C as objects in a category
+02:20:32 <dminuoso> hololeap: Maybe is a Functor justified by two parts: A way to map types from Hask to types in Hask, and a way to map morphisms in Hask to morphisms in Hask.
+02:20:58 <ski> now .. there's reasons to want `f x' over `x f', namely : (a) more commonly `f' will be a short expression than `x'; and (b) in a defining equation`f x = ..x..', we'd prefer to see the thing being defined close to the start of the equation
+02:21:07 <dminuoso> hololeap: The type mapping is witnessed by the type "function" (= constructor) Maybe (which takes a type and maps it to a new type), and fmap which maps a function in Hask to another function in Hask
+02:21:27 <dminuoso> So the signature of `Maybe : Hask -> Hask`
+02:22:01 <ski> however, one could also argue that there's a valid reason to prefer `\x -> E' over `E <- x/' : namely (again) more commonly `x' will be shorter than `E'
+02:22:05 <hololeap> dminuoso: ok... i hadn't thought of a functor being split into two parts, but it makes sense.
+02:22:30 <dminuoso> hololeap: Formally a category consists of: objects, morphisms as arrows between objects and 2 laws.
+02:22:31 <ski> so, we seem to be at a bit of an impasse. having identified conflicting aims
+02:22:52 <dminuoso> hololeap: A functor is a map between two categories that maps objects to objects, morphisms to morphisms, preserving the two laws.
+02:22:57 <dminuoso> Plus some additional laws
+02:23:29 <ski> nonetheless, i do experiment, in my own notes, with `A <- B' (including in CT) (and in dependent types, `A x <- (x :) B'), quite a bit ..
+02:24:37 <ski> (btw, can you say that `f . g = \x -> f (g x)' looks more natural than `f . g = f (g x) <- x/' ? in the latter, the "receive `x'" part is syntactically close to the "plug `x' into `g'" part
+02:24:59 <hololeap> right, but the laws of composition and commutivity are respected by all morphisms, not just functors. and it seems like the two parts of functors that you mentioned live in two different worlds. one in the world of types and the other in the world of morphisms.
+02:25:31 <dminuoso> hololeap: No. The laws exclusively exist on morphisms.
+02:25:45 <ski> __monty__ : anyway, so the proper way to curry a function of type `(A,B,C) -> D' in Haskell would really then be as a function of type `C -> (B -> (A -> D))'. surprising ?
+02:26:06 <dminuoso> hololeap: Category theory is so stripped of conventional ideas, that even the idea of "how do I select an object" is not part of category theory.
+02:26:46 <__monty__> ski: I'm not quite sure why you want the x's next to eachother? And it's also basically just a coincidence that they are. \f -> f hugeExpr v. f hugeExpr <- f/
+02:26:52 <ski> hololeap : "in (F: D -> C), is F a hom-set, or is it only related to a hom-set?" -- no, `F' is a functor. what would the Hom-set you had in mind be ?
+02:26:57 <hololeap> well i'll admit that functors are morphisms in a 2-category, but i still don't see how the two parts that you mentioned line up with the two laws
+02:26:59 <ski> <dminuoso> ski: So when you said "perhaps `F x` is not even a free ....", thats assuming that U has no left adjoint F?
+02:27:14 <ski> dminuoso : i suppose you could state it like that (though it seems a bit strange, to me)
+02:27:35 <hololeap> ski: i thought that D and C were objects in a category. i wasn't paying enough attention.
+02:27:42 <ski> (since having an adjoint implies all the free/cofree objects exist)
+02:27:50 <__monty__> ski: I don't see how you arrive to that currying.
+02:28:48 <dminuoso> ski: Ohh... so you could kind of use the amount of free objects as a.. kind of "how much adjunction do I have" measure?
+02:29:14 <dminuoso> (Just as some way of trying to link adjunction with freeness)
+02:29:33 <dminuoso> This sounds terrible imprecise, I admit.
+02:30:05 <ski> s/2 laws/3 laws/ -- at least as i've seen it stated. i suppose you could fudge two of them together and call it a "single law"
+02:31:31 <hololeap> does identity just fall out from the other two?
+02:31:47 * hackage time-parsers 0.1.2.1 - Parsers for types in `time`.  https://hackage.haskell.org/package/time-parsers-0.1.2.1 (phadej)
+02:31:48 <ski> hololeap : there is no "law of commutativity", in a category (however, functor laws ensure that if you have a commuting diagram in the source/domain category, then the corresponding diagram, "lifted by the functor", in the target/codomain category, also commutes)
+02:32:49 <hololeap> sorry, i meant associativity... it's late
+02:33:17 * hackage postgresql-simple 0.6.2 - Mid-Level PostgreSQL client library  https://hackage.haskell.org/package/postgresql-simple-0.6.2 (phadej)
+02:33:19 <dminuoso> hololeap: The only shape a category has is induced by associativity and identity
+02:33:25 <dminuoso> And by composition
+02:33:41 <dminuoso> A functor is required to preserve composition and identity
+02:34:01 <ski> __monty__ : in an ordered version of linear logic, one'd have the entailment `Gamma0 , A o- B , B , Gamma1 |- Delta' (here `o-' is linear implication, think `<-'). but *not* `Gamma0 , B , A o- B , Gamma1 |- Delta'. it is crucial that the `B's are next to each other here, for application of functions to work
+02:34:46 <ski> (and i have pondered a little bit about what a linear, or even ordered, Haskell, could look like)
+02:34:55 <dramforever> merijn: So far I've found that polymorphic recursion is the safest, as in less likely to get wrong
+02:35:10 <hololeap> dminuoso: so how does what you said earlier line up with composition and identity?
+02:35:11 <dramforever> I guess it's time to just ditch bound :(
+02:35:30 <dminuoso> hololeap: In haskell its expressed by: fmap (f . g) = fmap f . fmap g, and fmap id = id
+02:35:46 <hololeap> < dminuoso > The type mapping is witnessed by the type "function" (= constructor) Maybe (which takes a type and maps it to a new type), and fmap which maps a function in Hask to another function in Hask
+02:35:53 <dminuoso> hololeap: which means: it doesnt matter whether you compose two arrows in the domain category and then send them to the other category, or whether you send them to the other category and then compose them
+02:35:58 <dminuoso> you must get the same morphism back
+02:36:08 <dminuoso> And the second law is: identity is preserved by functor
+02:36:21 <dminuoso> in haskell we express this as: fmap cant change the structure
+02:36:41 <ski> __monty__ : "I don't see how you arrive to that currying." -- i simply used the adjunction `(A *) |--- (A ->)', which allows us from `f : A * B >---> C' to construct `right_curried_f : B >---> (A -> C)' (using `->', not `<-')
+02:36:42 <dminuoso> `fmap id = id`, iow if you fmap with id over something, nothing happens
+02:36:53 <hololeap> it seems like there are two different worlds being expressed here: one of types (the "constructor") and the other of objects/morphisms (`fmap`)
+02:37:03 <dminuoso> hololeap: the types are the objects
+02:37:12 <dminuoso> hololeap: functions are the morphisms
+02:37:23 <hololeap> oh...
+02:37:29 <hololeap> lol it makes sense now
+02:37:43 <hololeap> i was confusing objects in the CT sense and values
+02:37:49 <dminuoso> hololeap: you could think of `fmap` first existing outside the function level.
+02:38:03 <dminuoso> however since it maps types to types, you might as well consider it a function
+02:38:41 <ski> __monty__ : btw, if you try to use the other adjunction, involving `<-', on `(A,B,C) -> D', then you instead get `((D <- C) <- B) <- A' -- see you can't win, you get an order reversal, both ways "
+02:38:45 <ski> !
+02:38:53 <aarvar> fmap maps types to types? what?
+02:39:03 <dminuoso> aarvar: Sorry that was phrased poorly hah
+02:39:52 <dramforever> f maps types to types
+02:39:57 <dramforever> fmap maps functions to functions
+02:40:28 <dramforever> It doesn't help at all, but when talking in categories we use F for both
+02:40:59 <aarvar> why does CT overload everything
+02:41:30 <dminuoso> hololeap: The thing is, in Hask we generally only play with endofunctors (where the codomain and domain is the same), so fmap takes functions and produces functions. since functions are valid values, that means fmap is itself a family of functions
+02:41:33 <dramforever> Well the other way is to invent more symbols and/or names for everything
+02:41:37 <dminuoso> so fmap can exist in the function world.
+02:41:58 <dminuoso> % :t fmap
+02:41:58 <yahb> dminuoso: Functor f => (a -> b) -> f a -> f b
+02:42:15 <dminuoso> hololeap: if you consider currying, it's just a family of functions (family because of the universal quantification over a and b)
+02:42:24 <dminuoso> Well. and *f* too of course!
+02:42:26 <dramforever> Then someone else will be, if not already complaining 'why does CT create so many symbols'
+02:43:47 <ski> __monty__ : this is similar to how, for quaternions (where multiplication is non-commutative), `a',`b',`c', `a / (b * c)  =  (a / c) / b' (and also `(c * b) \ a  =  b \ (c \ a)'). the reciprocal of `b * c', `(b * c)^(-1)', is `c^(-1) * b^(-1)', so reciprocal "anti-distributes" over multiplication, in that the multiplication order is reversed
+02:43:59 <hololeap> curry and uncurry are parts of a natural isomorphism? is that right? and an adjunction within Hask...
+02:44:20 <dramforever> :t curry
+02:44:21 <lambdabot> ((a, b) -> c) -> a -> b -> c
+02:44:25 <ski> <dminuoso> ski: Ohh... so you could kind of use the amount of free objects as a.. kind of "how much adjunction do I have" measure?
+02:44:30 <ski> <dminuoso> (Just as some way of trying to link adjunction with freeness)
+02:44:33 <hololeap> i'm getting lost in the jargon too
+02:44:34 <dminuoso> hololeap: Uh. natural isomoprhism is not what you think it is
+02:44:35 <ski> i suppose, yea
+02:45:14 <ski> (perhaps there's a more precise way in which to state this. similar to how the commutator subgroup (or its quotient) can be used to measure "how close a group is to being commutative")
+02:45:18 <dminuoso> hololeap: But curry and uncurry form an *isomorphism* :)
+02:45:20 <hololeap> its a pair of natural transformations, F : (C -> D) and G (D -> C) where F . G == G . F
+02:45:30 <dramforever> You have 3 type variables
+02:45:42 <dminuoso> hololeap: natural transformations are mappings from functors to functors
+02:46:52 <__monty__> ski: Isn't ((D <- C) <- B) <- A the order we want?
+02:47:09 <hololeap> curry is from the functor ((a,b) ->) to the functor (a -> b ->) and uncurry is the other direction
+02:47:50 <dminuoso> hololeap: Ah
+02:47:55 <dramforever> That sounds right
+02:48:02 <dramforever> But that's not adjunction
+02:48:50 <ski> dramforever : "It doesn't help at all, but when talking in categories we use F for both" -- well, i deviced a (imho pretty neat) syntax to distinguish the two uses
+02:48:53 <ski> aarvar : "why does CT overload everything" -- math in general tends to overload things
+02:49:16 <aarvar> ski: yes, I considered generalizing my complaint to math in general
+02:49:58 <dramforever> It happens when people get lazy and also get away with it
+02:50:21 <ski> dminuoso : `curry' and `uncurry' form a natural isomorphism, sure :)
+02:50:23 <aarvar> the functor overloading seems a bit much even for math though
+02:50:47 <dminuoso> ski: Oh yeah, I just didnt spot the functors involved instantly.
+02:51:11 <ski> __monty__ : in `((D <- C) <- B) <- A', the syntactic order of `A',`B',`C' is not the same as in `(A,B,C) -> D'
+02:51:36 <aarvar> "I have a pair of functions. Hmm, what if I just call them both the same thing!"
+02:51:43 <hololeap> dminuoso: i had this all sketched in a notebook at one point... there's a relationship between adjunction: `(->) e` and `(,) e` which corresponds to curry and uncurry. i don't have the notebook with me and it's too late to prove it...
+02:51:56 <dminuoso> hololeap: the archetypical adjunction in Haskell is `(e, _) -| (e -> _)
+02:52:00 <ski> <hololeap> curry is from the functor ((a,b) ->) to the functor (a -> b ->) and uncurry is the other direction
+02:52:19 <hololeap> it forms part of an adjunction though
+02:52:27 <hololeap> somehow...
+02:52:34 <dminuoso> hololeap: Like I said:
+02:52:37 <dramforever> I think you have the wrong functors
+02:52:37 <dminuoso> (e, _) -| (e -> _)
+02:52:57 <dminuoso> hololeap: And composing them gives the State monad, composing backwards gives Store/Costate comonad
+02:53:13 <dramforever> Adjunctions look like a -> g (f a) and f (g a) -> a
+02:53:14 <ski> hololeap : well, yes. but normally you'd also abstract over `a' and `b', not considering two functors in `Hask >---> Hask', but rather two functors in `Hask^op * Hask^op * Hask >---> Hask'
+02:53:17 <dramforever> i.e. not isomorphism so far
+02:53:39 <__monty__> ski: And why does this matter again? Aesthetics or do you think it's actually easier to get right?
+02:53:56 <dminuoso> hololeap: Oh and yes you are right. unit/counit are curry/uncurry
+02:54:18 <ski> (note that `a' and `b' occur contravariantly in `(a,b) -> c' / `a -> b -> c', while `c' occurs covariantly. hence the argument types (categories) for `a' and `b' are `Hask^op', but for `c' it's still `Hask')
+02:55:14 <dminuoso> ski: Okay thank you for your notes on free/cofree. I think Ill take this fragment of information and stress my brain over lunch.
+02:55:27 <dminuoso> (CT really cant be learned without struggling it seems)
+02:55:33 <ski> hololeap : (re relationship between currying and that adjunction) yes !
+02:55:46 <dminuoso> To some degree I think its that struggling process that helps understand abstract ideas.
+02:55:53 <dminuoso> Where you form some mind model of your own.
+02:57:32 <ski> dramforever : well, an adjunction `F ---| G' gives you an isomorphism between `F A >---> B' and `A >---> G B' (those are both Hom-sets, in the respective categories), natural in `A' and `B'
+02:57:57 <ski> (and if you have such a natural isomorphism, you have an adjunction. that's one of the ways in which to define "adjunction")
+02:58:10 <aarvar> ski: too many symbols. Let's go back to overloading
+02:58:18 <ski> aarvar : hehee !
+02:58:50 * ski isn't sure aarvar would appreciate how ski is overloading quasiquotes and unquotes
+02:59:16 <aarvar> why are you doing that
+02:59:20 <dramforever> Why the super long arrows?
+02:59:23 <aarvar> ^
+02:59:25 <ski> dminuoso : i suppose much of learning is often really unlearning
+02:59:59 <ski> dramforever : to distinguish morphism arrow (aka Hom-set) from exponential object
+03:00:10 <dramforever> Ah so a mini diagram
+03:00:33 <aarvar> Iso (Hom C (F A) B) (Hom D A (G B))
+03:00:40 <aarvar> there you go
+03:01:12 <hololeap> dminuoso: i found the notebook. curry and uncurry witness the isomorphism between the hom-sets, Hask((a,b), c) and Hask(a, b -> c)
+03:01:25 <dramforever> yay
+03:01:25 <ski> __monty__ : aesthetics, mostly. running with the ideas, and see which versions generalize better (in this case also into the non-commutative / ordered setting. or into general (not necessarily symmetric) closed categories)
+03:01:33 <aarvar> er, s/Iso/Bijection so that we can save Iso for arbitrary categories
+03:01:40 <dminuoso> Oh my.
+03:02:18 <dminuoso> Two morphisms `C >-L-> D and D >-R-> C in a 2-category C form an adjunction if they are dual to each other.
+03:02:19 <ski> dminuoso : "Okay thank you for your notes on free/cofree. I think Ill take this fragment of information and stress my brain over lunch." -- yw ! :)
+03:02:31 <dminuoso> So I guess adjoint functors are just two such morphisms in the 2-category Cat!
+03:02:47 <dminuoso> This is clicking, I think.
+03:02:47 <ski> "To some degree I think its that struggling process that helps understand abstract ideas.","Where you form some mind model of your own." -- very probably, that's at least a large part of it, i suspect
+03:04:05 <ski> hololeap : yes. important lesson : when attempting to translate some Haskell into a more general CT version, some `->' turns into exponential objects, others turn into morphism arrows (aka Hom-sets)
+03:04:56 <ski> dminuoso : which page was that from ?
+03:05:19 <aarvar> or are they arrow morphisms
+03:05:42 <hololeap> ski: in my notebook i have it between C(Z x A, B) and D(Z, B^A), but i translated to something relevant to haskell
+03:05:50 <ski> aarvar : "why are you doing that" -- because i'm finding too many good uses of them, that are sufficiently (at least in many cases) similar to each other, to warrant similar, if not identical, notation
+03:06:06 <ski> (and, because i'm running out of notation, obviously ;)
+03:06:17 * hackage fedora-haskell-tools 0.8 - Building and maintenance tools for Fedora Haskell  https://hackage.haskell.org/package/fedora-haskell-tools-0.8 (JensPetersen)
+03:07:35 <ski> hololeap : yeah, so the ordering there is actually more to my picky taste :)
+03:08:03 <ski> (oh, and i think you meant `D' to also be `C', no ?)
+03:08:24 <hololeap> well, C can be the same as D, but it doesn't have to be, right?
+03:08:46 <ski> in the normal definition of exponential object i've seen, they have to be
+03:08:47 <aarvar> it does if you're talking about products and exponentials
+03:08:57 <hololeap> honestly i have it as C in both places in my notebook, but i thought it might be a mistake
+03:09:38 <__monty__> ski: Thanks for the explanation. I can see part of the appeal.
+03:09:42 <ski> otherwise, you're talking about some product where the two categories the two arguments belong to are not necessarily the same
+03:10:10 <hololeap> right, the correspondance could be lost if you travel between different categories. it makes sense
+03:11:06 <ski> __monty__ : btw, in Prolog, one writes rules of the form `grand_mother(Person,GrandMother) :- parent(Person,Parent),mother(Parent,GrandMother).' the `:-' here is really `<-'
+03:12:16 <ski> __monty__ : and (this is partially related to the previous point), often, when i'm writing GADT-styly `data' types, i'd prefer writing each `data' constructor signature "in the reverse order", with the result type first
+03:12:35 <__monty__> Isn't it more bidirectional in prolog?
+03:14:26 <ski> __monty__ : and, similarly, i'd prefer that order also for `instance' declarations : i'd prefer `instance C (Foo f a) <= (Blah f,C a) where ...', rather than `instance (Blah f,C a) => C (Foo f a) where ...'. that way, the class of which an instance is being declared is first (after the `instance' keyword)', and the particular type(s) that instance pertains to directly follow
+03:14:44 <ski> (and perhaps also for `class' declarations .. i haven't thought that through, though)
+03:15:57 <aarvar> ski: what about dependent functions
+03:16:11 <aarvar> B x <- (x : A) ?
+03:16:29 <aarvar> reverse all the arrows!
+03:17:41 <ski> __monty__ : "Isn't it more bidirectional in prolog?" -- well, you're thinking of relations (rather than function) being multi-modal. i was more comparing the term-level in Prolog to the type-level in Haskell
+03:17:52 <ski> (btw, fwiw, functions can also be multi-modal in Mercury, you can "run them backwards", imagine being able to define something like `stripPrefix xs xsys | xsys <- xs ++ ys = Just xs | otherwise = Nothing')
+03:20:09 <ski> aarvar : about one hour ago, i said :
+03:20:15 <ski> <ski> nonetheless, i do experiment, in my own notes, with `A <- B' (including in CT) (and in dependent types, `A x <- (x :) B'), quite a bit ..
+03:20:20 <ski> :)
+03:21:57 <ski> __monty__ : i assume you know that one can (to some extent) think of type classes, instances, and instance resolution, as a kind of type-level logic programming, giving signatures for predicates, declaring clauses for predicates, and calling said predicates ?
+03:22:45 <ski> __monty__ : well, one can also (sometimes profitably) think of a `data' type in Haskell as a logic programming predicate. the data constructors are the clauses for it
+03:23:05 <ski> (there is no search/resolution. alternatively, you'll have to do it by hand)
+03:23:27 <__monty__> ski: I think you're talking about it being possible in prolog to do rel(given, Gotten) as well as rel(Gotten, given)? I actually meant you can do rel(given, given2) to introduce the body as partially instantiated constraints. My prolog is hazy though, not sure if that's true.
+03:25:36 <ski> (in case these predicates are judgements for some object logic, or other formal language (perhaps programming language ?), then this is called the "judgements-as-types" correspondence/principle. cf. with the more well-known "propositions-as-types" correspondence)
+03:26:32 <ski> __monty__ : no, that's actually not what i was referring to (apart from in the Mercury comment)
+03:27:26 <ski> __monty__ : i was comparing Prolog goals and predicates, not to Haskell expressions and functions, but to Haskell types and type functions
+03:28:19 <ski> (and also, separately, to the Haskell type `Constraint', and Haskell type classes)
+03:29:36 <ski> in Haskell, you can express the types `Rel Given gotten', `Rel gotten Given', `Rel Given Given2'
+03:30:08 <ski> (as well as the type class constraints `Rel Given gotten', `Rel gotten Given', `Rel Given Given2'. if `Rel' is now a type class, rather than a (parameterized) `data' type)
+03:31:02 <ski> btw, Twelf can be considered a dependently typed *logic* programming language
+03:31:35 <ski> and it does use the same "reverse order" implication as Prolog `p(X,Z) :- q(X,Y),r(Y,Z).'
+04:34:56 <dminuoso> Without external libraries, how can one crash a haskell into such a way that all threads become unresponsive?
+04:37:54 <Ariakenom> dminuoso: FFI with "unsafe"?
+04:38:31 * ski was going to suggest "try having only a single thread, and make it loop indefinitely ?"
+04:39:38 <ski> (probably needs `-threaded' still, to avoid detecting black holes ?)
+04:40:08 <ski> (but .. i suppose you meant it in the sense of you not controlling the number of extant threads)
+04:40:31 <Ariakenom> there is also the related -fno-imot-yield issue
+04:40:31 <ski> still, it's not clear to me what "crash" is intended to mean
+04:40:36 <dminuoso> Ariakenom: Mmm, is there a way to identify any FFI calls in my transitive dependency tree?
+04:40:36 <dminuoso> Ariakenom: As far as I can make it out, I have no native dependencies beyond the standard libc/libgmp/libz stuff
+04:40:42 <Ariakenom> nor external libraries
+04:41:09 <ski> Ariakenom : what's that ?
+04:41:17 <dminuoso> ski: At some part all threads in my programm apear to *stop*
+04:41:24 <dminuoso> ski: For no apparent reason
+04:41:30 <dminuoso> There
+04:41:54 <ski> mhm. so it's debugging
+04:42:50 <dminuoso> ski: Im going from the reverse. Since the problem doesnt appear when I start inserting debugging statements and build with --enable-debug-info, Im thinking whether I can construct various scenarios that could lead to such a behavior
+04:42:59 <dminuoso> and scan my program for any sources for that behavior
+04:43:32 * ski nods slowly
+04:43:54 * Ariakenom is searching
+04:44:13 * ski is headaching
+04:44:21 <Ariakenom> ski: https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/using-optimisation.html#ghc-flag--fomit-yields
+04:44:43 <Ariakenom> there was a trac issue with good info. dont know if that still exists
+04:44:54 <dminuoso> Ariakenom: So if some code entered a CPU bound loop without allocations it could have my entire process?
+04:45:04 <dminuoso> *hang
+04:45:15 <dminuoso> Or is there any premption going on in the RTS?
+04:45:50 <Ariakenom> waaaait. is fno-omit-yields default now?
+04:46:01 <ski> Ariakenom : okay, so "imot" was really "omit". explains why i didn't find it, when i searched ..
+04:46:09 <Ariakenom> heh sorry
+04:47:42 <Ariakenom> not sure about current situation. but before a thread yielded when it did allocation. if a loop didnt allocate it didnt yield
+04:48:09 <dminuoso> Ariakenom: Since when is it default?
+04:49:03 <Ariakenom> Not sure but I was surprised so probably recently, after 8
+04:50:12 <Ariakenom> threads running on different capabilities, OS threads, should still run afaik
+04:51:19 <dminuoso> Ariakenom: Ah this is something I could try. Can I pin threads on capabilities?
+04:51:45 <Ariakenom> dminuoso: did you try -no-omit-yields ?
+04:52:20 <dminuoso> Ariakenom: If its default in 8.6.4, then it wouldn't help
+04:52:22 <Ariakenom> but yes, that sounds possible
+04:52:33 <dminuoso> lets see if there's any `asyncOn`
+04:52:36 <dminuoso> Indeed there is!
+04:52:38 <dminuoso> :)
+04:52:50 <dminuoso> Perfect
+04:52:50 <Ariakenom> I don't think it's default in 8
+05:02:34 <ski> dminuoso : in case this turns out to be the problem, then this would probably be valuable user experience data the GHC team would like to hear about
+05:17:32 <fendor> can I apply a function to a pattern synonym? E.g. pattern Foo x = Bar n where x = n + 1?
+05:18:54 <lyxia> use view patterns:   pattern Foo x = Bar ((+ 1) -> x)
+05:19:43 <fendor> thanks! 
+05:20:34 <fendor> looks disgusting
+05:20:55 <Solonarv> yeah, it's not pretty
+05:21:15 <Solonarv> especially when you can't just partially apply a handy pre-defined function
+05:21:17 <fendor> but useful
+05:21:53 <Solonarv> pattern Foo x <- Bar ((\a -> ...) -> a) -- ew
+05:22:11 <Solonarv> (it has to be a <-, not a =)
+05:22:44 <fendor> defintely too many arrows
+05:22:56 <Solonarv> yes
+05:24:23 <fendor> but probably still nice
+05:25:47 * hackage propellor 5.8.0 - property-based host configuration management in haskell  https://hackage.haskell.org/package/propellor-5.8.0 (JoeyHess)
+05:26:37 <matsurago> I think if people stayed with "vanilla" haskell, we would have many more readable Haskell programs..
+05:27:07 <fendor> some problems are not solvable with vanilla haskell, though.
+05:27:12 <fendor> > pattern HsOverLitType t <- GHC.HsOverLit _ (\o -> GHC.overLitType o -> t)
+05:27:13 <lambdabot>  <hint>:1:1: error:
+05:27:14 <lambdabot>      Parse error in pattern: pattern
+05:27:14 <lambdabot>      Possibly caused by a missing 'do'?
+05:27:32 <Solonarv> lambdabot is not ghci!
+05:27:35 <fendor> dammit
+05:28:00 <Solonarv> % pattern HsOverLitType t <- GHC.HsOverLit _ (\o -> GHC.overLitType o -> t) -- stuff isn't in scope here though
+05:28:00 <yahb> Solonarv: ; <interactive>:74:25: error:; parse error on input `<-'; Perhaps this statement should be within a 'do' block?
+05:28:11 <Solonarv> % :set -XPatternSynonyms
+05:28:12 <yahb> Solonarv: 
+05:28:14 <Solonarv> % pattern HsOverLitType t <- GHC.HsOverLit _ (\o -> GHC.overLitType o -> t) -- stuff isn't in scope here though
+05:28:14 <yahb> Solonarv: ; <interactive>:76:28: error:; Not in scope: data constructor `GHC.HsOverLit'; No module named `GHC' is imported.; <interactive>:76:51: error:; Not in scope: `GHC.overLitType'; No module named `GHC' is imported.
+05:29:06 <ski> i wonder whether it would make sense to be able to say `pattern Foo (n + 1) = Bar n' ?
+05:29:20 <matsurago> fendor: do you mean not solvable in principle, or not solvable elegantly?
+05:29:36 <fendor> probably both.
+05:29:45 <ski> also, this raises the question of whether locally-defined (in a `where' or `let') pattern synonyms are allowed
+05:30:46 <ski> hm, actually, s/=/<-/, i suppose
+05:31:37 <Solonarv> ski: if you turn on NPlusKPatterns you can write almost that
+05:31:48 <fendor> i think, my type siganture was wrong
+05:32:16 <fendor> how do I read the correctly? My expected type siganture was `pattern HsOverLitType :: GHC.HsExpr GHC.GhcTc -> Type.Type`
+05:32:33 <fendor> I wanted to match an HsExpr to its respective type
+05:32:34 <Solonarv> locally-defined pattern synonyms are not allowed AFAIK; the only declarations you can put in a let/where are value ones
+05:32:40 <ski> the intended semantics of `pattern P <expr> ... <- Q <pat> ...' is obvious : the variables bound by `<pat>',... are in scope in `<expr>',...
+05:33:08 <ski> Solonarv : replace `n + 1' with `someGivenFunction n 1'
+05:33:41 <Solonarv> fendor: 'pattern Foo :: X -> Y -> Z -> Ty' means that the variables bound by Foo have types X, Y, Z when you match the pattern against something of type Ty
+05:33:50 <ski> (i was wondering whether anyone would bring up `NPlusKPatterns' when i wrote that, but decided to, anyway, since that was in the OP message ;)
+05:34:01 <Solonarv> (not so) coincidentally, that's also the type of the pattern synonym when used as a function
+05:34:11 <Solonarv> ski: oh, I see
+05:34:47 <Solonarv> certainly seems nicer than having to muck around with lambdas, view patterns, and tuples that are immediately deconstructed
+05:35:13 <fendor> that seems the other way around to what I would expect... This has something to do with single and bidirectional pattern synonyms, I suppose?
+05:36:19 <Solonarv> indeed you can only use a pattern synonym as a function if it's bidirectional
+05:36:30 <Solonarv> you can think of pattern synonyms as mimicking constructors
+05:36:44 <Solonarv> so the type signature of a pattern synonym also mimicks that of a constructor
+05:37:06 <Solonarv> a constructor of type 'X -> Y -> Ty' belongs to the type 'Ty' and has two fields of types 'X' and 'Y'
+05:38:38 <ski> Solonarv : i see the general form of a "pattern type" is `pattern P :: CReq => CProv => t1 -> t2 -> ... -> tN -> t'. so, one could argue that it really ought to be `pattern P :: CReq => s1 -> s2 -> ... -> sM -> CProv => t1 -> t2 -> ... -> tN -> t', where the first `M' arguments are to be input to the pattern synonym, not output. so that one could define `pattern ViewPat f x = (f -> x)', where `f' is to be input and `x' to be output (perhaps we'd need a clea
+05:39:01 <fendor> Solonarv, ok, that makes sense to me! thank you ! 
+05:39:04 <ski> (er, cut off near ".. so that one could define `pattern ViewPat f x = (f -> x)', where `f' is to be input and `x' to be output (perhaps we'd need a clearer way to distinguish between the input and output parameters ?)")
+05:39:32 <Solonarv> that's an interesting idea
+05:39:47 * hackage cabal-cache 1.0.0.0 - CI Assistant for Haskell projects  https://hackage.haskell.org/package/cabal-cache-1.0.0.0 (haskellworks)
+05:39:54 <Solonarv> I think I might've found myself wishing for a way to give some extra context to apattern synonym once or twice
+05:40:53 <ski> (it might be nice to allow them to be interleaved. especially "overloading" based on this (there's already something related : explicitly bidirectional pattern synonyms))
+05:42:02 <ski> Solonarv : this is also why i asked about local definition. allowing local definition would allow one to locally define `pattern Foo x = (f -> x)', using some non-local `f' bound in the surrounding context (but not at top-level of the module)
+05:42:25 <Solonarv> ah, I see - makes sense
+05:42:37 <ski> so, having local definitions would ameliorate, to some extent, not having "input parameters" to pattern synonyms
+05:42:53 <haskellNewbie> Hi there...
+05:43:00 <Solonarv> haskellNewbie: hello!
+05:43:17 * hackage th-abstraction 0.3.0.0 - Nicer interface for reified information about data types  https://hackage.haskell.org/package/th-abstraction-0.3.0.0 (ryanglscott)
+05:43:36 <ski> (btw, `pattern ViewPat f x = (f -> x)' obviously shows that that input vs. output pattern synonym parameters is a generalization of `ViewPatterns', subsuming it in functionality)
+05:44:18 <Solonarv> oh yeah, that was clear to me already
+05:44:27 * ski nods
+05:44:39 <Solonarv> haskellNewbie: don't be scared off by the arcane discussions that happen here sometimes - if you've got a question, just ask!
+05:44:41 <ski> (maybe not to innocent bystanders/onlookers, mayhaps ?)
+05:45:42 <haskellNewbie> I'm learning haskell with LYAH and I have been playing with the insert from Data.Map but there's something strange!
+05:45:44 <ski> Solonarv : btw, fwiw, in Mercury you can have the equivalent of what i'm suggesting. namely defining a function which has "backward" modes as well as the usual "forward" one
+05:46:05 <ski> haskellNewbie : what is strange ?
+05:46:08 <haskellNewbie> Look at that!
+05:46:13 <yushyin> tell us!
+05:46:17 <haskellNewbie> https://pastebin.com/2ck5A1V2
+05:46:54 <haskellNewbie> In one case it works and the other it doesn't
+05:47:22 <Solonarv> yes
+05:47:23 <ski> which case doesn't work ?
+05:47:27 <ski> what is the error message ?
+05:47:42 <ski> have you tried inserting spaces after the `$'s ?
+05:47:48 <Solonarv> ski: that's not the problem
+05:48:04 <Solonarv> spaces after $ only matter with template haskell enabled
+05:48:15 <ski> (i suspected so, but that's the only thing i could think of)
+05:48:41 <Solonarv> haskellNewbie: the problem here is simple:
+05:48:41 <Solonarv> $ is functon application: f $ x = f x
+05:48:41 <Solonarv> . is function *composition*: f . g = \x -> f (g x)
+05:49:00 <ski> oh ..
+05:49:02 * ski hits head
+05:49:09 <haskellNewbie> This one doesn't
+05:49:14 <haskellNewbie> Map.insert 5 600 . Map.insert 4 200 . Map.insert 3 100 Map.empty
+05:49:14 <ski>   Map.insert 5 600 . Map.insert 4 200 . Map.insert 3 100 Map.empty
+05:49:18 <ski> ought to be
+05:49:25 <ski>   (Map.insert 5 600 . Map.insert 4 200 . Map.insert 3 100) Map.empty
+05:49:29 <Solonarv> indeed - 'Map.insert 3 100 Map.empty' isn't a function, so you can't use . with it
+05:49:30 <ski> or maybe
+05:49:34 <ski>   Map.insert 5 600 . Map.insert 4 200 . Map.insert 3 100 $ Map.empty
+05:50:17 <haskellNewbie> Ski : Yes, this one works. But why the $ in this case ?
+05:50:31 <Solonarv> you can read this: f . g . h $ x; as: "compose f, g, h, and h into one function; then apply that function to x"
+05:51:11 <Solonarv> whereas f $ g $ h x; can be read as: "apply h to x, then apply g to the result, then apply f to the result of that"
+05:51:35 <ski> haskellNewbie : Solonarv already said
+05:51:40 <ski> <Solonarv> indeed - 'Map.insert 3 100 Map.empty' isn't a function, so you can't use . with it
+05:51:49 <Solonarv> (.) wants two functions and puts them together to make a new function
+05:51:50 <haskellNewbie> Solonarv : But "insert" takes three arguments or parameters
+05:52:07 <Solonarv> you can partially apply functions
+05:52:17 <ski> haskellNewbie : if you only feed it two, you'll get a function. which is what `.' wants
+05:52:25 <Solonarv> so if you give only two arguments to 'insert' you get back a function that still wants the last argument
+05:52:32 <matsurago> I wonder if "(Map.insert 5 600 . Map.insert 4 200 . Map.insert 3 100) Map.empty" also works?
+05:52:45 <Solonarv> it does
+05:52:45 <ski> matsurago : of course. i write things like that, all the time
+05:52:51 <Solonarv> and in fact ski already mentioned it
+05:52:55 <merijn> Solonarv: Honestly, the more time goes on, the more I feel "partial application" (as in, the terminology) in Haskell is actively harmful and confusing to beginners
+05:53:00 <haskellNewbie> Solonarv: Yes you're rigth with the partially
+05:53:03 <Solonarv> merijn: fair enough
+05:53:05 <ski> (matsurago : usually preferring that to the version with a single `$' near the end)
+05:53:21 <merijn> Solonarv: Because it reenforces the notion of "fixed arity" for functions, which is just bogus and something people should be cured of ASAP
+05:54:00 <matsurago> ski: Yeah, my intuition was that $ is just a syntactic sugar for a pair of parentheses for people who dislike Lisp :)
+05:54:50 <Solonarv> matsurago: when it's fully applied, that's accurate
+05:55:26 <ski> merijn : afaiac, "partial application" is a concept that's only defined for multiple-argument functions, which don't exist in Haskell. as such, it's a "manner-of-speech", depending in the particular choice of encoding of multiple-argument-functions into Haskell (curried-style vs. tupled-style, basically). in the former case, it typically means partially applying to a prefix of the ordered list of arguments
+05:55:41 <Solonarv> but when unapplied or with an operator section it has utility beyond simply getting rid of parentheses
+05:55:59 <Solonarv> consider: foldr ($) initialValue [f, g, h]
+05:56:19 <ski> matsurago : yes, things like what you experienced witness why "$ is just a syntactic sugar for a pair of parentheses" is a bad intuition, imho
+05:56:27 <Solonarv> or: traverse_ ($ env) aBunchOfFunctions
+05:57:21 <ski> matsurago : also, it hints at suggesting that avoiding brackets is something commendable, generally speaking, which i don't agree with. brackets are nothing to be afraid of
+05:57:58 <haskellNewbie> It's a bogus in ghci ?
+05:57:59 <ski> matsurago : *particular* stylyzed uses of brackets can sometimes be better expressed in some other way (possibly also involving some brackets), though
+05:58:12 <matsurago> Solonarv: yep, that's interesting examples
+05:58:19 <Solonarv> I'm generally not a big fan of very large parentheses around e.g. a big lambda, or do block, or case expression - fortunately we have BlockArguments now
+05:59:33 <Solonarv> no more need to write: for_ xs $ \x -> do ... --; or: for_ xs (\xs -> do ...) --; now we can simply write: for_ xs \x -> do ...
+05:59:41 * Solonarv is a big fan of BlockArguments
+05:59:44 <ski> merijn : i concur with wanting to dispel the notion of "definite arity of functions". preferably as quickly as possible/reasonable, in the evolution of a Haskell programmer
+05:59:49 <merijn> ski: I know what it means. I'm arguing this manner of speech is harmful because it prolongs faulty understanding of functions as things that can meaningfully have "more than one argument"
+06:02:09 <ski> merijn : so you'd rather we not say things like "`+' (on `Int', say) is strict in both the left and right operand" ?
+06:04:10 <merijn> Yes, no, maybe, it depends (TM) ;)
+06:04:29 * ski smiles
+06:04:52 <merijn> I like sloppy terminology when talking to people who already understand, but I think it's crucial to be utterly pedantic with beginners as to minimise wrong inferences/learning :p
+06:05:07 <ski> i agree with that
+06:05:50 <ski> i try to raise issues like this, in here, when i suspect that a(n apparent) beginner is confused about such conceptual distinctions and matters
+06:06:06 <haskellNewbie> I have only two weeks on haskell and I'm finishing module in LYAH. Is it a bogus or that's right ? I'm french too and there's a lot of information in the response. :-)
+06:06:35 <haskellNewbie> Is there a sum up, for the response ?
+06:06:51 <ski> (recently, i had a newbie in here thank be for being pedantic with them, claiming it generally helps beginners that instructors are pedantic about terminology and concepts)
+06:07:25 <ski> haskellNewbie : is what a bogus what ?
+06:07:46 <haskellNewbie> ski : https://pastebin.com/2ck5A1V2
+06:08:07 <ski> that's the same paste as before
+06:08:09 <haskellNewbie> That the second don't work
+06:08:39 <ski> the second version is incorrect / bogus, right
+06:08:47 <haskellNewbie> Ski. Yes, sorry but there were too much information.
+06:08:55 <ski> haskellNewbie : i understand. sorry about that
+06:09:13 <haskellNewbie> Many thanks
+06:09:23 <ski> the second version either needs wrapping brackets, or a `$', as i mentioned
+06:09:29 <ski> but i'll repeat it for you :
+06:09:38 <ski> <ski>   Map.insert 5 600 . Map.insert 4 200 . Map.insert 3 100 Map.empty
+06:09:42 <ski> <ski> ought to be
+06:09:46 <ski> <ski>   (Map.insert 5 600 . Map.insert 4 200 . Map.insert 3 100) Map.empty
+06:09:50 <ski> <ski> or maybe
+06:09:54 <ski> <ski>   Map.insert 5 600 . Map.insert 4 200 . Map.insert 3 100 $ Map.empty
+06:10:51 <haskellNewbie> ski : Yes, insert 5 600 . Map.insert 4 200 . Map.insert 3 100 $ Map.empty -- this one works !
+06:11:01 <ski> Solonarv : `BlockArguments' ftw ! :D
+06:11:10 <Solonarv> yeah!
+06:11:45 <Solonarv> I write things like 'for_ xs \x -> do a lot of stuff' fairly often
+06:13:08 * ski must remember it exists, more often
+06:14:03 <haskellNewbie> Ski : I have been knowing, this works -- insert 5 600 . Map.insert 4 200 . Map.insert 3 100 $ Map.empty. But I'm not sure to understand theorically why this  -- Map.insert 5 600 . Map.insert 4 200 . Map.insert 3 100 Map.empty -- don't work.
+06:14:57 <merijn> haskellNewbie: Can you add parenthesis to that expression to show us how you think everything is grouped?
+06:15:08 <Solonarv> let's add some parentheses to make this clearer - I'll make a gist, one minute
+06:15:20 <ski> (i'd like to imagine all the times i've brought up the unsatisfactoriness of the issue, on this channel, over the years, have contributed to, or at hastened, in some small part, it finally becoming reality ;)
+06:15:35 <haskellNewbie> Merijn : yes, i try this with parenthesis.
+06:16:06 <ski> haskellNewbie, well
+06:16:23 <ski>   Map.insert 5 600 $ Map.insert 4 200 $ Map.insert 3 100 Map.empty
+06:16:26 <ski> is parsed as
+06:16:46 <ski>   (Map.insert 5 600) $ ((Map.insert 4 200) $ (Map.insert 3 100 Map.empty))
+06:16:49 <ski> or, really as
+06:17:04 <ski>   ((Map.insert 5) 600) $ (((Map.insert 4) 200) $ (((Map.insert 3) 100) Map.empty))
+06:17:13 <ski> if you really want all the grouping (usually you don't)
+06:17:18 <haskellNewbie> Merijn: Map.insert (5 600 . Map.insert(4 200 . Map.insert(3 100 Map.empty)))
+06:17:20 <ski> otoh
+06:17:29 <ski>   Map.insert 5 600 . Map.insert 4 200 . Map.insert 3 100 $ Map.empty
+06:17:32 <ski> is parsed as
+06:17:46 <ski>   ((Map.insert 5 600) . (Map.insert 4 200) . (Map.insert 3 100)) $ Map.empty
+06:17:58 <ski> or, again, really as
+06:18:20 <ski>   (((Map.insert 5) 600) . (((Map.insert 4) 200) . ((Map.insert 3) 100))) $ Map.empty
+06:18:38 <ski> (but you probably don't want to know all that detail)
+06:19:21 * ski realizes too late they probably ruined merijn's suggestion :/
+06:19:24 <haskellNewbie> Ski: Thank you very much. It's currying, right ? 
+06:19:28 <ski> no
+06:19:52 <haskellNewbie> ski: Oupsss sorry for that
+06:21:18 <merijn> haskellNewbie: honestly, both currying and partial application are terms/notions that, in my opinion, aren't actually all that relevant to writing Haskell and only really pop up when you try and translate Haskell to other languages
+06:22:31 <haskellNewbie> Merijn: It's the experience that talks. Thanks for that. 
+06:22:43 <ski> haskellNewbie : if you have `take :: Int -> [a] -> [a]', then that really means `take :: Int -> ([a] -> [a])'. so `take' is a function that, when given an `Int' input, will compute a new function as output, that, when given a list of `a's as input, will produce a list of `a's as output
+06:22:56 <dmwit> haskellNewbie: `f (x y z)` does *not*  mean "apply the function `f` to the arguments `x`, `y`, and `z`" in Haskell.
+06:23:38 <dmwit> haskellNewbie: Function application associates left and is denoted by a single space; so `((f x) y) z` would be the right way to parenthesize if you wanted to express the concept "apply `f` to the arguments `x`, `y` and `z`".
+06:23:59 <dmwit> haskellNewbie: In contrast, `f (x y z)` means "apply the function `f` to a single argument, the result of the computation `x y z`".
+06:24:19 <ski> > (take 3 . drop 4) "abcdefghijklmnop" -- remove initial four characters, then take the following three
+06:24:20 <lambdabot>  "efg"
+06:24:23 <haskellNewbie> ski: strict type in haskell
+06:24:25 <ski> @type take
+06:24:26 <lambdabot> Int -> [a] -> [a]
+06:24:27 <ski> @type drop
+06:24:28 <lambdabot> Int -> [a] -> [a]
+06:24:36 <berndl> @type curry
+06:24:37 <lambdabot> ((a, b) -> c) -> a -> b -> c
+06:24:55 <dmwit> haskellNewbie: With that in mind, writing `Map.insert (3 100 Map.empty)` as you have means this: "apply the function `Map.insert` to the result of applying the function `3` (????) to the arguments `100` and `Map.empty`".
+06:25:19 <haskellNewbie> dmwit: thanks, it makes sense.
+06:25:43 <ski> `take 3' and `drop 4', are both functions (computed by `take' and `drop', when feeding input `3' respectively `4'). namely functions that eat a list of `a's, and offer back a list of `a's
+06:25:55 <Solonarv> and this doesn't work, because there's no way for '3' to be a function
+06:27:01 <ski> haskellNewbie : so, we can compose these two functions, with `.', because the type of what `drop 4' produces matches the type of what `take 3' consumes'. the result of this "composition" is a new function whose input will be fed to `drop 4', and whose output will be that of `take 3'
+06:28:15 * ski isn't, btw, sure, they saw haskellNewbie write something along the lines of that `f (x y z)' example
+06:28:17 * hackage generic-deriving 1.12.4 - Generic programming library for generalised deriving.  https://hackage.haskell.org/package/generic-deriving-1.12.4 (ryanglscott)
+06:29:06 <ski> (perhaps the point was just to warn about this common beginner mistake. "cave canem: beware of dog")
+06:31:02 <haskellNewbie> ski: many thanks. This makes sense for me. Two weeks in haskell is not that much. I have to improve my understanding, for sur. :-) 
+06:31:29 <haskellNewbie> ski: ...for sure
+06:31:51 <ski> fendor,lyxia,Solonarv : hmm .. anyway, ty for bringing up / ventilating this pattern synonym issue .. another piece of the puzzle, food for thought, in/for my thinking about patterns
+06:33:03 <ski> haskellNewbie : well, if you keep coming back here, when you have questions, that might help with that improvement. even just lurking here, and trying to see if you can understand something of what other people are talking about, can help
+06:33:40 <Solonarv> doing that certainly helped me a lot!
+06:34:14 <ski> haskellNewbie : there's also the channel #haskell-beginners, but the existence of that channel doesn't mean that beginner questions are unwelcome in here. don't be shy to interrupt some "heavy brow" discussion with your beginner questions
+06:35:29 <ski> haskellNewbie : in case your messages here get drowned in the occasional torrent of discussion, you could try #haskell-beginners, and see whether it get noticed more easily in there. or you could try asking again, after a while. perhaps after much of the torrent has appeared to subside
+06:36:36 <haskellNewbie> Ski: yes certainly, you're right and thans again. But humans aren't really multi tasks and I have to push my understanding on the lessons in LYAH. I'm finishing module, like I said, but I haven't finished all the lessons. :-)
+06:39:14 <haskellNewbie> Thanks to the haskell community, I return to my lessons.
+06:41:34 <haskellNewbie> Ski: sorry I didn't know this channel. Thank-you for this information, It will probably help.
+06:42:24 <ski> haskellNewbie : sorry, lost my connection for a small while
+06:43:08 <ski> haskellNewbie : but you should, contrarywise, also be aware that IRC channels, like #haskell-beginner, and (to a lesser extent) #haskekl, can also be slow : it may take some time for people to notice your question (especially if it's been quiet for some time)
+06:44:37 <sysRPL> hello
+06:44:50 <sysRPL> is anyone awake?
+06:44:56 <ski> haskellNewbie : so don't give up too easily ! don't leave the channel too early (like in less than five minutes, perhaps. i can't tell the number of times i've seen a question that i could have answered, but i can't, since the one asking it left before i noticed the question)
+06:45:06 <ProofTechnique> Several people, probably, sysRPL
+06:45:50 <ski> haskellNewbie : i'm not saying you'd be guilty of this. it's just a common mistake i've seen beginners make, especially if they're also beginner to IRC
+06:46:07 <Boarders> I have something that requires a lot of appends and so I am using a DList but I eventually want to convert to a vector, is there a better data structure
+06:46:10 <haskellNewbie> Ski: I'll try and see. It's sure you seem experienced in Haskell, much more like me. But we have to begin by the beginning. :-)
+06:46:35 <Boarders> and is the base way to convert DList to Vector just V.toList . DL.toList
+06:46:58 <Solonarv> sysRPL: yes, hello!
+06:47:11 <Putonlalla> > showFFloat (Just 1) 245000
+06:47:13 <lambdabot>  <[Char] -> [Char]>
+06:47:19 <Putonlalla> > showFFloat (Just 1) 245000 mempty
+06:47:21 <lambdabot>  "245000.0"
+06:47:28 <ski> haskellNewbie : i'd suggest waiting at *least* half an hour (preferably more). and if you don't get an answer, try to come back later, the same day, or one of the following days (and, obviously, state your arrival, and, preferably, also your question)
+06:47:35 <Putonlalla> The documentation says that the decimal point is not guaranteed, but I can't get it to not appear.
+06:47:35 <sysRPL> okay thanks. so before i start on a project wanted to get feedback on a program idea i am going to write this weekend. this program is designed to teach kinds programming ... here is the idea:
+06:47:36 <Solonarv> Boarders: hm, could do something with ST-mutable vectors maybe
+06:47:55 <haskellNewbie> Ski: I don't take this like an offense. Be sure of that! I understand why you say that. 
+06:48:00 <Solonarv> > showFFloat Nothing 10e10 ""
+06:48:02 <lambdabot>  "100000000000.0"
+06:48:06 <Solonarv> hm!
+06:48:15 <Boarders> Solonarv: nice idea
+06:48:27 <sysRPL> i am going to write a node based image manipluation program where the use can place callback function  nodes on a canvas and connect them together to modify one or more source images into a final image
+06:49:20 <ski> haskellNewbie : "humans aren't really multi task" -- i'm not saying you have to keep staring at the channel for thirty minutes. i'm just saying you should not quit/leave it so fast. you can go do something else for a while, while your IRC client is still connected. then you can come back, and check whether anyone responded to you yet
+06:49:55 <sysRPL> for example they can write a function to change the contrast of the image and my main program will pick up their function and show it as an available node in a toolbox. they can then drop that node on a canvas and visualy connect it from a source image and the final output node
+06:50:05 <Rembane> Reading backlog and being asynchronous is nice. 
+06:50:23 <Boarders> when working with mutable vectors if you want to initialise do people use the Default typeclass (despite no laws! :o ) or something else?
+06:50:24 <haskellNewbie> Ski: I can do that, yes.
+06:50:39 <sysRPL> each node will have a slider to mix a percentage from 0.0 - 1.0
+06:50:46 <Ariakenom> dminuoso: did you have any success with your thread issue?
+06:50:57 <sysRPL> how does that idea sound?
+06:51:36 <sysRPL> and does anyone have any suggestions to modify this program idea before i write it?
+06:51:47 * hackage bifunctors 5.5.4 - Bifunctors  https://hackage.haskell.org/package/bifunctors-5.5.4 (ryanglscott)
+06:51:49 <haskellNewbie> Ski: Thanks, I'm off channel for a time
+06:52:26 <Solonarv> Boarders: the low-level operations in 'vector' just fill it with (the equivalent of) undefined
+06:52:34 <Solonarv> for boxed vectors that is
+06:53:12 <Solonarv> there is also 'replicate' which does what you would expect
+06:53:39 <ski> haskellNewbie : have fun in your future Haskell programming
+06:54:11 <hyperisco> *sniff* they grow up so fast
+06:54:20 <ski> Boarders : i suppose i'd want a version that initializes using a callback function that transforms indices to elements
+06:54:49 <Solonarv> Boarders: oh, I found this:
+06:54:49 <Solonarv> @hackage vector-builder
+06:54:49 <lambdabot> http://hackage.haskell.org/package/vector-builder
+06:55:14 <merijn> Solonarv: vector has builder stuff inside it, though
+06:55:36 <ski> Putonlalla : hm, perhaps it means that they reserve the right to change the implementation to omit the decimal point, in some cases
+06:56:25 <ski> Putonlalla : or, perhaps, they say that, in order to "conform" more clearly to some standard which allows an implementation to omit the decimal comma ?
+06:56:47 <Solonarv> merijn: oh? where? I couldn't find it (admittedly, I didn't search very thoroughly)
+06:56:57 <merijn> Solonarv: The Fusion and Bundle stuff
+06:57:23 <merijn> Solonarv: afaict that vector-builder library is just a slightly more convenient interface for that
+06:58:46 <Solonarv> ah, makes sense
+06:59:45 <Solonarv> Boarders: you could also consider Seq (from containers), perhaps
+07:00:17 <Solonarv> it's a finger tree so it has asymptotically very efficient cons/snoc/concat/index
+07:00:20 <Putonlalla> It would be helpful if I could read the intent instead of having to guess it, ski.
+07:01:01 <Solonarv> Vector beats it on many things but not on cons/snoc/concat (because Vector needs to copy)
+07:01:18 <merijn> Solonarv: Not if you initialise via ST, though :)
+07:01:35 <Solonarv> merijn: indeed, that gets you fast construction from many small pieces
+07:01:50 <Solonarv> because you're not constantly copying intermediate vectors
+07:02:06 <merijn> Boarders: What exactly are you trying to do?
+07:03:10 * ski nods
+07:04:07 <Putonlalla> Still, that's probably right.
+07:08:54 <merijn> Putonlalla: Any particularly reason why the disappearing period/0 would be relevant?
+07:11:37 <Putonlalla> No.
+07:12:26 <Putonlalla> It's just that if I know I'm looking at a floating-point number, I don't need to see its trailing zeroes.
+07:17:17 * hackage deriving-compat 0.5.5 - Backports of GHC deriving extensions  https://hackage.haskell.org/package/deriving-compat-0.5.5 (ryanglscott)
+07:19:07 <ProofTechnique> Putonlalla: Do you need floats, or would something like Data.Decimal work for you?
+07:20:29 <Ariakenom> Solonarv: I've heard that Seq is pretty slow despite asymptotics. although I haven't looked at benchmarks
+07:20:42 <Solonarv> yeah, the constant factors are unimpressive
+07:20:47 <merijn> Ariakenom: Compared to vector? Sure
+07:21:14 <Putonlalla> It's not a big issue, ProofTechnique.
+07:22:16 <Ariakenom> does anyone have benchmarks?
+07:23:27 <Putonlalla> Yes, Ariakenom.
+07:23:46 <merijn> Ariakenom: No, because the answer is going to be "if you have anything remotely suited to vectors vectors is going to kick Seq's ass six way from sundays"
+07:24:11 <Putonlalla> https://github.com/haskell-perf/sequences
+07:26:57 <Ariakenom> Putonlalla: interesting thanks
+07:27:55 <Ariakenom> merijn: well sequence indexing looks ok
+07:28:17 * hackage invariant 0.5.2 - Haskell98 invariant functors  https://hackage.haskell.org/package/invariant-0.5.2 (ryanglscott)
+07:28:40 <merijn> Depends on exactly what the indexing thing benchmarked
+07:29:31 <merijn> tbh, these numbers look mighty suspicious and also not fine-grained enough (for example: indexing with what access pattern?)
+07:30:32 <__monty__> I figure it's uniform random access since there's no details.
+07:33:44 <merijn> __monty__: That's what I figured, but there's many cases where you have more predictable access pattern and you'd expect unboxed/storable to pull out ahead
+07:34:55 <__monty__> Definitely.
+07:35:39 <__monty__> Though an unboxed Seq would probably also have way better locality than boxed.
+08:00:47 * hackage text-show 3.8.1 - Efficient conversion of values into Text  https://hackage.haskell.org/package/text-show-3.8.1 (ryanglscott)
+08:02:42 <Uniaika> Hi! I have a question regarding smart constructors. By only exposing the type and the constructor, I would also need custom accessors, right?
+08:03:42 <merijn> Uniaika: Yes
+08:06:25 <Uniaika> well I guess that's the price to pay :P
+08:09:10 <Boarders> Solonarv: the mutable vector suggestion actually works really well for what I am doing
+08:21:09 <hyperisco> So, if we add a unit to a number, say, metres, this forms at least a vector space
+08:21:22 <hyperisco> Which means we can multiply some quantity of metres by a scalar
+08:22:07 <hyperisco> It also makes sense though that, say, 3 metres plus 2 metres is 5 metres, and 5 metres subtract 2 metres is 3 metres. What algebraic structure captures that?
+08:25:29 <hyperisco> Actually that is included in vector spaces isn't it… why did I miss that a couple months ago when I was looking at this =\
+08:25:43 <tabaqui> I have an issue with instance overlapping
+08:25:57 <Solonarv> hyperisco: dimensions form a (free) group
+08:26:08 <tabaqui> imagine that I have some type alias, like "type MyState = [Int]"
+08:26:09 <Solonarv> specifically a free abelian group
+08:26:16 <tabaqui> it is already has Show instance
+08:26:47 <tabaqui> I want two more Show instances for it: the first one for the release version and another one for debugging in tests
+08:26:52 <[exa]> tabaqui: you want to wrap it in something that can be used to distinguish your type from [Int], preferrably using newtype
+08:27:14 <tabaqui> [exa]: I know, but newtype will bring me a lot of boilerplate code
+08:27:25 <[exa]> tabaqui: btw if you're prettyprinting, you probably want real pprint
+08:27:31 <tabaqui> and it is priority queue with 3-ary kind
+08:27:55 <tabaqui> pprint is a good idea, but it requires some time
+08:28:07 <tabaqui> I know that we have {-# OVERLAPPING #-} pragmas
+08:28:27 <Solonarv> writing 'prettyPrintMyType' is no more work than writing a custom Show instance
+08:28:50 <tabaqui> and I wanted to ask if they allow us to create sequence of 3 overlapping instances
+08:28:58 <lyxia> no
+08:29:17 * hackage lens 4.17.1 - Lenses, Folds and Traversals  https://hackage.haskell.org/package/lens-4.17.1 (ryanglscott)
+08:29:17 <tabaqui> like default Show [a] -> OVERLAPPING Show [Int] -> More overlapping Show [Int]
+08:29:23 <hyperisco> Solonarv, ohhh I didn't miss it. Like usual I discredited the intelligence of my past self lol.
+08:29:49 <hyperisco> Solonarv, digging further, I see I require vectors to be a Group, so there is where my operations went :D
+08:29:50 <tabaqui> lyxia: did you answer on my question?
+08:29:55 <[exa]> tabaqui: how's that going to determine how much overlapping to apply on [Int] ?
+08:30:21 <tabaqui> dunno something like overlapping priority or weight
+08:30:24 <lyxia> tabaqui: There will always be only one instance usable for a given ground type. OVERLAPPABLE/OVERLAPPING allow you to say which one to pick, but if you want multiple implementations to be used, typeclasses is not the way.
+08:30:29 <Solonarv> if you are dealing with only a single dimension that is a (one-dimensional) vector space
+08:30:38 <Putonlalla> Overlapping only works if your instances can be ordered by specificity, tabaqui.
+08:30:51 <tabaqui> so it is some binary decision?
+08:30:53 <[exa]> tabaqui: so you will specify "[1,2,3] with priority XXX" ?
+08:31:09 <[exa]> tabaqui: that's almost same as wrapping a newtype around
+08:31:24 <tabaqui> No, I mean that ghc loads some module which imports another module
+08:31:31 <Putonlalla> For example `forall a. a`, `forall a. [a]` and `[Int]`.
+08:31:33 <hyperisco> Solonarv, so yes, an abelian group, but an abelian group plus scalar multiplication by a ring gives you a commutative module. Then by a field gives you a vector space.
+08:31:40 <tabaqui> and it see that second module already has overlapping instance, but the first one is more overlapping
+08:31:42 <Solonarv> but if you want to also capture the fact that you can multiply '1 m' with '0.2 m' and get back '0.2 m^2' I don't think a vector space is quite enough?
+08:31:55 <tabaqui> *sees
+08:32:00 <[exa]> tabaqui: that sounds extra scary
+08:32:06 <tabaqui> probably
+08:32:09 <Solonarv> hyperisco: no, the free abelian group I'm talking about is the group of dimensions (with multiplication as the group op.)
+08:32:10 <hyperisco> Solonarv, yes, no, this is all linear.
+08:32:21 <Solonarv> yes it's linear but uhhh
+08:32:22 <hyperisco> Solonarv, I am talking about the same group!
+08:32:58 <tabaqui> ok, thanks anyway, maybe I will wrap it just before the printing
+08:33:00 <Solonarv> to clarify: I mean the free group generated by { Length, Time, Mass, Charge, Temperature }
+08:33:01 <[exa]> Solonarv: is there something real like m^(-1) ?
+08:33:04 <hyperisco> Solonarv, I'd love to capture that if there was some intelligent way to represent that with types. I have  newtype Metres = Metres Float
+08:33:07 <tabaqui> or will use pprint
+08:33:14 <Solonarv> [exa]: sure, spatial frequency
+08:33:19 <[exa]> tabaqui: that's probably the best concept... Compare with Sum/Product monoid "wrappers"
+08:33:41 <Solonarv> "there is a <thing> every 3 meters" = spatial frequency of <thing> is 1/3 m^-1
+08:33:42 <tabaqui> [exa]: yeah, I really love such polymorphism
+08:33:47 <hyperisco> Solonarv, I can imagine ways but it is exceptionally more complicated.
+08:33:49 <tabaqui> I think that quickcheck is a great example
+08:36:50 <Solonarv> so I think you can cleanly capture "adding measurements of the same dimension" as a 1-dimensional vector space, and you can capture "multiplying together measurements of possibly-different dimensions" as a group product of some field with a free abelian group
+08:37:20 <Solonarv> but I'm not sure if there's a nice way to capture both in the same abstraction
+08:37:28 <[exa]> Solonarv: I can't wrap my head around this measure smoothly going from m^1 to m^0 and m^(-1)
+08:37:45 <Solonarv> actually scratch that, I'm sure there is an algebraic structure that captures all that
+08:37:47 * hackage eliminators 0.5.1 - Dependently typed elimination functions using singletons  https://hackage.haskell.org/package/eliminators-0.5.1 (ryanglscott)
+08:37:51 <Taneb> Solonarv: it's an algebra over a field, I think
+08:37:54 <Solonarv> it's too useful for nobody to have invented it
+08:38:39 <Solonarv> [exa]: actually, fractional powers of dimensions come up sometimes too
+08:39:35 <Solonarv> Taneb: no, that doesn't work
+08:39:47 <Taneb> Solonarv: hmm, I must be misremembering
+08:40:03 <Solonarv> you can't have a vector space of measurements, because that would let you do silly things like '1 m + 20 s' which is nonsense
+08:40:10 <dmwit> [exa]: Your processor runs around 3 GHz. That's 3e9 s^(-1).
+08:40:35 <[exa]> anyway, can't you construct this as a scalar product of a field and a finite group, where the group is additive but you simply relabel it to field multiplication and leave the addition as identity?
+08:40:50 <[exa]> dmwit: that's okay, I'm trying to find a good explanation of s^0
+08:41:00 <Solonarv> [exa]: s^0 is simply 1
+08:41:07 <Solonarv> i.e. dimensionless quantities
+08:41:17 * hackage recursion-schemes 5.1.3 - Representing common recursion patterns as higher-order functions  https://hackage.haskell.org/package/recursion-schemes-5.1.3 (ryanglscott)
+08:41:45 <Taneb> [exa]: something with unit s^0 is "how long does it take to process an audio file of a given length"
+08:41:51 <Solonarv> an example might be clock drift, i.e. "this clock drifts by 1ms per day"
+08:41:52 <dmwit> [exa]: If you run your processor for 5s, how many cycles has it done?
+08:41:59 <[exa]> Taneb: that's in fact X seconds
+08:42:05 <dmwit> [exa]: Answer: 5s * 3e9 s^(-1) = 1.5e10
+08:42:13 <dmwit> (... 1.5e10 s^0)
+08:42:20 <Taneb> [exa]: I was aiming for X seconds per second
+08:42:20 <Solonarv> but really this is a dimensionless quantity, so s^0 is the same as m^0 is the same as...
+08:42:39 <Solonarv> this is already included in the concept of "free group"
+08:43:11 <[exa]> hmm okay, but this way it suddenly starts to remind rationals :D
+08:43:33 <Solonarv> yes of course
+08:43:42 <[exa]> okay great, I was missing the intuition, the combinatory one looks good, thanks :]
+08:44:28 <Solonarv> units are a group product of some field (usually the reals) and a free abelian group which represents your dimensions
+08:48:02 <dmwit> ...plus a sort of "typed" addition operation.
+08:48:06 <ski> hyperisco : someone, making dimensional units part of the type, doesn't seem the right approach, to me
+08:48:13 <Solonarv> dmwit: that's for quantities
+08:48:22 <ski> Solonarv : "group product" here is the same as "group ring" ?
+08:48:36 <dmwit> Solonarv: I don't understand what "that's for quantities" means.
+08:48:39 <Solonarv> ski: no, it's "direct product of groups"
+08:48:57 <Solonarv> dmwit: well, I suppose you could add "meter" and "mile" and get a new unit that way
+08:49:21 <[exa]> Solonarv: the point is what happens after adding m+m^2
+08:49:27 <[exa]> the structure is not closed on addition this way
+08:49:30 <Solonarv> [exa]: nonsense happens, you can't do that
+08:49:43 <Solonarv> this is why I don't think we have a single vector space here
+08:49:47 <ski> Solonarv : hm, so product of an abelian group with which group associated to the field ? the additive or the multiplicative one ?
+08:49:57 <dmwit> Solonarv: Sure. But even if you demand that you only ever add meters to meters, that operation isn't captured by the summary "group product of a field and a free abelian group".
+08:50:37 <Solonarv> and that is why I want to distinguish measurements, units, and dimensions
+08:50:40 <dmwit> Solonarv: So I'm saying the summary should be extended to "group product of a field and a free abelian group plus a typed addition".
+08:50:41 <[exa]> Solonarv: you could just go with suprema (usual when lowering addition) and declare m+m^2 gives m^2
+08:50:58 <[exa]> which kindof makes sense volumetrically, except for not typechecking at all
+08:51:09 <Solonarv> [exa]: sure, but that doesn't give you a mathematical structure you can do physics with
+08:51:10 <dmwit> Solonarv: Oh, I see.
+08:51:29 * ski considers a functor from an abelian group to `Vect'
+08:52:06 <dmwit> Solonarv: But then it's no longer a direct product, hey? Because there are non-trivial equalities between units; e.g. 1000m = 1km or whatever.
+08:52:32 <dmwit> (or 1 mile = 5280 feet if you like)
+08:53:54 <dmwit> But yeah, I guess I'm basically happy enough even if we lose those equalities.
+08:54:07 <dmwit> Okay!
+08:54:25 <monochrom> Yikes. Now 1km is no longer 1000m.
+08:54:55 <dmwit> Solonarv: Now I'm interested in why you aren't satisfied with "a unit is a member of the free abelian group" with no direct product.
+08:55:42 <Solonarv> it seems to me like we have:
+08:55:42 <Solonarv>  - dimensions, which are a free abelian group generated by some base dimensions - e.g. {Length, Time, Mass, Current, Temperature, Amount, LuminousIntensity} for SI
+08:55:42 <Solonarv>  - units, which are a direct group product of dimensions with the multiplicative group over some field (usually the reals) - maybe we need some quotienting here to keep 1km = 1000m
+08:55:42 <Solonarv>  - measurements, which are an infinite family of vector spaces over some field (usually the reals or complex numbers) - one vector space for each dimension
+08:55:58 <Solonarv> dmwit: because then we can't say that meters and miles are different things
+08:56:53 <Solonarv> we really want to somehow say that we can add "things measured in meters" to "things measured in miles" but still be able to say that meter /= mile
+08:57:58 <dmwit> We can have conversions of the form 1600 meters/mile.
+08:58:10 <Solonarv> oh, and all-measurements-together *also* form a multiplicative group
+08:59:01 <hyperisco> ski, but I'd like the types to reject nonsense, like adding seconds to metres.
+09:00:24 <hyperisco> so all I can think is to building type expressions like  M/S  but that has dramatic downsides at the term level
+09:00:46 <hyperisco> a lot of hokey pokey noise to rearrange types to fit
+09:00:56 <benzrf> hyperisco: this is why you want dependently typed languages! :)
+09:01:05 <ab9rf> you'd have to imbed the unit into the type if you want the type system to reject mixed-dimensionality additions
+09:01:32 <Solonarv> we already have libraries that do this in Haskell
+09:01:41 <benzrf> ab9rf: no, only the dimension
+09:01:51 <ab9rf> sorry, yes, the dimension
+09:02:25 <ab9rf> you'd also probably wnt to have somne of the quasi-dimensional units because there are some not-interchangeble units that have dimension unity
+09:02:26 <benzrf> hyperisco: fun fact: you don't actually need to define a group of dimensions in the first place if you take a certain approach - pick one abstract 1d vector space for each base dimension, then define the space of a product dimension as the tensor product of the factor dimensions' spaces
+09:02:45 <benzrf> inverse dimension is the dual space
+09:03:02 <benzrf> tensor product gives u multiplication of qtys
+09:03:04 <Solonarv> benzrf: ah, that sounds like a promising approach
+09:03:12 <ab9rf> benzrf: i was just contemplating that idea, although i didn't know how to express it
+09:03:13 <benzrf> well probably not for practical purposes in haskell :p
+09:03:23 <benzrf> it only works if you elide a shitload of canonical isomorphisms
+09:03:36 <Solonarv> oh yeah, I was looking at things from a more mathematical physicist
+09:03:40 * Solonarv is babby physicist
+09:03:56 <benzrf> reciprocal can be defined by 1/x is the dual vector x* such that x*(x) = 1
+09:04:18 <benzrf> then u have division
+09:04:24 <benzrf> 👍
+09:05:54 <hyperisco> benzrf, the problem in my eyes is proving equivalence, so that M*S and S*M are the same, and so on. If this cannot be proved automatically then this adds noise to terms, and that makes using such a system unpalatable.
+09:06:45 <benzrf> the free abelian group of dimensions arises naturally as the picard group (maximal submonoid-which-is-a-group of the monoid of objects mod isomorphism) of ur spaces
+09:07:06 <benzrf> hyperisco: well, 12:02 <benzrf> well probably not for practical purposes in haskell :p
+09:07:14 <benzrf> im just havin some fun
+09:08:07 <benzrf> Solonarv: what are these libraries that already do this?
+09:09:25 <Solonarv> @hackage units
+09:09:25 <lambdabot> http://hackage.haskell.org/package/units
+09:10:06 <hyperisco> Does the Picard group frequently argue with the Kirk group about which group is better?
+09:10:29 <benzrf> :-]
+09:10:48 <monochrom> I think they commend each other!
+09:11:22 <monochrom> And 8.8.1 is just around the corner...
+09:12:14 <benzrf> monochrom: why is 8.8.1 relevant? does it have some kind of feature enabling this kind of thing?
+09:12:22 <hyperisco> I may have missed the plot on what this free (abelian) group is. Are we simply saying that, given a field, we can add a dimension and trivially define the group for that dimension using the field?
+09:12:38 <hyperisco> Or ring, depending on whether we're talking vector spaces or modules
+09:12:53 <Solonarv> now that you ask, I actually think I'm mistaken
+09:12:57 <benzrf> dimensions form a free abelian group
+09:13:10 <benzrf> the generators are ur choices of base dimension
+09:13:21 <hyperisco> Each dimension does? Or all dimensions together are a free abelian group?
+09:13:33 <benzrf> latter sry!
+09:13:36 <Solonarv> because dimensions actually form a vector space over the rationals
+09:13:59 <Solonarv> the "free abelian group" construction doesn't give you fractional powers of dimensions
+09:14:04 <benzrf> Solonarv: who uses those :P
+09:14:16 <Solonarv> even though those are perfectly meaningful and actually come up occasionally when doing physics
+09:14:37 <hyperisco> Okay, I haven't really considered that perspective. I also don't get it :P
+09:15:01 <hyperisco> so… first thing… obviously this can't be a finite group then
+09:15:01 <benzrf> if i have a dimension like length and a dimension like time, i can divide them to get length/time
+09:15:13 <hyperisco> I am not sure how we're quantifying "all dimensions"
+09:15:14 <benzrf> which is the dimension of velocity
+09:15:28 <Solonarv> yes, this corresponds to subtraction in this vector space
+09:15:47 <Solonarv> taking powers of dimensions corresponds to multiplying with a scalar
+09:15:54 <hyperisco> yeah fine, but what is addition?
+09:16:05 <hyperisco> I don't understand what a m+s is
+09:16:09 <benzrf> i think the easier summary is: abelian groups are z-modules, so extend to a free Q-module instead
+09:16:15 <benzrf> hyperisco: * is the group operation
+09:16:17 <Solonarv> benzrf: yeah, that
+09:16:37 <benzrf> multiplication of dimensions is the operation, even tho abelian group operations are traditionally written +
+09:16:50 <hyperisco> I am thinking semirings aren't I
+09:16:51 <benzrf> if we used that notation, we'd say L - T instead of L/T
+09:16:56 <benzrf> maybe???
+09:17:01 <Solonarv> let's choose Mass (M), Length (L) and Time (T) as our base dimensions for example
+09:17:15 <hyperisco> right right… group is monoid with inverses
+09:17:57 <Solonarv> then all dimensions that we want to talk about are of the form M^i * L^j * T^k for i,j,ki∈ℚ
+09:18:34 <Solonarv> this turns out to be a vector space, though we use slightly funny notation for its operations
+09:19:03 <benzrf> i.e., writing * for vector addition and ^ for scalar multiplication
+09:19:20 <Solonarv> yup
+09:19:30 <hyperisco> so I think… when I did this a few months ago… the vector group is addition, not multiplication
+09:19:53 <berndl> I found a paper about this stuff: https://arxiv.org/abs/0710.1313v1
+09:20:07 <berndl> Apparently the use "semivector spaces".
+09:20:11 <berndl> *they
+09:20:13 <benzrf> hyperisco: "addition" refers to the vector group operation - your causality is backwards
+09:20:36 <hyperisco> mm, "is" is not a causality relationship :P
+09:21:01 <benzrf> i was reading into it ;)
+09:21:11 <Solonarv> it doesn't matter what you call the operation as long as it has the right properties
+09:21:14 <benzrf> yeah
+09:21:31 <hyperisco> yes I was referring to "addition" and "multiplication" as intuitions
+09:21:40 <benzrf> augh i have stuff im supposed to be working on >.<
+09:21:59 <hyperisco> so a few months ago I was reading on this subject because I wanted to generically talk about points and vectors, and I am trying to recover what I learned :P
+09:22:05 <Solonarv> aw, but linear algebra is fun!
+09:22:14 <benzrf> linear algebra is for dorks B)
+09:22:26 <Solonarv> guess I'm a dork then :
+09:22:41 <benzrf> do ur manipulations in an arbitary compact closed category
+09:22:46 <fen> Hi, not sure of this error; https://pastebin.com/raw/HjMJCYMq
+09:22:55 <benzrf> okay well i guess u could make a case that doing stuff in a compact closed category should count as "linear algebra"
+09:23:00 <Solonarv> my uni is not that woke :P
+09:23:23 <benzrf> quote from another channel: <Vulfe> in my honors linear algebra class, the professor introduced braided monoidal categories
+09:23:47 * hackage simple-ui 0.1.2 - UI library for terminal.  https://hackage.haskell.org/package/simple-ui-0.1.2 (piotrborek)
+09:24:21 <fen> benzrf: is that just like with orbits?
+09:24:53 <fen> so you can take quotients?
+09:25:15 <benzrf> augh i rly have to go in like 5 minutes
+09:25:18 <benzrf> fen: wym?
+09:25:23 <hyperisco> what I was concluding here is that any particular dimension itself forms a vector space
+09:25:31 <benzrf> hyperisco: this is true!
+09:25:47 * hackage polysemy 0.1.2.0 - Higher-order, low-boilerplate, zero-cost free monads.  https://hackage.haskell.org/package/polysemy-0.1.2.0 (isovector)
+09:25:58 <benzrf> but dimensions considered as entities in their own right form a group (or a q-module if you would believe Solonarv)
+09:26:25 <hyperisco> which at least sounds odd because I wouldn't usually call, say, metres, a "vector", but I didn't come up with the rules… just following them :P
+09:26:49 <Solonarv> ohno, I'm talking about dimensions - not units
+09:27:03 <benzrf> Solonarv: hyperisco is talking about " any particular dimension itself forms a vector space"
+09:27:08 <benzrf> so a meter is a vector in that space
+09:27:11 <Solonarv> oh yes
+09:27:21 <benzrf> hyperisco: well, you can add them to each other and scale them by scalars, so...
+09:27:26 <Solonarv> well, I would rather say that "1 meter" is a vector in that space
+09:27:40 <benzrf> anyway, if x : D and x' : D', then xx' : DD'
+09:27:42 <fen> a unit vector is a vector...
+09:27:42 <hyperisco> Solonarv, yes, fair
+09:28:10 <benzrf> there are two meanings of mulitplication in that expression: one is an operation on quantities, and one is an operation on dimensions - a kind of type constructor
+09:28:28 <benzrf> the latter is a commutative group operation
+09:28:36 <benzrf> hence: dimensions form an abelian group
+09:28:36 <hyperisco> right
+09:28:43 <benzrf> and in fact this group is free on generators the base dimensions
+09:28:55 <benzrf> more or less by definition
+09:29:09 <hyperisco> so, we just need the compiler to derive group proofs for us and this would be a convenient setup to use
+09:29:14 <Solonarv> no! sqrt(Length) is a valid dimension, so a free abelian group is not enough
+09:29:22 <benzrf> Solonarv: shoosh
+09:29:24 <Solonarv> admittedly fractional powers don't come up often
+09:29:33 <Solonarv> but they do sometimes
+09:29:44 <benzrf> i suppose next you'll want dimensions to be an R-module
+09:29:47 <benzrf> smh
+09:30:02 <Solonarv> no, I'm perfectly content with them being a ℚ-module
+09:30:02 <benzrf> hyperisco: basically
+09:30:54 <fen> you mean the rationals?
+09:31:04 <benzrf> dimensions form a group and not a monoid b/c you want 1/x : 1/D
+09:31:15 <fen> or are you counting the label aswell?
+09:31:20 <hyperisco> I can do a teeny part of that with row types in PureScript… the rows take care of the associativity and commutativity part
+09:31:24 <fen> its just a type annotated number?
+09:32:09 <benzrf> hyperisco: i think i mightve tried to do that once :)
+09:32:12 <benzrf> cant remember
+09:32:29 <fen> well its clearly a ring
+09:32:32 <benzrf> anyway this is a great use for dependent types
+09:32:35 <fen> its litreally just Num
+09:32:43 <Solonarv> F# apparently has a unit system built into the language
+09:32:53 <benzrf> well, you don't need dependent function types or anything, just the ability to parameterize types over values
+09:32:53 <hyperisco> I use that technique to help with Heyting algebras
+09:32:55 <Solonarv> and it seems to support fractional powers too
+09:33:05 <benzrf> anyway bbl
+09:33:24 <hyperisco> I have some incarnation of refinement types to let me reason about foreign code, of all things
+09:33:56 <fen> i want to combine as much of these as possible to get just 1 zipper... https://pastebin.com/raw/HjMJCYMq
+09:34:08 <hyperisco> Solonarv, huh, missed that, but didn't use it for long
+09:34:18 <fen> but that would mean having a kind constraint?
+09:34:35 <Solonarv> I never used it, but I googled "fractional power units" and a stackoverflow thread came up saying as much
+09:34:44 <fen> type family EvalBasecase (x :: BCConstructor OR BCConstructor_r r)
+09:35:20 <Solonarv> https://stackoverflow.com/questions/11333135/fractional-power-of-units-of-measures-in-f
+09:36:17 * hackage mp 1.1.0 - Music player for linux.  https://hackage.haskell.org/package/mp-1.1.0 (piotrborek)
+09:38:12 <fen> Solonarv: are you trying to get a fractional lengthed tuple!?
+09:38:23 <fen> seems wrong..
+09:40:10 <ski> Solonarv : apparently VHDL also has some support for working with units ?
+09:40:50 <ski> Solonarv : anyway, what about strange units like `dB' and `pH'. what are the corresponding dimentions ?
+09:41:22 <Solonarv> ski: that's something I've never been sure about, tbh
+09:41:52 <Solonarv> it seems like those are dimensionless but I'm not sure if that's right
+09:42:01 <fen> 11 dB^2
+09:42:43 <fen> when did we stop talking about haskell!?
+09:44:00 <fen> you should help solve the problem in the paste instead. this thing with kind constraints is really something 
+09:46:25 <fen> its actually a pretty good example
+09:50:06 <Putonlalla> What's strange about dB or pH? Aren't they just functions from some reference quantity to a dimensionless unit?
+09:51:31 <hyperisco> Not sure about pH, but dB as far as I understand is dimensionless, but it is a ratio of quantities with dimension
+09:51:34 <Solonarv> yes, IIRC the corresponding quantities are logarithms of some ratio
+09:51:53 <hyperisco> So… the part we'd be talking about with dB is a scalar multiple
+09:52:06 <c_wraith> why does no one ever talk about pOH? :)
+09:52:18 <Solonarv> well there are actually two constants involved in these log-units
+09:52:37 <fen> oh right its the log scale thats confusing, what about a hyperbolic space or an affine transformation or something
+09:52:40 <Solonarv> 1) what do you divide the quantity by, and 2) what base is the logarithm in
+09:53:11 <fen> what about a lorentz transform?
+09:53:16 <Solonarv> 1) corresponds to an offset/translation, and 2) to a multiplication
+09:54:07 <Solonarv> IIRC dB is used for base-10 logarithm but the denominator varies
+09:54:08 <fen> something about covarient derivatives 
+09:54:30 <Solonarv> and is indicated by e.g. the 'A' in 'db(A)'
+09:55:00 <hyperisco> yeah, so dbA is comparing two quantities measured in amperes
+09:56:06 <ystael> Solonarv: not only that, but the log base varies depending on whether your base unit is power-like or amplitude-like; if power-like, it's log base 10, but if amplitude-like, effectively log base sqrt(10) (factor of 10 amplitude gives +/-20)
+09:57:32 <fen> anyway, having made a "closed class" by listing the members in a datatype and having a kind * label, the paste tries to extend this to a kind * -> * label and then there is *another* closed class of the original "tag" and this new parametrised tag, and the concept of having a end order closed class appears, confusing
+09:57:54 <fen> 2nd order*
+10:00:34 <fen> the containers either are Flat, with an associated tag, or Shaped with an associated parametric tag. there should be some way to eg have just one class which has an associated tag OR parametric tag with its parameter applied
+10:01:02 <fen> that would be a constraint on a class combining Flat and Shaped
+10:01:08 <fen> https://pastebin.com/raw/HjMJCYMq
+10:01:41 <fen> however, really we want a "closed class", as in, to specify that these are the only possible instances of this class
+10:03:46 <fen> a constraint on a the associated type of a class combining Flat and Shaped*
+10:04:05 <fen> I cant understand how to do that
+10:16:09 <fen> managed to solve the type errors, but the problem of trying to combine the tags remains https://pastebin.com/raw/Dnmbgb4p
+10:22:15 <fen> might be impossible
+10:22:29 <fen> but that would be bad because this seems like code duplication
+10:22:37 <fen> is there no way to shorten it?
+10:24:17 <fen> defiantly cant combine EvalBasecase and EvalBasecase_r because the tags have different kinds even thought when the parameter is applied to the parametric tag it has the same sort
+10:24:40 <fen> maybe this idea of having type families over classes of kinds is just not the right way to do this
+10:25:44 <fen> the simplest version would be just a type family taking something of kind Int or Bool as an argument...
+10:27:43 <fen> % type family A a :: * where A (a :: Int) = Int; A (a :: Bool) = Bool
+10:27:43 <yahb> fen: ; <interactive>:79:50: error:; * Expected kind `Int', but `(a :: Bool)' has kind `Bool'; * In the first argument of `A', namely `(a :: Bool)'; In the type family declaration for `A'
+10:28:50 <fen> the idea was to have something like; type family A (a :: IntOrBool x => x)  :: *
+10:30:01 <fen> is there any way to have something that does this but in a different way?
+10:35:50 <fen> the idea of using "tags" was;
+10:35:53 <fen> % data IntOrBool where; Int' :: IntOrBool; Bool' :: IntOrBool 
+10:35:53 <yahb> fen: 
+10:35:59 <fen> % type family A (a :: IntOrBool) :: * where; A Int' = Int; A Bool' = Bool
+10:35:59 <yahb> fen: 
+10:37:22 <fen> but then when you try to do this to 2nd order, it fails
+10:38:19 <dmwit> :exf Bool
+10:40:40 <fen> i guess the idea is to make them compositional, ie add them together
+10:41:39 <fen> like if you had a similar type family B over something similar to datatype IntOrBool, but you wanted to combine A and B into one type family
+10:43:36 <fen> when we started with wanting; type family A (a :: IntOrBool x => x), now we have a constraint like something that would be instantiated by the datatype IntOrBool "tag" and that tag corresponding to B
+10:44:27 <fen> type family AandB (a :: CombineTheTags x => x)
+10:44:47 <dmwit> hexagoxel: Why is exferenceBot ignoring me?
+10:44:57 <fen> but when we go to convert that constraint into a datatype and a tag, we fail
+10:45:26 <fen> dmwit: because of your communist affiliations?
+10:52:06 <fen> this paste shows the problem in its briefest of embodiments; https://pastebin.com/raw/Amr7s4j2
+10:53:24 <fen> how can we add together these sum datatype tags and their corresponding type familes ?
+10:53:44 <snunezcr> Good afternoon. A compilation question. If I only import certain entities from a module, would these be the only ones to be compiled into an executable (cabal) or will all the imported module be compiled into the executable?
+10:57:29 <Cale> snunezcr: That's a good question. I believe it's supposed to be able to, but doesn't always do the best job of that. You might try the -split-sections flag and see if that helps.
+10:57:45 <Cale> (that does link-time dead code stripping)
+10:58:27 <snunezcr> Thank you. I was wondering this since my current development needs may imply some in-memory efficiency.
+10:59:58 <Boarders> Solonarv: it sounds a lot like just a graded abelian group
+11:00:25 <Boarders> though I would think dimensions are most often a free commutative monoid
+11:00:32 <Boarders> but the grading can be a commutative monoid
+11:00:58 <Boarders> and you have an operation like R_i -> R_j -> R_ i*j
+11:04:24 <o1lo01ol1o> Suppose one had ~60 tables in postgres defined via beam, the schema of which is based on a single hierarchical datastructure, and that one need to property test all the inserts and queries for the schema, what would one do?
+11:07:34 <o1lo01ol1o> (I'm looking for something like: "hedgehog would be better than quickcheck for this because it would save you 3 keystroke per data field", as I don't expect there's much in the way of automated testing of this sort.)
+11:10:07 <donjoe> hello
+11:12:08 <donjoe> I have a quick question: when defining a new type, we use data. ex. data Word = Text [Char]
+11:12:35 <donjoe> instead of [Char] I'd like to tell the type to have a list of Masp (Data.Map)
+11:12:39 <donjoe> How do I do that?
+11:13:15 <cocreature> donjoe: a map of what?
+11:13:23 <cocreature> what are the keys and what are the values?
+11:13:44 <monochrom> I don't understand the internal inconsistency in "a list ... (Data.Map)".
+11:13:48 <cocreature> "data Word = Text [Map KeyType ValueType]"
+11:14:03 <cocreature> (although Word and Text are probably terrible names at this point)
+11:14:05 <fen> a list of maps?
+11:14:18 <donjoe> Let me try to explain. I want to represent an object as a map. 
+11:14:53 <donjoe> lets say "data Object = Map key value
+11:15:05 <donjoe> then I want to do function like: initEMptyObject :: Object
+11:15:53 <donjoe> would this syntax be right? "data Word = Text [Map KeyType ValueType]"
+11:16:21 <cocreature> yep, in that case Text would be the name of the constructor and it has one field of type [Map KeyType ValueType]
+11:16:31 <monochrom> Where do you use the Object type you defined?
+11:16:38 <cocreature> Note that "data Object = Map key value" is not correct. That is missing the constructor name
+11:16:48 <fen> newtype Object = Object Map Int Bool
+11:16:50 <cocreature> "data Object = MkObject (Map key value)" is fine
+11:17:03 <fen> parens*
+11:17:44 <fen> actually the situation is slightly more complicated in the original paste since it has an extension to a parametric tag...
+11:19:10 <fen> if the kinds were the same you could just write then whole thing again to combine them
+11:19:37 <donjoe> Ok, I'll tell you exactly what i need. I need to make a very basic interpreter, which recognizes classes. A class can have methods and properties. I will save symbol_name - symbol_value as a pair, so for that I will create a new "Class" object as a map
+11:20:06 <Boarders> what is the best way to append two mutable vectors
+11:20:37 <Solonarv> do you need to keep them around for later?
+11:20:43 <Solonarv> hm, actually that doesn't matter
+11:20:48 <monochrom> Boarders: I'm afraid "best" is ambiguous for this because there is a conflict between "fastest" and "most readable".
+11:21:04 <Solonarv> make a new vector and copy the inputs' contents into the new vector
+11:21:17 <monochrom> Actually I am not even certain whether I know the fastest way.
+11:21:27 <donjoe> then, would it look like this: "data ClassState = Symbol Name Value", or "data ClassState = Symbol Map String String" ?
+11:21:33 <Boarders> copy seems to say the two vectors should have the same length
+11:21:34 <Solonarv> if they're plain old boxed vectors you can't do anything else
+11:21:40 <fen> donjoe: it would be helpful if you didnt call it a class because thats basically a term reserved for a specific thing alread
+11:21:51 <Boarders> monocrhom: how about most readable
+11:22:00 <fen> ClassState is fine
+11:22:09 <Solonarv> I'm not sure if you can grow any of the other vector types in-place
+11:22:41 <Solonarv> hm
+11:22:46 <fen> sounds like C 
+11:22:50 <monochrom> Most readable IMO is freeze both mutable vectors, use immutable's append, (then if you want a mutable final thing, thaw)
+11:23:09 <Solonarv> I think you could create the new vector, use 'slice' to get the appropriate parts, and then 'copy' the input data onto the parts
+11:23:27 <monochrom> It is very likely this is not the fastest.  But maybe it turns out to be, I don't know.
+11:23:45 <Solonarv> it's at best equivalent to the approach I suggested, I think
+11:23:48 <Boarders> you really think the fastest involves freezing both vectors?
+11:24:00 <monochrom> No. But it's more readable.
+11:24:05 <Boarders> oh I see
+11:24:07 <fen> donjoe: newtype ClassState = ClassState (Map String String)
+11:24:26 <monochrom> Because, like, you don't write your own loop, therefore the reader doesn't have to understand yet another loop.
+11:24:26 <Solonarv> the excess copying might get fused away; if that happens then it's equivalent to doing the mutation yourself
+11:24:45 <Solonarv> you definitely don't need to write a loop
+11:25:15 <donjoe> fen: Expecting two more arguments to ‘Map’ Expected a type, but ‘Map’ has kind ‘* -> * -> *’
+11:25:17 <Solonarv> give me five minutes and I'll have some sample code
+11:25:28 <monochrom> Aw you're so kind.
+11:26:19 <monochrom> donjoe: I think it's "data ClassState = Symbol Name Value" if it's just one single pair?
+11:26:51 <fen> donjoe: sounds like you forgot the parenthesis 
+11:27:34 <fen> oh right is that what its supposed to be, only one pair? 
+11:27:42 <donjoe> fen: i just saw you used newtype instead of data. I could not get very well whats the diff between data and newtype and idk which one would be best in this case
+11:27:42 <fen> thought it was using a Map for some reason...
+11:28:11 <fen> donjoe: data is the same as newtype if its got no | 
+11:28:11 <donjoe> monochrom: no, ClassState will be a Map type, with multiple pairs
+11:28:32 <absence> anyone know what the status of making join a member of Monad is?
+11:28:33 <monochrom> Then data ClassState = Symbol (Map Name Value)
+11:29:24 <fen> absence: would presume if there was any plan to do so it would have happened in the most recent GHC release 
+11:30:28 <donjoe> monochrom: I do that, it says not in scope: typeconstructor Name. If I do = Symbol Map String String, it says expecting 2 mopre arguments to map...
+11:30:49 <monochrom> Parentheses?
+11:30:55 <fen> braces
+11:31:21 <monochrom> Also if there is no "Name" I don't understand why you spoke of it.
+11:31:34 <fen> donjoe: you could paste your error because its not clear what your doing now
+11:31:43 <monochrom> Could we see current actual code?
+11:31:58 <fen> https://pastebin.com/raw/Dnmbgb4p
+11:32:32 <absence> fen: why? have the problems that kept it from being included during AMP been resolved?
+11:34:11 <Solonarv> Boarders, monochrom: https://gist.github.com/Solonarv/da1bc13a9e9cdb263d8007e784aba074
+11:34:32 <Boarders> Solonarv: excellent I'll have a look. The main trouble I was having is how to shift vectors after using grow
+11:34:47 <Solonarv> I didn't use grow at all
+11:34:52 <monochrom> That actually looks OK!
+11:35:03 <Solonarv> (turns out grow copies the data anyway, so there's no advantage to using it)
+11:35:05 <Boarders> oh smart
+11:35:06 <donjoe> https://pastebin.com/2QfHkJ8u
+11:35:14 <Boarders> that is super nice :)
+11:35:43 <Solonarv> could be extended to take an entire Foldable of vectors if you use 'slice' directly instead of take/drop
+11:36:05 <Solonarv> and of course it need not be limited to Data.Vector.Mutable.IOVector, since all the operations are generic
+11:36:08 <monochrom> donjoe, if you want to use Name and Value, you will be the one responsible for defining them.
+11:36:40 <Solonarv> but I did actually test this, and I didn't feel like typing out the extra imports and language extensions that would have required
+11:37:33 <donjoe> monochrom I dont want to use Name Value necessarily, just define ClassState as a Map
+11:37:53 <monochrom> OK, then we need not speak of them again.
+11:38:38 <donjoe> ok
+11:38:38 <Solonarv> side note: I love how easy this was to test
+11:38:47 * monochrom always applies the monochkam razor!
+11:38:54 <Boarders> Solonarv: wonderful
+11:38:59 <Boarders> what did you do to test?
+11:39:01 <Solonarv> cabal repl -b vector, then in ghci: :cd ~/dev/playground; :l MVectorAppend.hs
+11:39:41 <monochrom> Hrm what is -b?
+11:39:48 <Solonarv> short for --build-depends
+11:40:04 <Solonarv> tells cabal v2-repl to make a package available to ghci
+11:40:21 <Solonarv> (I use cabal-head, so I don't need to type v2- prefixes)
+11:40:37 <monochrom> Ah I was reading "cabal repl --help" and not finding it.
+11:40:43 <Solonarv> hehe
+11:41:01 <Solonarv> I'm on windows and cabal-head actually has some sort-of-important bugfixes
+11:41:12 <monochrom> OK!
+11:41:12 <[exa]> donjoe: how many fields should the 'ClassState' hold?
+11:41:32 <Solonarv> like making --install-method=copy available, not barfing on cabal scripts with CLRF line endings - those are the two biggest ones
+11:42:13 <donjoe> exa: ClassState should be a Map -> multiple pairs
+11:42:38 <monochrom> Yeah --install-method=copy solves the WNGNU problem.  ("Windows is not GNU Unix".)
+11:43:22 <donjoe> exa Do I just need to use "type ClassState = Map" ?
+11:43:29 <monochrom> Oh wait cabal scripts barf on CRLF?!  That's pretty dumb.
+11:43:32 <donjoe> like alias
+11:44:05 <Solonarv> yeah, I ran into an issue where cabal script would just not see the {- cabal: -} comment
+11:44:25 <Solonarv> eventually someone pointed out that this might be related to line endings, and to try cabal-head
+11:45:01 <monochrom> donjoe: Alias vs not is a design choice you will have to make.  No one can choose for you unless they replace you altogether.
+11:45:07 <Solonarv> fortunately there is a nightly windows bindist so I didn't have to build it myself
+11:45:11 <[exa]> donjoe: that still doesn't handle the Map arguments
+11:45:24 <monochrom> However, when in doubt, for beginner purposes, just don't use aliases.
+11:45:50 <[exa]> donjoe: the type for a map is 'Map k v' where you substitute 'k' and 'v' for types you want as keys/values for your map
+11:45:56 <[exa]> like, Int and String
+11:46:47 <[exa]> donjoe: and you want each ClassState object to hold exactly 1 such map, so it needs 1 argument, e.g.:  .... = ClassState (Map k v)
+11:47:30 <donjoe> I see
+11:47:42 <Solonarv> and also, --install-method=copy can be used in combination with --install-dir to get the binary out of dist-newstyle/ without having to trawl that folder directly
+11:47:59 <monochrom> Yeah!
+11:48:05 <Solonarv> so it's useful even on systems where symlinks work fine!
+11:48:26 <donjoe> Ok, I understood it by using newtype and type. But I can't make it work using data: "data ClassState = Symbol Map String String" does not work
+11:48:57 <Solonarv> you still need parentheses there
+11:49:27 <Solonarv> otherwise you're defining one constructor, 'Symbol', with three fields of types: 'Map', 'String', and 'String'
+11:49:36 <Solonarv> which is an error because 'Map' is missing two arguments
+11:51:07 <donjoe> I see now
+11:51:38 <fen> ok, this seems to work https://pastebin.com/raw/gDhuGTBi
+11:52:03 <fen> any comments on this style? its been converged upon, maybe there is something more straitforward...
+11:53:20 <fen> sorry that version has a mistake; https://pastebin.com/raw/enE2jD0M
+11:54:00 <Boarders> Solonarv: do you mind me asking what you do (like professionally or if you are in school)?
+11:54:58 <Solonarv> I'm a physics student, currently in my 2nd semester
+11:55:03 <Solonarv> just started again this week
+11:56:23 <Tuplanolla> Physics has a strong representation here.
+11:56:57 <Lycurgus> since it's mostly math anymore
+11:57:26 <Solonarv> ahyup
+11:57:40 <Solonarv> 1.7 of my 3 classes are basically just math
+11:57:55 <Solonarv> (one of the classes is theoretical physics which is like 70% math)
+11:58:44 <jle`> i started learning Haskell for a project in a physics class :)
+11:58:46 <monochrom> Still, it leans towards the applied side rather than the pure side.
+11:58:47 <fen> just wait till you get to multipole expansions for n-body interactions with principal component residual forces... 
+11:59:23 <monochrom> For example, more differential equations to solve, use of Dirac delta function without worrying about "is it really a function? what is it, really?"
+12:00:18 <fen> monochrom: is that like for distributions? maybe a nested particle filter could help
+12:03:05 <fen> cant really understand physics tbh, seems like everything should be done using a state-space representation, but then there is so much focus on finite impulse response from engineering
+12:04:00 <Solonarv> phase space is convenient for some things but not for others
+12:05:45 <fen> yeah, depends if you want to identify similar subsystems based on their transition matrix factorisation
+12:06:32 <fen> when you try and add latent variables its like some kind of recursive kalman observer realisation
+12:07:10 <fen> this is quite good for that; https://arxiv.org/abs/1501.04495
+12:07:48 <fen> its a "convexification" 
+12:08:46 <fen> you can trade off between sparse and low rank - like dictionary learning, but without the kernal trick 
+12:10:05 <fen> basically though you just want to get a Lagrangian / action. seems impossible to get a port-hamilton realisation using dirac structures based on symplectic geometry
+12:11:00 <fen> the idea of energy released from interacting components seems like it should be quntified by conversion to disorder/temperature using an information entropy measure 
+12:11:10 <fen> basically physics sucks
+12:12:47 <monochrom> Haha from "I don't understand physics" to "basically physics sucks".
+12:13:36 <Tuplanolla> It's very important to have strong opinions.
+12:18:17 * hackage ghc-parser 0.2.0.3 - Haskell source parser from GHC.  https://hackage.haskell.org/package/ghc-parser-0.2.0.3 (VaibhavSagar)
+12:19:17 * hackage ihaskell 0.10.0.0, ipython-kernel 0.10.0.0 (VaibhavSagar): https://qbin.io/ricky-showed-p4k9
+12:29:17 * hackage ihaskell-graphviz 0.1.0.0 - IHaskell display instance for GraphViz (external binary)  https://hackage.haskell.org/package/ihaskell-graphviz-0.1.0.0 (VaibhavSagar)
+12:30:17 * hackage ihaskell-widgets 0.2.3.3 - IPython standard widgets for IHaskell.  https://hackage.haskell.org/package/ihaskell-widgets-0.2.3.3 (VaibhavSagar)
+12:46:06 <vaibhavsagar> that ipython-kernel link is very strange
+12:46:23 <vaibhavsagar> I wonder why it does that
+12:56:47 <hyperisco> monochrom, well I just took someone from "we do not need to fight climate change" to "I live a green lifestyle and advocate for others to do the same"
+12:58:19 <sm> hyperisco: please tell me how you did that ?
+12:58:40 * sm had some mindblowing family conversations over easter
+13:00:29 <hyperisco> I am working on my skills in communicating with "the other", and this outcome is a remarkable improvement :P It was moreso gently leading them to contradict their own statement. Hopefully that sparks some thoughts.
+13:00:38 <juri_> so, i've defined a typeclass with two instances. at compile time i want to decide which of the instances to use, so i create a newtype, and use it. now, the typeclass has two functions that require me to refer to the newtype to construct/deconstruct values. how do i write implementations that refer to the newtype in the instances, if the constructor is used with two different meanings?
+13:01:05 <sm> hyperisco: congrats! socratic-style ? asking questions ?
+13:01:26 <hyperisco> Yeah. I quickly learned that proffering facts is a bad move.
+13:02:08 <sm> I assume you have the facts & are quite well informed, as well  ?
+13:02:53 <hyperisco> Not really. I'm no climate expert. I am just locating analytically weak or wrong arguments (i.e. little to no expertise required) and taking on those.
+13:03:14 <hyperisco> Idea is to improve the quality of discourse more than to advocate for any particular stance.
+13:04:23 <sm> what would you estimate was their level of dogma/fixed-views at the start, on a scale of 10 ?
+13:04:50 <sm> I guess they were at least a little bit open
+13:05:23 <sm> they seemed to acknowledge there is some climate change, at least
+13:05:34 <hyperisco> Can continue on a different channel if you'd like to know.
+13:06:25 <sm> thanks, sorry for picking your brain :) 
+13:06:59 <hyperisco> No it is just that the moderators prefer people to stay on topic and move extended off-topic discussions to, say, -offtopic, or -blah
+13:07:06 <lyxia> juri_: can you provide an example
+13:07:37 <juri_> lyxia: sure, one moment.
+13:11:05 <juri_> http://faikvm.com/RationalUtil.hs
+13:11:12 <juri_> that's what i'm working on.
+13:12:20 <juri_> grr. and html is eating my unicode. :(
+13:16:04 <juri_> I'm wondering if i shouldn't use a second level of redirection by wrapping my newtypes in another layer of newtype, and abusing coerce.
+13:17:07 <lyxia> juri_: I could tell my browser the encoding to use
+13:18:53 <juri_> lyxia: en_US.UTF-8?
+13:19:26 <lyxia> Yeah. On another note, I'm not sure what's going on there and what you are trying to wrap.
+13:20:36 <juri_> there are three instances in that file, of the one typeclass. i'm using a newtype to select what instance to use globally, in my program.
+13:25:17 * hackage th-lift 0.8 - Derive Template Haskell's Lift class for datatypes.  https://hackage.haskell.org/package/th-lift-0.8 (MathieuBoespflug)
+14:17:24 <hyperisco> So, if it makes sense to get and map, what sort of optic is that?
+14:18:08 <hyperisco> Doesn't make sense to set because I am collapsing a lot of structure…
+14:20:10 <Taneb> hyperisco: what's the distinction between setting and mapping const x
+14:20:58 <hyperisco> Yeah, right, there's my mistake.
+14:21:13 <hyperisco> What I would be getting is not the same thing as I would be mapping. Hrm.
+14:21:36 <hyperisco> So, what I really want is a Setter perhaps
+14:23:45 <hyperisco> For Lenses it is typical to use a name like _x. Is there a convention for Setters?
+14:28:32 <fendor> @let bimapM f g e = do let x = bimap f g e; x
+14:28:32 <lambdabot>  Parse failed: Parse error: EOF
+14:30:16 <Solonarv> hyperisco: note that (in lens parlance) a Setter basically lets you map + set
+14:30:22 <Solonarv> notable it does not let you get
+14:30:23 <hyperisco> fendor, is that a let/in or a do-let?
+14:30:32 <Solonarv> it's a do-let
+14:30:40 <hyperisco> How can you tell?
+14:30:47 <Solonarv> because there's no in
+14:30:59 <hyperisco> Yeah well I don't think the parser knows :P
+14:31:00 <Solonarv> needs extra braces to parse right, though
+14:31:01 <fendor> yeah, it should be a let in a do expression
+14:31:08 <fendor> @let bimapM f g e = do { let x = bimap f g e; x }
+14:31:08 <lambdabot>  Parse failed: Parse error: }
+14:31:15 <Solonarv> @let bimapM f g e = do let { x = bimap f g e }; x
+14:31:16 <lambdabot>  Defined.
+14:31:20 <fendor> dammit
+14:31:31 <fendor> :t bimapM
+14:31:32 <lambdabot> Bifunctor p => (a -> b) -> (c -> d) -> p a c -> p b d
+14:31:47 <Solonarv> haha, this isn't monadic at all!
+14:31:50 <hyperisco> ;  also separates bindings for let/in
+14:31:56 <Solonarv> yup
+14:32:04 <Solonarv> so the parser thinks 'x' is the start of the next binding
+14:32:11 <Solonarv> but then the input ends, so it barfs
+14:32:29 <fendor> alright, funny. 
+14:32:33 <fendor> @hoogle take
+14:32:33 <lambdabot> Prelude take :: Int -> [a] -> [a]
+14:32:33 <lambdabot> Data.List take :: Int -> [a] -> [a]
+14:32:33 <lambdabot> Data.List.NonEmpty take :: Int -> NonEmpty a -> [a]
+14:32:56 <Solonarv> although this is just bimap in a sheer trenchcoat
+14:32:58 <fendor> @hoogle (a -> m b) -> (c -> m d) -> p a c -> m (p b d)
+14:32:59 <lambdabot> Control.Functor.HT outerProduct :: (Functor f, Functor g) => (a -> b -> c) -> f a -> g b -> f (g c)
+14:32:59 <lambdabot> Number.ResidueClass.Func lift98_2 :: (T a -> T a -> T a -> T a) -> T a -> T a -> T a
+14:32:59 <lambdabot> Data.Tuple.Lazy zipWithPair :: (a -> c -> e, b -> d -> f) -> (a, b) -> (c, d) -> (e, f)
+14:33:08 <Solonarv> :t bitraverse
+14:33:08 <fendor> @hoogle (a -> m b) -> (c -> m d) -> p a c -> m (p b d) is:exact
+14:33:09 <lambdabot> Control.Functor.HT outerProduct :: (Functor f, Functor g) => (a -> b -> c) -> f a -> g b -> f (g c)
+14:33:09 <lambdabot> Number.ResidueClass.Func lift98_2 :: (T a -> T a -> T a -> T a) -> T a -> T a -> T a
+14:33:09 <lambdabot> Data.Tuple.Lazy zipWithPair :: (a -> c -> e, b -> d -> f) -> (a, b) -> (c, d) -> (e, f)
+14:33:09 <lambdabot> error:
+14:33:09 <lambdabot>     • Variable not in scope: bitraverse
+14:33:11 <lambdabot>     • Perhaps you meant one of these:
+14:33:17 <Solonarv> bah
+14:33:23 <Solonarv> fendor: I think you want bitraverse
+14:33:30 <Solonarv> @let import Data.Bitraversable
+14:33:31 <lambdabot>  Defined.
+14:33:35 <Solonarv> :t bitraverse
+14:33:36 <lambdabot> (Applicative f, Bitraversable t) => (a -> f c) -> (b -> f d) -> t a b -> f (t c d)
+14:34:15 <fendor> huh. What package is that from?
+14:34:28 <fendor> @info Data.Bitraversable
+14:34:28 <lambdabot> Data.Bitraversable
+14:34:37 <fendor> dont know what i expected
+14:35:00 <fendor> that is in base :O
+14:35:03 <Solonarv> it's in base, actually
+14:35:12 <Solonarv> just like Bifunctor ;)
+14:35:16 <Solonarv> (and Bifoldable)
+14:35:16 <fendor> and it defines `bimapM`
+14:35:42 <fendor> :t bimapM
+14:35:43 <lambdabot> error:
+14:35:43 <lambdabot>     Ambiguous occurrence ‘bimapM’
+14:35:44 <lambdabot>     It could refer to either ‘Data.Bitraversable.bimapM’,
+14:36:01 <fendor> @unset bimapM
+14:36:02 <lambdabot> Unknown command, try @list
+14:36:26 <fendor> :t mapM . bimapM return
+14:36:27 <lambdabot> error:
+14:36:27 <lambdabot>     Ambiguous occurrence ‘bimapM’
+14:36:27 <lambdabot>     It could refer to either ‘Data.Bitraversable.bimapM’,
+14:36:38 <fendor> :t mapM . Data.Bitraversable.bimapM return
+14:36:39 <lambdabot> (Bitraversable t2, Monad m, Traversable t1) => (b -> m d) -> t1 (t2 c b) -> m (t1 (t2 c d))
+14:36:40 <Solonarv> grr lambdabot cutting off erors
+14:37:24 <fendor> I actually wanted to know, whether this expression can be expressed more elegantly. 
+14:37:45 <Solonarv> well, I'm not aware of any situation where 'Bitraversable p' but not 'forall x. Traversable (p x)'
+14:38:02 <Solonarv> so you could just use mapM . mapM
+14:38:16 <fendor> :t mapM . mapM
+14:38:17 <lambdabot> (Traversable t2, Traversable t1, Monad m) => (a -> m b) -> t1 (t2 a) -> m (t1 (t2 b))
+14:38:23 <fendor> indeed.
+14:38:29 <fendor> is that better or worse?
+14:38:34 <Solonarv> I prefer it
+14:38:53 <Solonarv> if I see mapM . bimapM return I'm left wondering "huh, why mix them?"
+14:39:08 <Solonarv> I'd also be tempted to s/mapM/traverse/
+14:39:27 <fendor> well, it makes sense, if the first parameter to bimapM does not just return 
+14:39:52 <fendor> however, the two mapM have drastically different types, not sure if that is easier to read
+14:40:08 <fendor> but there definitely could be an hlint to replace `bimap id` with just `fmap`
+14:40:17 * hackage quadratic-irrational 0.1.0 - An implementation of quadratic irrationals  https://hackage.haskell.org/package/quadratic-irrational-0.1.0 (Bodigrim)
+14:40:35 <Solonarv> probably, yeah
+14:40:52 <Solonarv> and of course if the argument to bimapM is something other than return/pure it makes sense to use it!
+14:44:12 <fendor> maybe it makes sense to add an hlint lint for both of these patterns.
+14:44:20 <fendor> but I must say, bimap is a really useful function
+14:44:48 <fendor> :t traverse . traverse 
+14:44:49 <lambdabot> (Traversable t2, Traversable t1, Applicative f) => (a -> f b) -> t1 (t2 a) -> f (t1 (t2 b))
+14:47:18 <fendor> :t traverse . mapM
+14:47:19 <lambdabot> (Monad f, Traversable t2, Traversable t1) => (a -> f b) -> t1 (t2 a) -> f (t1 (t2 b))
+14:48:08 <fendor> :t mapM . mapM . mapM
+14:48:09 <lambdabot> (Traversable t3, Traversable t2, Traversable t1, Monad m) => (a -> m b) -> t1 (t2 (t3 a)) -> m (t1 (t2 (t3 b)))
+14:50:46 <Solonarv> mapM = traverse, usually (with an extra constraint)
+14:51:14 <Solonarv> sometimes there is a difference wrt performance/strictness/space usage but that doesn't happen often at all
+14:51:21 <Solonarv> at least IME
+15:20:47 * hackage arithmoi 0.9.0.0 - Efficient basic number-theoretic functions.  https://hackage.haskell.org/package/arithmoi-0.9.0.0 (Bodigrim)
+15:22:17 * hackage telega 0.2.7 - Telegram Bot API binding  https://hackage.haskell.org/package/telega-0.2.7 (iokasimovmt)
+16:05:54 <jle`> hm, should i do ludum dare this time around?
+16:21:37 <hyperisco> Is a group module a thing?
+16:22:08 <Solonarv> hyperisco: no, you need a ring
+16:22:10 <hyperisco> I am seeing R-modules talked about a lot, but I only see the multiplicative part being relevant, minimally speaking
+16:22:34 <Solonarv> don't need a field, though it gets you some extra niceties
+16:22:44 <Solonarv> the vector space/module axioms are actually the same IIRC
+16:22:50 <hyperisco> well, then you just have a vector space :D
+16:22:56 <Solonarv> yes
+16:23:18 <Solonarv> a vector space is just a module where the scalars happen to form a field instead of only a module, IIRC
+16:23:35 <Solonarv> s/only a module/only a ring/
+16:23:42 <hyperisco> the only axioms are pertaining to multiplcation though
+16:23:50 <Solonarv> not true
+16:24:18 <hyperisco> okay, then I am not reading this correctly or it needs to be fixed https://en.wikipedia.org/wiki/Module_(mathematics)
+16:24:21 <Solonarv> (s1 + s2)*v = s1*v + s2* v is also an axiom (for s1, s2 scalars and v a vector)
+16:24:43 <hyperisco> oh, that is 2
+16:24:49 <Solonarv> yes
+16:25:59 <jle`> mathematicians should have enabled -Wredundant-constraints
+16:26:32 <epta> jle`: isn't it enabled by default?
+16:26:39 <jle`> it isn't, not even -Wall implies it
+16:26:52 <jle`> well, it was enabled by default for ghc 7.10 or something but then they turned it off
+16:27:02 <jle`> also this was a joke about the mathematical definition of vector spaces heh 
+16:27:22 <jle`> *enabled by -Wall
+16:27:29 <Solonarv> well, it makes sense to talk about vector spaces separately from modules because having multiplicative inverses gets you a bunch of nice things
+16:27:48 <Solonarv> although I forget what exactly
+16:28:01 <jle`> usually something about bases
+16:28:47 * hackage dir-traverse 0.1.0.0 - Simple directory traversal library  https://hackage.haskell.org/package/dir-traverse-0.1.0.0 (vmchale)
+16:29:59 <Solonarv> sounds vaguely correct
+16:31:32 <Solonarv> yeah something about linear dependence being more complicated and more annoying
+16:32:24 <hyperisco> I feel like I am missing something or other… so I am taking measurements in pixels, so I should be able to talk about pixel points and pixel vectors, or at least several operations make sense
+16:32:40 <hyperisco> But n pixels doesn't make a ring =\
+16:33:09 <hyperisco> But I can do a lot of stuff if I just require a group, because n pixels makes a group
+16:33:11 <jle`> pixel coordinates?
+16:33:18 <hyperisco> yeah
+16:33:47 * hackage archive-sig 0.2.0.1 - Backpack signature for archive libraries  https://hackage.haskell.org/package/archive-sig-0.2.0.1 (vmchale)
+16:33:55 <hyperisco> so, (3px, 5px) is 3 pixels right and 5 pixels down, lets say
+16:34:02 <jle`> like V2 Int
+16:34:09 <hyperisco> sure, but with units :)
+16:34:16 <jle`> from linear, data V2 a = V2 a a.
+16:35:12 <Solonarv> actually this is a good example of a module - "pixel vectors" are just ℤ² in a trenchcoat, which is a ℤ-module
+16:35:45 * Solonarv is very fond of calling things "X in a trenchcoat"
+16:36:03 <hyperisco> it should make sense to find the displacement of (3px, 5px) and (1px, 2px)
+16:36:16 <Solonarv> yes, that displacement is (2px, 3px)
+16:36:24 <Solonarv> you just subtract the coordinates
+16:36:30 <jle`> that just sounds like vector/module arithmetic?
+16:36:40 <Solonarv> indeed
+16:36:46 <hyperisco> but… that's an affine thing, and affine spaces need rings
+16:37:04 <hyperisco> and n px doesn't make a ring
+16:37:06 <jle`> the way you're using it isn't as an affine space
+16:37:24 <jle`> you're basically using px x px to describe displacement from origin
+16:37:36 <Solonarv> the ring involved here is ℤ (the integers), not some sort of "ℤ with an extra unit"
+16:37:55 <Solonarv> clearly if you have a pixel-displacement it makes sense to multiply that with a (dimensionless) integer, yes?
+16:38:17 <hyperisco> jle`, well, this all works fine if I choose, say, integers, and… that is easily interpretable as "displacement from the origin"
+16:38:52 <jle`> great. problem solved :)
+16:39:02 <hyperisco> well no, because there are no units now
+16:39:47 <Solonarv> sure there are units
+16:39:52 <Solonarv> the units are in your vectors
+16:39:56 <Solonarv> which makes sense
+16:40:02 <Solonarv> again
+16:40:19 <hyperisco> well, I don't see where the units are if I am just using integers
+16:40:23 <Solonarv> you have some measurement like "the distance between these two points is (10px, 12px)"
+16:40:36 <Solonarv> it makes sense to talk about doubling this distance, yes?
+16:40:38 <hyperisco> yeah, but I can't even say that
+16:41:26 <Solonarv> sure you can
+16:41:27 <hyperisco> hold on, I misread a definition I have
+16:41:30 <Solonarv> your vectors have units
+16:41:47 <Solonarv> your scalars don't
+16:42:13 <Solonarv> this makes sense because it lets you multiply a scalar and a vector, and get back a vector with the same units
+16:43:09 <hyperisco> I just misread my class definition for affine spaces… so let me try this again
+16:43:30 <hyperisco> I got kerfuddled
+16:44:04 <hyperisco> can you blame me with all the algebras :D
+16:44:29 <Solonarv> nah, I get confused too :>
+16:44:52 <Solonarv> doesn't help that the last time I actually did anything with linear algebra was like 4 years ago
+16:45:21 <Solonarv> (well, anything beyond the basic ℝ² / ℝ³ stuff)
+16:45:24 <hyperisco> right, so inner spaces and affine spaces come together to make an euclidean space
+16:45:40 <hyperisco> for some reason I was not seeing vector spaces and affine spaces as separate branches
+16:46:52 <Solonarv> yeah
+16:47:08 <Solonarv> we even have a weird inner product in this space-of-pixel-displacements
+16:47:33 <Solonarv> (weird because it doesn't give a result in the scalar space, due to the units getting in the way)
+16:48:27 <Solonarv> of course if the only unit you're working with is (powers of) px you can just toss it out and pretend you're in ℤ²
+16:50:16 <Solonarv> alright I'm going to sleep
+16:50:17 * hackage network 3.1.0.0 - Low-level networking interface  https://hackage.haskell.org/package/network-3.1.0.0 (dukerutledge)
+16:50:32 <Solonarv> ping me if you want to bounce more algebra off my head tomorrow :D
+16:51:17 * hackage network 2.8.0.1 - Low-level networking interface  https://hackage.haskell.org/package/network-2.8.0.1 (dukerutledge)
+16:51:19 <hyperisco> have a good one
+16:52:11 <hyperisco> some people would just throw an add instruction at some bitfields and call it a day, but oh no, not me, couldn't be
+16:54:16 <hyperisco> yeah I have a sort of class hierarchy problem… to make an affine space of 2d vectors and 2d points, I just need a group
+16:54:45 <hyperisco> but to make the Euclidean space I need Reals, and Reals are not uniquely a Group
+16:55:38 <hyperisco> and I can't say, when definite the affine space "if this group happens to also be a ring, then I mean the additive group!"
+16:55:45 <hyperisco> when defining*
+16:56:26 <hyperisco> I can only say "use the Group" (which doesn't exist for Rings), or "use the Additive Group" (which only exists for Rings)
+16:59:45 <hyperisco> so… we need to be able to resolve instance dependencies via a newtype when defining an instance
+17:00:06 <hyperisco> that way I can just say… when you look for the Group, you get it through Additive
+17:04:54 <nshepperd> just give everything AdditiveGroup instances, even things that aren't rings
+18:09:47 * hackage shift 0.2.1.2 - A tool to quickly switch between directories  https://hackage.haskell.org/package/shift-0.2.1.2 (vmchale)
+18:56:44 <mjrosenb> Lens question: when traversing some indexable container, is there a way to bundle the index with the focused value?
+18:59:19 <mjrosenb> so, like if my value is [("hello", Just 4), ("World", Nothing)], I'd like to get (0, 4) back: the first element of the list where _2 . _Just focuses, along with its index in the greater list.
+19:09:47 * hackage tomlcheck 0.1.0.40 - Command-line tool to check syntax of TOML files  https://hackage.haskell.org/package/tomlcheck-0.1.0.40 (vmchale)
+19:21:46 <mjrosenb> > let v = [("hello", Just 4), ("World", Nothing)] in v ^@.. indexing (traverse . _2 . _Just)
+19:21:48 <lambdabot>  [(0,4)]
+19:22:05 <mjrosenb> I would have prefered Just (0,4), but that works.
+19:25:49 <c_wraith> > let v = [("hello", Just 4), ("World", Nothing)] in v ^@? indexing (traverse . _2 . _Just)
+19:25:51 <lambdabot>  Just (0,4)
+19:25:59 <c_wraith> mjrosenb: ^
+19:27:37 <mjrosenb> so, will indexing ever be on the left side of a function composition?
+19:27:59 <c_wraith> If you care about that, you should be using (<.), (.>), or (<.>)
+19:29:05 <mjrosenb> I'm not sure how that would work.
+19:36:53 <mjrosenb> ok, I think I've figured this out, but my brain refuses to parse this expression the correct way.
+19:37:17 <mjrosenb> > let v = [("hello", Just 4), ("World", Nothing)] in v ^@? indexing traverse <. _2 . _Just
+19:37:18 <lambdabot>  Just (0,4)
+19:37:30 <mjrosenb> > let v = [("hello", Just 4), ("World", Nothing)] in v ^@? (indexing traverse <. _2) <. _Just
+19:37:31 <lambdabot>  Just (0,4)
+19:37:49 <c_wraith> :i <.
+19:37:58 <c_wraith> @info <.
+19:37:58 <lambdabot> <unknown>.hs:1:1:Parse error: <.
+19:38:01 <c_wraith> @info (<.)
+19:38:01 <lambdabot> (<.)
+19:38:10 <c_wraith> Nice.  well, it has a higher precedence than .
+19:38:13 <c_wraith> that's the important part
+19:38:48 <mjrosenb> yeah, I figured that out after I tried the second one without the parens, I guess it is just kind of strange to have something that behaves like . but has a different precedence.
+19:39:57 <mjrosenb> I feel like there should be some variable which is indexing traverse.
+20:08:19 <c_wraith> err.  *lower* precedence than .
+20:09:57 <mjrosenb> so I'm trying to name foo :: :: Monad m => (a -> m (Maybe b)) -> [a] -> m (Maybe b)
+20:10:11 <mjrosenb> based on https://hackage.haskell.org/package/extra-1.6.15/docs/src/Data.List.Extra.html#firstJust -- I'd say it should be firstJustM
+20:10:25 <mjrosenb> but I think I like the name findMaybeM better.
+20:27:38 <bhara_> #django
+20:32:09 <mjrosenb> Is there a valid way to combine two lens getters such as:
+20:32:43 <mjrosenb> f (v ^? a . b . c) (v ^? a . b . d . e)
+20:32:59 <mjrosenb> so that there's only one ^? between them?
+20:41:38 <slack1256> let middle = v^? a . b . c in f middle (middle . e)
+20:42:16 <mjrosenb> note: the second one uses d, not c
+20:42:36 <mjrosenb> also, I don't think you can compose middle . e that way.
+20:50:18 <slack1256> you're right
+21:20:34 <mjrosenb> Is there a way using lenses/prisms to more or less filter a list?
+21:22:51 <mjrosenb> > [(1,Left 4), (5, Right 'a'), (17, Left 2)] ^.. traverse . _2 . _Right
+21:22:53 <lambdabot>  "a"
+21:23:19 <mjrosenb> I want something that would return [(5, Right 'a')]
+21:33:15 <c_wraith> > [(1,Left 4), (5, Right 'a'), (17, Left 2)] ^.. traverse . filtered (has (_2 . _Right))
+21:33:17 <lambdabot>  [(5,Right 'a')]
+21:33:51 <mjrosenb> :info filtered
+21:34:15 <mjrosenb> control.lens.fold, makes sense.
+21:34:35 <mjrosenb> I don't seem to have a good intuition about what is in Traversal and what is in Fold yet.
+21:34:38 <c_wraith> It actually works as a traversal, though it isn't strictly law-abiding if used that way
+21:35:11 <c_wraith> the simple intuition is that a Fold doesn't let you modify the targets, only get a summary of them.  A Traversal does let you modify targets.
+21:35:33 <Squarism> Where can one find a comprehensive changelog for each ghc release? Google doesnt provide anything obvious
+21:36:38 <Squarism> is this it? https://github.com/ghc/ghc/blob/master/libraries/base/changelog.md ? 
+21:36:56 <Squarism> oh no thats base
+21:39:25 <mjrosenb> c_wraith: I guess I also was not looking for a solution that involved leaving lens types.
+21:39:53 <c_wraith> what do you mean by "lens types" there?
+21:43:39 <mjrosenb> the return from has is (s -> Bool), which doesn't have any of the typeclass magic that lens uses, i.e. has _Right :: Either a b -> Bool
+21:45:07 <c_wraith> > [(1,Left 4), (5, Right 'a'), (17, Left 2)] & traverse . filtered (has (_2 . _Right)) . _1 +~ 10
+21:45:09 <lambdabot>  [(1,Left 4),(15,Right 'a'),(17,Left 2)]
+21:46:12 <c_wraith> the result of has is used by filtered.  Filtered takes a non-optic and returns an optic
+21:46:53 <mjrosenb> right, I guess that's why I didn't really look at filtered, since it took a non-optic as an argument
+21:47:06 <c_wraith> @let having = filtered . has
+21:47:08 <lambdabot>  Defined.
+21:47:11 <c_wraith> there you go. :P
+21:47:25 <c_wraith> > [(1,Left 4), (5, Right 'a'), (17, Left 2)] & traverse . having (_2 . _Right) . _1 +~ 10
+21:47:26 <mjrosenb> and I distinctly wanted to pass in an optic, not thinking of has.
+21:47:27 <lambdabot>  [(1,Left 4),(15,Right 'a'),(17,Left 2)]
+22:33:21 <infinity0> heads up for anyone using Cuckoo.mutate in production lol https://github.com/gregorycollins/hashtables/issues/55
+22:55:03 <mjrosenb> @pl \x f -> maybe x f x
+22:55:03 <lambdabot> flip =<< maybe
+23:54:47 * hackage solar 0.1.0.0 - Simple library for solar calculations  https://hackage.haskell.org/package/solar-0.1.0.0 (tsahyt)

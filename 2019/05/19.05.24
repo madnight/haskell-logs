@@ -1,0 +1,1874 @@
+00:07:25 <oni-on-ion> heh, was just generating some Cstubs as well. good times 
+00:08:07 <oni-on-ion> i like to *feel* pointers, personally; keeping structure visually, perhaps
+00:08:54 <oni-on-ion> ie. typedef struct {...} data_t;   data_t *d1;
+00:09:43 <ggole> Function pointers don't need to be dereferenced or freed, so maybe that's part of it.
+00:10:47 <oni-on-ion> mhm
+00:12:10 <ski> well, you could imagine allocating memory, initializing it with code, casting to a function pointer, and calling it
+00:12:15 <ski> then you could need freeing later
+00:12:34 <ski> (however iirc casting between function and data pointers is implementation defined ?)
+00:13:38 <oni-on-ion> hm; a function could only be a pointer, so any full word can be cast to one 
+00:14:03 <ggole> There are issues with segmented machines and function pointers.
+00:14:04 <oni-on-ion> err a function only as a pointer**
+00:14:28 <oni-on-ion> allocating data and filling it with code sounds fun 
+00:14:36 <ski> (in fact, Hugs did something like this, with `foreign import "wrapper" mkFun :: (CInt -> CInt) -> IO (FunPtr (CInt -> CInt))' e.g.)
+00:14:38 <ggole> (In practice these seem to be resolved by extensions like near/far pointers rather than staying within the C standard.)
+00:15:09 <oni-on-ion> ehh currently digging deep into ocaml foreign/extern 
+00:15:57 <oni-on-ion> ski, i think haskell still does it like that, or did when i was doing that; its essentially the same with ocaml. can either use libffi or generated prims 
+00:16:24 <ski> (what it did was allocate a chunk of memory, fill it with machine code instructions that included references to the environment and the code pointer of the input closure, and invoked that closure, on the given input of type `int')
+00:16:36 <oni-on-ion> near and far , is that stack and heap? reminds me of pascal a little 
+00:17:05 <oni-on-ion> ski, sounds like libffi. =) 
+00:17:14 <ggole> In OCaml external creates an OCaml-side wrapper (eg, a curried function) for a foreign symbol, which doesn't really run into this problem
+00:17:16 <ski> "a function could only be a pointer" -- i suppose i prefer to think of it as functions in C having undetermined size (as opposed to function pointers)
+00:17:48 <ggole> It's also used for built-ins, I suppose
+00:17:50 <ski> oni-on-ion : "i think haskell still does it like that" -- do you mean GHC ?
+00:17:57 <oni-on-ion> ski, could effectively point to a single instruction [to jump or whatevs]
+00:17:59 <oni-on-ion> ski, yep
+00:18:07 <oni-on-ion> i remember the same interface. let me check my old project .. 
+00:19:09 <ski> ggole : well, i think you're talking about importing into OCaml a function defined in C, no ? what i mentioned was dynamically converting a function in Haskell into a suitable function pointer that can be passed off to C
+00:19:38 <oni-on-ion> ah, since changed to using .hsc file, is slightly different: foreign import CALLCONV unsafe "glPointSize"     pointSize     :: GLfloat -> IO ()
+00:20:26 <ggole> Is a function pointer enough? Don't you need environment access for closed over values, in general?
+00:20:35 <oni-on-ion> ski, i think he means that. "foreign" is ocaml libffi, "external" is C-primitive 
+00:20:40 <ggole> Or is that why you were writing instructions on the fly
+00:21:31 <ski> (and the main problem here is that functions in C are not nestable, they don't keep track of an external contingent "state" of (non-filescope) non-locals. even with nested functions in GCC C, those are only live during the call of the wrapping function(s))
+00:21:59 <ski> ggole : yes, that's exactly why it was generating instructions on the fly
+00:22:10 <ggole> I see.
+00:22:37 <ggole> The 'nice' solution to that is for the C code to pass around the closure object, I think... but that doesn't always work out.
+00:25:44 <ski> but then there's `W^X' ..
+00:26:05 <ggole> You can get around that on most platforms
+00:26:25 <ggole> mmap a writable page, stuff instructions into it, mprotect it executable, and off you go
+00:26:42 <ski> ggole : right. in case they thought of having `void foo(void *env,void (*fun)(void *env))' or `struct { void *env; void (*fun)(void *env); }'
+00:26:50 * ski nods
+00:26:59 <ggole> malloc shouldn't be used for that now, as I understand things
+00:27:28 <Ariakenom> ski: "functions in C having undetermined size" which is why each closure in Rust is a separate type, I think.
+00:27:38 <ski> there can also be other cases of RTCG, when you're doing staged programming (like partial evaluation, program specialization), at run-time
+00:28:07 <ski> Ariakenom : hm, i thought that was because the captured non-locals were counted into the type ?
+00:28:30 <ggole> I think they do that to avoid the indirection which hides the size/alignment
+00:28:33 <Ariakenom> ski: oh yeah. no instructions are made at runtime ofc
+00:28:33 <ski> (or at least, i think i heard something like that, for C++)
+00:28:55 <Ariakenom> i thought badly
+00:29:35 <ggole> If every closure is a pointer to a thing containing the code pointer(s) and closed over values, then you can use the same type for every closure (of the same function type)
+00:30:13 <ski> ggole : a standard "allocate dynamic memory" function shouldn't be used to dynamically allocate memory, what will they think of next ? ;)
+00:30:28 <Ariakenom> ggole: but then you must heap allocate the captured values
+00:30:54 <ggole> Or the whole thing, right.
+00:31:18 <ski> Ariakenom : or, perhaps, stack allocate. if you know the extent. see also <https://en.wikipedia.org/wiki/Region-based_memory_management>
+00:31:51 <ggole> The problem with malloc is that it might not allocate its backing store from mmap
+00:32:13 * ski nods
+00:32:19 <ggole> And mprotect may not work on pages allocated from other sources, depending on configuration
+00:32:37 <ggole> Some security mitigation, I assume
+00:33:01 <ggole> (This is on Linux.)
+00:33:12 <ski> i was btw pondering a little an alternative design, where the memory-allocation system wouldn't necessarily know the size of an allocated block of memory that is pointed to by some pointer
+00:33:28 <ski> so that then you'd have to also provide the size, when you'd free it
+00:33:54 <ski> (and, this could also possibly enable doing things like allocating a chunk, then later deallocating the middle third of it)
+00:34:36 <ggole> I've seen that idea before - iirc, Stepanov considered it
+00:35:05 <ski> the main idea is that quite commonly the code that calls the deallocation procedure already knows the size of the block. and so, perhaps, it'd be nicer to not also have the memory allocator have to know about it
+00:35:47 <ski> however, presumably the allocator can do more fancy things, if it knows the size of each block, rather than just keeping track of which memory addresses are allocated, and which are not ?
+00:35:51 <ggole> Hmm. If the size is a constant it might be possible to avoid some dispatch logic in the allocator, too.
+00:35:54 <ski> ggole : do you have a link ?
+00:36:46 <ggole> Not off the top of my head, no...
+00:36:52 <ski> (to that Stepanov thing ? i dunno who Stepanov is)
+00:37:15 <ggole> Alexander Stepanov. The (C++) STL guy.
+00:37:35 <ggole> I have a guess as to which pdf it is, lemme check. If it isn't that one I'm afraid you're out of luck.
+00:37:45 <ski> (of course, it would be simple to wrap such a system in a way that stored the size of a block at the start of it, giving you a `malloc'&`free' interface on top)
+00:38:11 <ski> (but presumably i'm ignorant of important implementation issues for making things more efficient, behind the covers ?)
+00:38:15 <ski> ggole : ok, ty
+00:39:19 <ggole> Aha, it is "Notes on Programming", page 16
+00:39:42 <ggole> stepanovpapers.com/notes.pdf
+00:40:54 <ggole> Might be a bit too C++ specific to inform a new allocator design for other languages, but probably worth a look anyway.
+00:45:23 <ski> ggole : nice, ty !
+00:55:45 <hololeap_> https://hackage.haskell.org/package/reflex-0.6.1/docs/Reflex-EventWriter-Base.html#v:sequenceDMapWithAdjustEventWriterTWith
+00:55:51 * hololeap_ slow claps
+00:56:12 <Axman6> We've reached out Java moment
+00:56:15 <Axman6> our*
+00:58:11 <ski> Haskell: when your type signatures are larger than your implementation
+01:00:40 <Axman6> Definitely easier to read the type in the source code -that sig could use some comments
+01:01:20 * ski nods
+01:14:46 <merijn> ski: Pfft, that's not even hard
+01:16:58 <cocreature> clearly we need type signatures for type signatures so we can figure out what those complicated types mean
+01:21:43 <lortabac> cocreature: this? https://github.com/ghc-proposals/ghc-proposals/blob/master/proposals/0036-kind-signatures.rst
+01:22:07 <cocreature> :)
+01:34:50 <merijn> Isn't that already possible with -XKindSignatures?
+01:35:30 <merijn> Well, not as a separate signature I suppose, but with GADTSyntax it's pretty simple/readable
+01:45:50 <lortabac> merijn: the proposal says "This is a simplification over the current story around CUSKs, which are fiddly and unpredictable."
+01:50:59 <lortabac> what are the possible ways to optimize a heavy computation in the list monad? is a SAT solver a good idea?
+01:51:49 <cocreature> I have an FFI call that sometimes seems to get stuck but only on Windows and only if I mark it "safe" instead of "unsafe". It is run from the main (and thereby bound) thread. Any ideas on what could be going wrong here?
+01:52:01 <Rembane> lortabac: What is the heavy computation in question? What properties does it have? What does it need?
+01:53:57 <lortabac> Rembane: lots of relatively small lists (approx. between 5 and 100 elems), and the guard conditions involve equality between elements of different lists + filters on individual lists
+01:54:47 <lortabac> Rembane: also, conditions like x + y > z
+01:56:18 <Rembane> lortabac: That looks like linear transformations, or am I just doing too eager pattern matching?
+02:05:09 <lortabac> Rembane: I am not sure, although I confess my maths skills are a bit rusty
+02:06:22 <Rembane> lortabac: No worries. Lets ignore the math part. :)
+02:06:39 <zincy_> With property based testing should each generated test case not be unique?
+02:06:41 <Rembane> lortabac: Do you do lookups in the lists, or how do you process them?
+02:06:55 <Rembane> zincy_: It doesn't really matter except for performance reasons
+02:07:17 <zincy_> I am playing around with Hedgehog and when I printTree on the generated cases there are a lot of duplicates
+02:09:11 <Rembane> zincy_: IIRC it is quite hard to generate test data that don't contain loads of duplicates
+02:09:38 <lortabac> Rembane: it's this kind of code https://pastebin.com/uZiLAtWf
+02:09:48 <zincy_> Should the programmer strive to write generators that avoid duplicates then?
+02:09:51 <lortabac> of course, there are more variables and conditions
+02:10:10 <lortabac> the lists are prefetched from various data-sources
+02:10:21 <zincy_> Well to answer my own question I guess yes for faster tests
+02:10:35 <Lycurgus> the programmer should strive to develop her own powers of judgment
+02:11:57 <zincy_> Maybe I need more confidence in my judgement :(
+02:12:18 <ski> lortabac : i'd endorse something like that proposal
+02:12:38 <lortabac> ski: toplevel kind signatures?
+02:12:42 <ski> yep
+02:12:53 <ski> lortabac : perhaps there's some constraint programming library you could use ?
+02:13:28 <lortabac> ski: the proposal has already been accepted
+02:13:33 <ski> good
+02:14:57 <lortabac> I am trying to convert that code to boolean formulas for SAT solvers, but it's not as straightforward as I thought
+02:15:15 <lortabac> so I wonder if other alternatives exist
+02:15:32 <ski> is it integers, or floating-point, or some other kind of numbers ?
+02:15:35 <oni-on-ion> cocreature, use it unsafe? =/
+02:16:09 <lortabac> or if the best solution is to implement a domain-specific solver that can exploit our business knowledge to take shortcuts
+02:16:52 <ski> lortabac : i suppose i might try to express it in a Prolog system with a constraint solver, like CLP(FD) or CLP(R) (or CLP(Q), if that's what you want). Oz also has support for CLP (Constraint Logic Programming)
+02:16:54 <lortabac> ski: most of them are integers or enums (which can be encoded as integers)
+02:17:08 <ski> lortabac : but perhaps there's a Haskell library that does something like that, for you
+02:18:23 <lortabac> http://hackage.haskell.org/package/prolog "A Prolog interpreter written in Haskell."
+02:18:26 <ski> with CLP, you can often go constrain&generate, rather than generate&test. the former is typically more efficient, while still being reasonably readable
+02:18:56 <ski> yea, plain Prolog will not do it, `x + y > z' indicates to me that you probably want constraints
+02:18:58 <cocreature> oni-on-ion: I’d like to have some idea of why things break if I mark it safe before I do that :)
+02:19:04 <ski> (of course, i'm merely guessing from what you've said)
+02:21:49 <ski> perhaps
+02:21:52 <ski> @hackage monadiccp
+02:21:53 <lambdabot> http://hackage.haskell.org/package/monadiccp
+02:22:03 <ski> would be up for it. i haven't seen this package before
+02:24:03 <zincy_> Lycurgus: What concrete steps would you recommend for a programmer with that aim to take?
+02:24:42 <ski> @quote autodidactism
+02:24:43 <lambdabot> shapr says: I've tried to teach people autodidactism, but I've realized they have to learn it for themselves.
+02:24:52 <Lycurgus> simply taking it seriously as a goal should suffice, zincy_ 
+02:24:57 <Lycurgus> it takes time
+02:26:28 <Lycurgus> the love of economy is the root of all good, in general it will be quickest and most expeditious to use your own best judgment
+02:26:46 <zincy_> What do you mean by economy?
+02:27:11 <Lycurgus> as in "economical order quantity"
+02:27:48 <Rembane> That's a good quite
+02:27:50 <Rembane> *quote
+02:28:10 <lortabac> ski: that package might do the job, but I need to do some homework first, and learn constraint programming :)
+02:28:38 <lortabac> for sure, it seems much more expressive than a SAT solver
+02:29:05 <zincy_> Ok I will be more cognizant that independent thought is the goal not solving the problem at hand
+02:29:32 <zincy_> That kinda fits in with my philosophy of understand the foundations
+02:30:13 <Lycurgus> Rembane, it's GB Shaw iirc
+02:30:53 <lortabac> to be honest, independent thought is a double-edged sword, sometimes the best thing to do is to read a paper and apply it literally
+02:31:29 <zincy_> lortabac: Srinivasa Ramanujan 
+02:32:26 <ski> lortabac : i suspect Constraint Programming (CP) is most easily learned, in the context of Logic Programming (LP), where it's known as CLP (Constraint Logic Programming)
+02:32:55 <ski> lortabac : and LP is probably most easily learned in the context of Prolog, since most material regarding LP is in terms of Prolog (and extensions to it)
+02:32:55 <lortabac> zincy_: the problem is, most of us are not as smart as Srinivasa Ramanujan, so we need a mix of study and independent reasoning
+02:33:30 <ski> lortabac : "Constraint Logic Programming: A Survey" by Joxan Jaffar,Michael J. Maher in 1994 at <https://core.ac.uk/download/pdf/81150667.pdf> might perhaps be of some interest
+02:33:44 <kuribas> ski: there is the curry language, which is more haskell like
+02:33:45 <zincy_> lortabac: yes I argree with you. Highlighted him because of the controversial opinion that he would have been even better had he been less independent
+02:33:50 <zincy_> There is a balance
+02:35:03 <ski> kuribas : yes. and Escher, which is also functional-logic. then there's Mercury, which is logic-functional (but whose type system borrows much from Haskell, including type classes). and there's Oz (and Alice ML uses the same RTS), which is used by CTM
+02:35:07 <ski> @where CTM
+02:35:08 <lambdabot> "Concepts, Techniques, and Models of Computer Programming", by Peter Van Roy,Seif Haridi, at <http://www.info.ucl.ac.be/~pvr/book.html>
+02:35:28 <ski> kuribas : is there (arithmetic) constraints for Curry, though ?
+02:35:42 <kuribas> ski: yeah, but not in all implementations
+02:36:13 <kuribas> this one does: https://www.informatik.uni-kiel.de/~pakcs/
+02:37:01 <ski> i see
+02:39:09 * ski tries to recall which of Curry and Escher had the value nondeterminism
+02:39:57 <lortabac> ski: the Curry tutorial mentions functions with non-deterministic output
+02:40:54 <lortabac> anyway, I think I'll start with Prolog, since it's the most "mainstream" one
+02:42:18 <ski> lortabac : there's a ##prolog channel, fyi
+02:42:27 <lortabac> thanks
+02:42:52 <ski> lortabac : some textbook could also be handy. though there are some tutorials as well
+02:42:57 <lortabac> the hard part is going to be to convince my boss that the whole team needs to learn Prolog :D
+02:43:50 <oni-on-ion> cocreature, see if you can get a dump from the compiler =) 
+02:43:52 <lortabac> yes, I tend to learn more quickly from books
+02:45:19 <ski> lortabac : you can try "Learn Prolog Now!" by Patrick Blackburn,Johan Bos,Kristina Striegnitz at <http://www.learnprolognow.org/>, for the basics, e.g.
+02:45:34 <lortabac> thanks
+02:48:10 <ski> "Programming in Prolog" by W. F. Clocksin,C. S. Mellish is a classic introductory textbook
+02:49:57 <ski> "Prolog: Programming for Artificial Intelligence" by Ivan Bratko
+02:50:15 <ski> "The Art of Prolog" by Leon Sterling,Ehud Shapiro
+02:51:07 <ski> "Logic, Programming and Prolog" by Ulf Nilsson,Jan Maluszynski at <https://www.ida.liu.se/~ulfni53/lpp/index.html>
+02:52:41 <ski> "prolog :- tutorial." by John R. Fisher at <https://www.cpp.edu/~jrfisher/www/prolog_tutorial/pt_framer.html>
+02:53:07 <lortabac> is gprolog a good interpreter?
+02:53:17 <ski> it's ok, but a bit bare bones
+02:53:34 <ski> SWI is also nicer for newbies, having better debugging facilities
+02:55:20 <bahamas> is the string used here checked at compile or at runtime? https://github.com/tweag/inline-java/blob/494a37a9956eb1ed47dcf3706799e2dbf0252e13/jvm/src/Language/Java.hs#L560
+02:55:30 <bahamas> I'm talking about "java.lang.Boolean"
+02:56:02 <gentauro> inline Java ... from Haskell? Why?
+02:56:16 <bahamas> gentauro: running Haskell on Spark
+02:56:54 <lortabac> bahamas: it looks like a Symbol
+02:57:01 <ski> "Prolog Books & Tutorials" by Amzi! Prolog at <https://www.amzi.com/articles/prolog_books_tutorials.htm>
+02:57:10 <bahamas> lortabac: yes, it's a Symbol. how do they work?
+02:57:13 <ski> lortabac : i could add more, but i think i'll stop, here
+02:57:19 <lortabac> bahamas: it's a type-level string
+02:57:56 <gentauro> bahamas: ahhh
+02:58:13 <bahamas> lortabac: ok, so I'm assuming that it means it's checked at compile time? I no nothing about type-level strings, except I've encountered the term before
+02:58:47 <lortabac> bahamas: 'Class is a promoted constructor (a constructor used a type) and the Symbol is the argument of that constructor
+02:58:55 <lortabac> *used as a type
+02:59:39 <__monty__> gentauro: Why not? A significant amount of software's written in java. No reason not to be able to leverage that.
+02:59:45 <bahamas> basically, this package allows you to interop with Java from Haskell. the problem that I'm trying to solve right now is that I need to make a Haskell type (a record) available in Java land. if anyone has any idea how to do that, that'd be great
+02:59:49 <alp> bahamas, this is used to "automate" (make nicer) marshalling
+02:59:58 <lortabac> bahamas: it's not a statically-checked string, it's really a type, but it has kind Symbol
+03:00:15 <alp> so it is all at compile time
+03:00:37 <alp> and reify/reflect let you go between the haskell values and the corresponding Java ones, where their nature is described by those 'Class "foo", 'Array (...), etc
+03:00:58 <bahamas> alp: so how does the compiler know that "java.lang.Boolean" is a valid path to a Java class?
+03:01:03 <ski> lortabac : anyway. i think learning about logic programming, sooner or later, will make you a more well-rounded programmer, anyway
+03:01:19 <ski> s/, anyway//
+03:01:38 <alp> bahamas, it doesn't
+03:01:39 <bahamas> alp: I kind of understand those parts. I just don't know how to make my `Session` type reify-able and reflect-able
+03:01:59 <alp> if you write java.lang.Buulean, then you'd get a runtime crash
+03:02:09 <bahamas> aha. so it's checked at runtime
+03:02:16 <alp> aaaah, checked in that sense
+03:02:20 <lortabac> ski: yes, it's good to learn even if we end up choosing a different solution to the current problem
+03:02:26 <alp> yes, we don't talk to the JVM while we're compiling Haskell code
+03:03:27 <alp> the JVM's API works in such a way that to do anything with this class, we have to take that string, lookup the corresponding Class object and instantiate it or call one of its methods or ... with the JVM's API,
+03:04:02 <alp> there are various issues with the idea of checking it all at compile time
+03:04:46 <bahamas> alp: that makes sense. what I'm afraid is that I'll have to define a Java class that corresponds to my `Session` Haskell type. then I would refer to that Java class from Haskell. I'd rather avoid that, because the Haskell record is huge. what do you think?
+03:05:16 <bahamas> is there a way to avoid this duplication?
+03:07:06 <alp> bahamas, do you really need to access/tweak Session values from Java?
+03:07:36 <sm> I want to pattern match, but share code between two or more patterns.. can you think of a standard idiom for this ?
+03:08:06 <sm> (other than defining a function ?)
+03:08:21 <Taneb> sm: sadly there's no super nice way to do that in standard or GHC Haskell as it exists
+03:08:23 <cocreature> what’s wrong with defining a function?
+03:08:26 <ski> sm : unfortunately Haskell doesn't (currently) have disjunctive / "or" patterns
+03:09:58 <bahamas> alp: I want to read a text file that contains JSON. then I need to decode that JSON and do some processing on it. this is the part that I want to do in Haskell and for that I need to be able to decode the json to `Session`
+03:11:05 <sm> ah, drat
+03:11:54 <sm> it's a small amount of code. I'll try a function
+03:12:17 <sm> I wanted to keep the visual similarity between cases
+03:12:19 * ski . o O ( join points )
+03:12:21 <__monty__> Why does the encode function here take String rather than ByteString and how do I make sure a regular haskell String is UTF-8 encoded? Isn't String a list of UTF-16 Chars? http://hackage.haskell.org/package/mime-0.4.0.2/docs/Codec-MIME-QuotedPrintable.html
+03:12:33 <alp> bahamas, alright, let me take a step back. what are those reify/reflect used for? well, Spark is controlling everything, it's even bringing up our RTS. it also puts its hands on the data and gives it to Haskell. and that's when we use reify/reflect. whenever it hands us Java stuffs, sparkle reifies that Java value as a Haskell one before giving it to the function we're mapping/folding/whatever with. once we've got a result, we need to 
+03:12:33 <alp> give it to Spark, and we use reflect for that.
+03:13:36 <ski> sm : it's a reasonable thing to ask for. e.g. O'Caml has it. but see <https://github.com/ghc-proposals/ghc-proposals/pull/43>
+03:13:47 <alp> bahamas, if Haskell is the only one who's actually going to do useful things with the data, you definitely don't have to map your Session type to a similar Java class. you can just map it to a java bytearray or something along those lines, and use binary/json/cbor/whatever encoding/decoding to reflect and reify respectively.
+03:14:33 <alp> those Session values would then travel between nodes and runtimes as bytestrings.
+03:14:44 <ski> sm : <http://rosettacode.org/wiki/Pattern_matching#OCaml> is an example (red-black tree rebalancing) of disjunctive patterns put to good use, in O'Caml
+03:15:25 <bahamas> alp: you mean in the implementation of Reify and Reflect for my `Session` type, I should convert the record to the java bytearray, right?
+03:15:44 <bahamas> I mean just in `Reify`
+03:16:04 <bahamas> a, I mean Reflect. I keep confusing the two
+03:19:31 <sm> ski: thanks, yes it would be super handy once in a while. Extracting a function from this mess is not so easy
+03:19:45 <sm> and that's the most upvotes I've ever seen
+03:22:20 <ski> (upvotes ?)
+03:23:45 <sm> yes, on that ghc proposal PR
+03:25:04 * sm tries to deduplicate https://l.termbin.com/xa3m L16-22
+03:25:37 <ski> ok
+03:26:17 <adius> Has anyone here tried how far you can push Python's Type System? Seems pretty exhaustive by now. They even have Newtypes and constrained type variables: https://docs.python.org/3/library/typing.html
+03:26:29 <SL3> who's on
+03:28:06 <SL3> adius you proelem in your brian..
+03:28:17 <SL3> hy agender
+03:28:42 <SL3> hy /ralejs
+03:28:45 <adius> SL3: What? ^^
+03:29:24 <SL3> <adius> no no i jokes
+03:30:30 <SL3> how to make money in internet..?
+03:31:40 <SL3> aah come on.. 
+03:33:11 <SL3> who's know conflic in indonesia is very big
+03:33:26 <f-a> I see that :reload-ing in `cabal new-repl test` is faster than `cabal new-run test`. Why is it so? 
+03:33:51 <alp> bahamas, well you can convert to ByteString and then call reflect on that, to achieve this, but yes, the idea is to convert Haskell Session values to some format that Java can't make sense of (but doesn't have to)
+03:34:50 <alp> you don't necessarily have to mirror the structure of your Haskell values in Java/Scala. you only have to do it when you want the values to travel and be stored as a Java-friendly representation instead of raw bytearrays
+03:35:04 <SL3> i indonesian poeple, 50% areas indonesian no akses, and Whatsapp is blocked
+03:35:42 <ski> SL3, do you have any Haskell-related questions or comments ?
+03:38:24 <SL3> yes, haskell is verry cooll..
+03:38:36 <bahamas> alp: there's one thing I don't understand. my Haskell function that expects a ByteString and decodes it to a Session would still need the representation of Session in Java. how would I deal with this? basically, the relevant line in my code looks like this now: decodedSessions <- RDD.map (closure (static (decodeStrict . encodeUtf8))) rdd'
+03:39:01 <SL3> wait, who are build haskell ski
+03:39:05 <bahamas> `closure` compiles the Haskell code to Java and sends it to Spark nodes for execution
+03:40:38 <alp> not quite
+03:40:58 <alp> (I co-authored sparkle, jni, jvm btw, to give you a bit of context)
+03:41:48 <alp> but let's keep 'closure' for later
+03:41:55 <ski> @wiki History of Haskell
+03:41:55 <lambdabot> https://wiki.haskell.org/History_of_Haskell
+03:41:58 <ski> SL3 ^
+03:42:12 <bahamas> alp: sure. I admit I don't understand very well how everything works
+03:42:46 <alp> bahamas, so... you've got textual JSON data in each entry of your RDD?
+03:43:30 <alp> I'll run you through how that line is executed, that should help a lot. just need to be sure what type rdd' has.
+03:48:33 <bahamas> alp: sure. RDD I believe refers to Resilient Distributed Datasets
+03:48:55 <bahamas> https://spark.apache.org/docs/latest/rdd-programming-guide.html#resilient-distributed-datasets-rdds
+03:49:56 <alp> bahamas, no I mean what does it contain, you mentionned JSON earlier. each entry is a JSON document?
+03:50:41 <bahamas> alp: it contains Text https://github.com/tweag/sparkle/blob/101ec44ebd826e4917fadb26e07c98079146af8c/src/Control/Distributed/Spark/Context.hs#L93
+03:51:08 <bahamas> yes, the expectation is that each line contains a JSON document
+03:51:13 <alp> ok, thanks
+03:51:31 <alp> soooo, your line: RDD.map (closure (static (decodeStrict . encodeUtf8))) rdd'
+03:53:47 <alp> the first thing that happens is that there's this function, 'decodeStrict . encodeutf8', that we turn into a static pointer and then a Closure. the details aren't super relevant, but the gist of the idea is that a static pointer is a portable reference to a haskell value, that you can send over the wire etc. the RTS has a "static pointer table", where we collect those references and we can get back the original value by looking it up in 
+03:53:47 <alp> the SPT.
+03:53:55 <avn_> Folks, any ideas -- why `stack build` and `stack test` rebuild all my modules (not depencies) from beginning? How I can figure out, what options differs, and how to avoid extra rebuilds?
+03:54:41 <alp> Closure wraps that in a way that lets us partially apply functions and what not, and can be serialized (binary) by just serializing the "key" of the static pointer + serializing arguments we partially apply to
+03:54:58 <alp> (this ends up being represented as a bytearray in Java)
+03:55:09 <alp> anyway, that's how we "send" Haskell functions to spark
+03:55:44 <sm> avn, good question, that's normal but I'm not sure why
+03:56:35 <avn_> sm: pretty annoying, when I have a lot of modules in project
+03:57:28 <sm> I compile unit tests into the regular build so I don't have to do stack test, and I can run them in ghci/with ghcid. Much faster
+03:58:06 <merijn> f-a: Dunno if anyone answered: GHCI when reloading compiles to bytecode and runs interpreted so that 1) skips many optimisations and 2) skips linking and compilation which are also slow
+03:59:11 <alp> bahamas, now, the 'map' call. sparkle will disguise our function as something that implements the appropriate Java interface. except that the argument and return types are the Java ones, so sparkle will make sure to convert the Java value to a Haskell one before calling your Haskell function, and that's another instance of reify/reflect coming into play. we reify the Java values for the arguments to get Haskell ones, call the Haskell 
+03:59:12 <alp> function, reflect the result.
+04:01:25 <bahamas> alp: right. and for that, my Haskell `Session` needs to have Reify and Reflect instances
+04:02:32 <alp> exactly. but the lesson from this discussion is that Interp Session doesn't have to be something that mirrors Session, it can be a binary blob that contains a (binary/whatever) encoded Session.
+04:05:43 <alp> bahamas, to figure out what gets encoded in what direction from the type sigs, lookout for Reify/Reflect in those. e.g: https://github.com/tweag/sparkle/blob/101ec44ebd826e4917fadb26e07c98079146af8c/src/Control/Distributed/Spark/RDD.hs#L84 shows that the 'a' type needs to be convertible from Java to Haskell (Reify), while it's the opposite for 'b'. now when you'll see those things, you can picture the control flow I outlined above to 
+04:05:43 <alp> make sense of them and understand what's going on.
+04:08:32 <alp> bahamas, regarding 'closure', I recommend watching https://skillsmatter.com/skillscasts/10632-static-pointers-closures-and-polymorphism (requires an account unfortunately... but it's a great talk)
+04:12:13 <absence> is an unfold/anamorphism where the seed is a data structure and the coalgebra unconses from it enough of a "concept" to have a name?
+04:12:41 <bahamas> alp: I'm confused about this part of what you said: "Interp Session doesn't have to be something that mirrors Session, it can be a binary blob that contains a
+04:12:44 <bahamas>              (binary/whatever) encoded Session"
+04:12:53 <bahamas> I'm trying to figure out how to express my confusion
+04:13:20 * hackage magic-wormhole 0.3.0 - Interact with Magic Wormhole  https://hackage.haskell.org/package/magic-wormhole-0.3.0 (rkrishnan)
+04:14:34 <alp> bahamas, perhaps you can just tell me what bothers you with that sentence, to begin =)
+04:14:50 * hackage sgd 0.8.0.0 - Stochastic gradient descent library  https://hackage.haskell.org/package/sgd-0.8.0.0 (JakubWaszczuk)
+04:16:16 <bahamas> alp: ok. if we're talking in terms of implementation, do I need to do anything else besides defining Reify and Reflect instances for my Session type?
+04:16:36 <bahamas> I guess maybe also define an Implementation instance
+04:16:46 <alp> Interp, yes
+04:16:48 <bahamas> err, Interpretation
+04:17:02 <alp> type instance Interp Session = <java representation that you want>
+04:17:09 <alp> Reify, Reflect, and you're good to go
+04:17:36 <bahamas> alp: ok, then I'm confused about this <java representation that I want>
+04:17:49 <alp> actually, you don't necessarily have to define both. if you're only going to need the conversion in one direction, you can just define that direction.
+04:18:03 <alp> ok, let's look at your options for Interp then
+04:18:06 <bahamas> my Session type is a data Session = Session <big_record_here>
+04:18:34 <bahamas> alp: I think I'll need both, because after the processing, I end up again with a Session that I want to encode to JSON
+04:20:07 <alp> bahamas, https://www.stackage.org/haddock/lts-12.26/jni-0.6.1/Foreign-JNI-Types.html#t:JType
+04:20:32 <alp> <java representation that you want> must be one of those
+04:21:43 <bahamas> alp: ok. as far as I understand a class maps to a Haskell record
+04:22:10 <alp> well, there's no rule
+04:22:32 <SL3> make money by amazone.. how guys..
+04:22:51 <alp> except that Reify really must be converting from <java representation> to your Haskell value, and that Reflect must do the opposite.
+04:23:19 <alp> if you say your thing maps to a primitive machine integer but your Reify instance creates an IntFactory, things will go horribly wrong.
+04:23:29 <alp> err, Reflect instance*
+04:24:49 <SL3> i back later guys..
+04:25:35 <bahamas> alp: ok, I think I understand what you're saying. I need to find an intermediate form of representing my JSON. I have to express that as one of the constructors provided by JType. then I need a way from that JType to my Session record
+04:25:50 * hackage sgd 0.8.0.1 - Stochastic gradient descent library  https://hackage.haskell.org/package/sgd-0.8.0.1 (JakubWaszczuk)
+04:26:16 <alp> hmm
+04:27:24 <alp> if I'm not mistaken, things will go as follows for any given Text of your RDD: Spark hands it to us as a Java reference to some instance of a class, you turn it into Text, call your function, end up with a Session value, and then you marshal it to whatever you decide
+04:27:39 <alp> and that <whatever you decide> is Interp Session
+04:27:50 * hackage sgd 0.8.0.2 - Stochastic gradient descent library  https://hackage.haskell.org/package/sgd-0.8.0.2 (JakubWaszczuk)
+04:28:10 <bahamas> alp: so Sparkle should only require an instance for Reify, no?
+04:28:51 <alp> Reflect, in this case, yes.
+04:29:05 <alp> and if you leave those Session values alone afterwards, you'll never need Reify
+04:29:31 <alp> but if you need to read them back and transform them or compute something with them, you'll see a 'Reify Session' constraint show up :)
+04:31:17 <alp> so anyway, what I'm suggesting is more or less: type instance Interp Session = Interp LBS.ByteString; instance Reify Session where reify x = decode <$> reify x; instance Reflect Session where reflect x = reflect (encode x);   where encode/decode are from say the 'binary' package.
+04:32:09 <alp> so you go from Session to lazy bytestring (encode) to java bytearray (reflect for ByteString), and vice versa
+04:43:25 <absence> :t \f -> unfoldr (f . uncons) -- does this kind of thing have a name?
+04:43:26 <lambdabot> (Maybe (a1, [a1]) -> Maybe (a2, [a1])) -> [a1] -> [a2]
+04:48:58 <Solonarv> "refold", perhaps?
+04:52:13 <bahamas> alp: I tried the exact thing you wrote. I assume you meant instance Interpretation Session where type Interp Session = Interp LBS.ByteString. trying your version made the compiler complain that the associated type must be in a class instance
+04:57:53 <ski> @type \f -> ana (f . out)  -- should really use `Nu' ..
+04:57:53 <bahamas> alp: anyway, thank you for your help. I'll try to find figure it out from here
+04:57:54 <lambdabot> Functor f1 => (f2 (Mu f2) -> f1 (Mu f2)) -> Mu f2 -> Mu f1
+04:59:07 <absence> Solonarv: recursion-schemes uses refold as an alias for hylomorphisms, but otherwise it would've been a nice name
+04:59:30 <Solonarv> oh yeah, I didn't mean exactly 'refold' from recursion-schemes
+05:01:30 <absence> i figured as much, but i don't like to use the same names for different (somewhat established) meanings
+05:35:43 <alp> bahamas, sorry, had to leave for a while. maybe the 'jvm' package has changed since I last used it, so it indeed is possible that Interp is not a standalone type family anymore.
+06:21:50 * hackage magic-wormhole 0.3.1 - Interact with Magic Wormhole  https://hackage.haskell.org/package/magic-wormhole-0.3.1 (rkrishnan)
+06:38:43 <dminuoso> An adjunction L -| R is [...] given by a natural isomorphism of hom-functors ⌜C^op x D -> Set⌝: ⌜Hom_D(L(-), -) ~= Hom_C(-, R(-))⌝
+06:38:54 <dminuoso> Question: What's with the hom functor having the domain ⌜C^op x D⌝?
+06:39:50 <dminuoso> This looks more like a profunctor, since I thought a hom functor on a locally small category C would be ⌜C^op x C -> Set⌝.
+06:47:38 <ski> dminuoso : it's a composition of a `Hom', in one or the other argument, with a functor
+06:49:43 <Solonarv> the isomorphism is between Λ c d -> Hom_D(L(c), d) and Λ c d -> Hom_C(c, R(d))
+06:50:30 <dminuoso> ski: Let me ponder about that for a moment.
+06:51:48 <mniip> dminuoso, Hom_D(L(-), -) is syntactic sugar for  Hom_D . (L x 1)
+06:52:02 <dminuoso> Solonarv: Ive raised this topic a while ago already with no success on my end. For me a natural isomorphism is a nat transformation between two functors - you are talking about hom sets.
+06:52:02 <dminuoso> Solonarv: Oh wait.
+06:52:02 <dminuoso> Solonarv: So in the sense of Λ c d -> Hom_D(L(c), d)  being a difunctor?
+06:52:07 <ski> well, `L' on the right should possibly be `L^op'
+06:52:13 <mniip> or rather, Hom_D . (L^op x 1)
+06:52:14 <mniip> yes
+06:52:14 <Solonarv> dminuoso: yes
+06:52:33 <ski> dminuoso : yes
+06:52:45 <mniip> L : C -> D,  L^op : C^op -> D^op,  L^op x 1 : C^op x D -> D^op x D
+06:52:50 <mniip> Hom_D : D^op x D -> Set
+06:53:47 <Solonarv> the adjunction is a natural isomorphism between Hom-plus-D and Hom-plus-C; a natural isomorphism is just a pair of natural transformations whose composition is identity (IIRC)
+06:54:22 <dminuoso> Solonarv: I learned a natural isomorphism as a natural transformation whose components are isomorphisms.
+06:54:27 <dminuoso> (Is that equivalent?)
+06:54:46 <Solonarv> I was not being precise, your definition is also good
+06:55:01 <mniip> it is equivalent
+06:55:06 <Solonarv> \o/
+06:55:36 <Solonarv> % type NatTrans2 f g = forall x y. f x y -> g x y
+06:55:46 <yahb> Solonarv: 
+06:55:56 <mniip> if a nat trans admits a two sided inverse, then every component admits a two sided inverse
+06:56:20 <mniip> if every component of a nat trans admits a two sided inverse, then the collection of all the inverses is a transformation that is natural
+06:56:34 <mniip> and componentwise composition would yield identities
+06:56:48 <dminuoso> Solonarv: I suppose in part Im not comfortable with the idea of NatTrans2 yet (that is natural transformations of difunctors) - perhaps I have on way to bake that into some definition or diagrams.
+06:57:05 <dminuoso> *perhaps I have to bake that..
+06:57:08 <ski> (oh, yahb is back)
+06:57:24 <Solonarv> dminuoso: well, you can just view it as a plain old functor from a product category
+06:57:39 <bahamas> alp: it's not. it's defined in the Intepretation typeclass
+06:57:40 <zincy_> Here is a minimal repro of something that is confusing me with fixed length vectors https://repl.it/repls/NotedFrozenCheckpoint
+06:57:45 <dminuoso> Solonarv: Ah
+06:57:55 <zincy_> Why doesn't it expect build to always increment the Vec length?
+06:57:58 <Solonarv> that's why it's written C^op × D -> Set
+06:58:21 <dminuoso> Solonarv: I suppose it was not clear which two functors that would be, but you made that clear for me. :)
+06:59:08 <ski> % type Swap '(a,b) = '(b,a)
+06:59:09 <yahb> ski: ; <interactive>:5:11: error:; Unexpected type '(a, b); In the type declaration for `Swap'; A type declaration should have form; type Swap a = ...
+06:59:36 <Solonarv> ski: you can't pattern match in type synonyms
+07:00:19 <Solonarv> % type family Swap ab = ba | ba -> ab where Swap '(a, b) = '(b, a)
+07:00:19 <yahb> Solonarv: ; <interactive>:6:28: error:; * Illegal injectivity annotation; Use TypeFamilyDependencies to allow this; * In the type family declaration for `Swap'
+07:00:28 <Solonarv> % :set -XTypeFamilyDependencies
+07:00:28 <yahb> Solonarv: 
+07:00:29 <Solonarv> % type family Swap ab = ba | ba -> ab where Swap '(a, b) = '(b, a)
+07:00:30 <yahb> Solonarv: 
+07:00:49 <dminuoso> fundeps on type families? :o
+07:01:21 <ski> Solonarv : yea, perhaps you should be able to match on constructors coming from `DataKinds'
+07:01:23 <Solonarv> not a fundep, just an injectivity annotation
+07:01:46 <dminuoso> Solonarv: Ah fair. Back to arrows. :)
+07:02:13 <ski> Solonarv : more or less the same thing
+07:02:30 <Solonarv> technically yes
+07:02:46 <Solonarv> but type family injectivity annotations are much more limited than fundeps
+07:03:06 <Solonarv> you can't write 'type family Add a b = c | c b -> a, c a -> b' for example
+07:07:20 <dminuoso> mniip: What is the x acting on functors? Is that the product the category of Functors is equipped with?
+07:07:38 <mniip> I mean, x is a bifunctor on Cat
+07:07:47 <mniip> it takes pairs of objects to an object
+07:07:53 <mniip> but also pairs of morphisms to a morphism
+07:08:11 <dminuoso> Ahh
+07:10:24 <mniip> one of the properties of adjunctions is that if for some functor G, you have for each object X, a universal arrow X -> G(FX), where F is some object mapping, then F can uniquely be upgraded to a functor that is adjoint to G
+07:10:53 <mniip> limits are universal arrows to/from the diagonal functor
+07:11:15 <mniip> thus if your category has all instances of a particular kind of limit, then that limit is uniquely upgradable to a functor
+07:12:40 <mniip> a really elementary way to verify this is to consider AxB as a candidate for the product of C and D
+07:13:10 <mniip> the morphism mapping of the functor turns out to be entirely made out of mediating morphisms like this
+07:24:15 <Eite> In the PGSimple lib there is a ConnectInfo, and it derives Generic.   Can I now use in my own application StandaloneDeriving to derive aeson’s  ToJSON and FromJSON?
+07:31:21 * hackage magic-wormhole 0.3.2 - Interact with Magic Wormhole  https://hackage.haskell.org/package/magic-wormhole-0.3.2 (rkrishnan)
+07:34:52 <zincy_> Expected type: Vec n1 s1
+07:34:52 <zincy_>         Actual type: Vec (NatPlus ('S 'Z) n0) s1
+07:36:14 <zincy_> Surely NatPlus ('S 'Z) n0 would be interchangeable with a type variable n1?
+07:36:50 <bor0> only if you have that 1 + n0 = n1, you can rewrite. is that Haskell?
+07:37:05 <zincy_> Yeah
+07:37:47 <zincy_> Would a type equality constraint help achieve that?
+07:38:03 <kuribas> could you run a backtracking logic application in the typesystem in haskell (only one result)?
+07:38:15 <zincy_> code repost - https://repl.it/repls/NotedFrozenCheckpoint
+07:40:41 <ski> kuribas : no backtracking
+07:40:52 <ski> (if you're thinking of type classes)
+07:41:14 <kuribas> yeah
+07:41:16 <ski> if you're talking about lists in the types, i suppose that could be possible
+07:41:44 <ski> that's one of the main differences between predicates/relations in LP, and type classes
+07:42:21 <ski> (btw, the core Oz language doesn't have backtracking either (but it does have logic/dataflow variables). but they add it on later)
+07:42:55 <ski> another analogy between LP and types in FP is that you can think of a (parameterized) `data' type as a predicate/relation
+07:43:24 <ski> (works especially for GADTs, but sometimes even for ordinary `data' types. though you'll often need existentials)
+07:43:49 <ski> but, of course, you don't get any automatic search, you have to write it yourself, if you want it
+07:44:28 <ski> in Twelf, defining a predicate/relation, and defining a data type, is basically the same thing. and it has search (including backtracking)
+07:44:49 <ski> (it even has some kind of primitive modes, iirc)
+07:45:31 <ski> (modes are a big thing in Mercury. you can see FDs on type classes as a weaker version of modes (together with determinisms))
+07:54:50 * hackage lapack 0.3.0.1 - Numerical Linear Algebra using LAPACK  https://hackage.haskell.org/package/lapack-0.3.0.1 (HenningThielemann)
+07:56:53 <bor0> zincy_, I'd assume so
+08:09:09 <Notprobleming> Hello. I wrote a blogsite about how could we easing on our lifes and supporting our well-being, not fluent english but for get the essence with it, it is allright. Available for you on www.howtoprotect.biz, it is completely free. Have a pleasant days to you.
+08:10:07 --- mode: ChanServ set +q *!*@gateway/web/freenode/ip.171.96.187.12
+08:20:50 * hackage linear-circuit 0.1.0.1 - Compute resistance of linear electrical circuits  https://hackage.haskell.org/package/linear-circuit-0.1.0.1 (HenningThielemann)
+08:22:47 --- mode: ChanServ set -q *!*@gateway/web/freenode/ip.171.96.187.12
+08:44:50 * hackage pandoc-stylefrommeta 0.2.1.0 - Pandoc filter to customize links, images and paragraphs  https://hackage.haskell.org/package/pandoc-stylefrommeta-0.2.1.0 (lyokha)
+08:59:21 * hackage pandoc-stylefrommeta 0.2.1.1 - Pandoc filter to customize links, images and paragraphs  https://hackage.haskell.org/package/pandoc-stylefrommeta-0.2.1.1 (lyokha)
+09:08:51 * hackage http-api-data 0.4.1 - Converting to/from HTTP API data like URL pieces, headers and query parameters.  https://hackage.haskell.org/package/http-api-data-0.4.1 (phadej)
+09:13:21 * hackage resistor-cube 0.0.1.1 - Compute total resistance of a cube of resistors  https://hackage.haskell.org/package/resistor-cube-0.0.1.1 (HenningThielemann)
+09:13:35 <bor0> zincy_, I found https://hackage.haskell.org/package/clash-prelude-0.3/src/src/CLaSH/Sized/Vector.hs to be using `unsafeCoerce` a lot. maybe you can do that for `build` (not sure how good of an idea it is tho)
+09:13:48 <zincy_> bor0: Thanks
+09:14:09 <Berengal> Is corecursion the same as recursion in a partial language like haskell?
+09:14:29 <zincy_> I think the key could be existential quantification of the n in Vec n a that build is returning
+09:15:20 <zincy_> I am going to learn about existentials
+09:15:29 <zincy_> but in any case I probably shouldn
+09:15:52 <zincy_> handroll my own vectors once I have understood them
+09:16:16 <bor0> in Idris you'd just use `rewrite`. not sure about Haskell
+09:16:42 <MarcelineVQ> Berengal: not as I understand it, but codata is the same as data in haskel
+09:18:26 <Berengal> MarcelineVQ: What is the difference then?
+09:18:46 <lyxia> I'm not sure the word is even technically defined
+09:20:40 <lyxia> although it still connotes a shift of point of view from data to codata
+09:21:06 <Berengal> I think I'm mixing the idea of recursion with the idea of self-referencing
+09:21:24 <Berengal> But I'm not sure if there is a difference in non-total systems
+09:22:27 <lyxia> I consider recursion and self-referentiality as the same
+09:22:55 <Berengal> Okay, but wikipedia lists the classic fibs list as an example of corecursion
+09:23:44 <lyxia> ok so they're using a different meaning of recursion
+09:23:54 <Berengal> And in a total language it would definitely be a piece of codata
+09:24:28 <Berengal> That's what I'm trying to get at, if the difference between corecursion and recursion is meaningful in haskell
+09:24:39 <bolverkr> I see in hoogle that the Identity functor is meant to be a monoid, but what is mempty for it?
+09:24:49 <flebron> Hi folks. Say I have a list l :: [Int], and a function f :: Int -> Maybe Char. I'd like to have this: [(v, i) | i <- l, Just v <- f i], where the second "<-" would just not match if f i is Nothing. I can of course use `let` and isJust and so on, but is there a nice way to do this?
+09:25:29 <Berengal> bolverkr: it's a monoid if the type it's parameterized over is a monoid
+09:25:34 <flebron> (I can also Just v <- [f i], but that feels ugh)
+09:27:13 <Berengal> flebron: you want to skip the Nothings?
+09:27:19 <bolverkr> mempty :: Identity (Sum Integer)
+09:27:21 <Berengal> If so there's maybeToList
+09:29:22 <bolverkr> > mempty :: Identity (Sum Integer)
+09:29:24 <lambdabot>  Identity (Sum {getSum = 0})
+09:29:35 <bolverkr> interesting, thanks
+09:33:28 <MarcelineVQ> :t \f -> mapMaybe (\x -> (,) x <$> f x)
+09:33:30 <lambdabot> (t -> Maybe b) -> [t] -> [(t, b)]
+09:33:58 <MarcelineVQ> Oh I​ mixed up the order, you wanted (b,t) didn't you
+09:34:33 <Mo0O> Hi there, I'm trying to compile cabal 2.4.1.0 but it endswith the following error: http://sprunge.us/frGiBV
+09:35:05 <MarcelineVQ> :t \f -> mapMaybe (\x -> (,x) <$> f x) -- that's a little easier with TupleSections than otherwise
+09:35:06 <lambdabot> (t1 -> Maybe t2) -> [t1] -> [(t2, t1)]
+09:36:51 <restrictedchoice> is there a set implementation that can support only integers with O(1) insert and membership checks?
+09:36:58 <c_wraith> Mo0O, it's trying to build against an old version of the Cabal library.
+09:38:02 <c_wraith> Mo0O, not sure exactly what to do to fix it, but updates to the Cabal library and cabal-install binary typically go together.
+09:38:06 <Mo0O> c_wraith: I don't understand why it is using cabal 2.2.0.1
+09:38:33 <lyxia> Berengal: My view is that the notions of recursion and corecursion are agnostic to the language employed, you can talk about recursive and corecursive functions in Haskell, but the language itself doesn't care about that.
+09:39:19 <Mo0O> c_wraith: here is my build file: http://sprunge.us/5gN5TI it's for Alpine linux but it's quite simple to read
+09:39:20 <c_wraith> restrictedchoice, technically no, since Integer is unbounded. impossible to have O(1) algorithms when you need to consider O(lg n) bits.
+09:39:49 <lyxia> Berengal: that's also why it makes sense for the wikipedia article on corecursion to show examples in Python.
+09:40:23 <restrictedchoice> c_wraith: if i know my membership in the set is bounded between 1 and some n, is this possible?
+09:41:26 <c_wraith> restrictedchoice, whenever you put an upper bound in, everything becomes O(1).
+09:42:33 <restrictedchoice> c_wraith: in theory, yes. is there a library / data structure available with these performance characteristics in practice? i'm seeing O(log n) inserts and member here https://hackage.haskell.org/package/containers-0.6.0.1/docs/Data-Set.html
+09:42:39 <restrictedchoice> (sorry, i'm new to haskell)
+09:43:18 <c_wraith> restrictedchoice, in general use that or IntSet until profiling shows it is a problem.
+09:44:24 <restrictedchoice> c_wraith: cool, i did switch to using IntSet. i'm playing around with a problem where i'm dealing with things on the order of 10^8 membership / insertion checks and was seeing degraded performance from, say, n = 1,000,000 to n = 10,000,000
+09:44:35 <restrictedchoice> c_wraith: oh also my random shuffle also apparently blows the stack :)
+09:44:58 <c_wraith> stack use is usually the result of excess laziness.
+09:45:25 <c_wraith> ghc Haskell, at least, uses the stack a bit differently.
+09:45:27 <restrictedchoice> mind if a paste my current "solution"?
+09:45:28 <Solonarv> flebron: [(v, i) | i <- l, Just v <- f i] actually works and does exactly what you said you wanted
+09:45:45 <zincy_> Does the use of RankNTypes effectively enable type parameters to be applied at runtime instead of compile time?
+09:46:17 <zincy_> hmm doesn't sound right
+09:46:21 <lyxia> no
+09:46:22 <restrictedchoice> c_wraith: i'm seeing "reasonable" performance for n = 1,000,000 with this https://pastebin.com/R87ZzUcH
+09:46:23 <c_wraith> zincy_, it can delay instance selection to runtime, in some cases.
+09:46:29 <restrictedchoice> but i'm block the stack on 10,000,000
+09:46:32 <restrictedchoice> *blowing
+09:46:52 <restrictedchoice> i stole the shuffle from the haskell wiki
+09:46:58 <flebron> Solonarv: https://pastebin.com/r3GSDXB5
+09:47:26 <flebron> (If f returned a [Maybe Char], then sure, but it returns a Maybe Char.)
+09:47:29 <iqubic> What's going on in Haskell land right now?
+09:47:32 <Solonarv> oh right, I misread
+09:47:35 <Berengal> restrictedchoice: first thing I noticed is you should use forM_ not forM
+09:47:46 <flebron> MarcelineVQ: That works. Do you think that's nicer than Just v <- [f i]?
+09:47:47 <restrictedchoice> Berengal: blast you haskell wiki
+09:47:53 <Solonarv> a slightly hacky solution is to do 'Just v <- [f i]' instead
+09:47:57 <jgt> iqubic: all the things that are good
+09:48:04 <iqubic> I don't think that will actually work.
+09:48:19 <tty1> Is it just because I'm a noob or is Haskells ability to do polymorphism more limited than  in OO?
+09:48:33 <MarcelineVQ> flebron: idk really, depends what you want to convey, does mapMaybe add more meaning than Just v <- [f i] for you?
+09:48:35 <Berengal> restrictedchoice: basically you're building up a list while sorting the array, then returning the list and forgetting about the array
+09:48:37 <iqubic> I don't see how 'Just v <- [f i]' will ever compile.
+09:48:48 <yushyin> tty1: do you like to explain what you mean?
+09:48:53 <c_wraith> restrictedchoice, foldr over the insert is the cause of the stack overflow. it creates a gigantic nested evaluation. use foldl' from Data.List instead
+09:48:57 <Solonarv> iqubic: why wouldn't it?
+09:49:03 <iqubic> tty1: Haskell has much better polymorphism. What are you trying to do?
+09:49:07 <flebron> iqubic: The <- in a list comprehension like that is the usual list one, and we pattern match.
+09:49:17 <iqubic> Oh, I see.
+09:49:28 <flebron> tty1: It helps if you see how typeclasses are implemented. It's the same as passing a vtable ptr in C++.
+09:49:41 <restrictedchoice> c_wraith, Berengal: thanks, much appreciated
+09:49:50 <jgt> flebron: where was the list comprehension? I'd expect to see a couple more square brackets and a pipe
+09:49:56 <iqubic> I didn't realize that this piece of code was inside a list comprehension.
+09:49:59 <jgt> sorry, no pipe
+09:50:06 <iqubic> Everything makes sense now.
+09:50:08 <flebron> > "I'd like to have this: [(v, i) | i <- l, Just v <- f i]"
+09:50:11 <lambdabot>  "I'd like to have this: [(v, i) | i <- l, Just v <- f i]"
+09:50:13 <jgt> actually yes, a pipe
+09:50:15 <tty1> Just trying to design a graph theory library, In traditional OO I'd have a baseclass called Graph with child classes that enforce restrictions like perhaps DirectedGraph.
+09:50:45 <tty1> I dont see any useful ways to extend the idea of a graph into subtypes
+09:51:02 <iqubic> Yeah, that's not how you design things in Haskell.
+09:51:36 <bor0> tty1, what's wrong with Haskell classes?
+09:51:39 <tty1> iqubic: yea im a noob to this, so im not sure what good haskell design could be equivelant to that
+09:51:42 <iqubic> I'm not the best person to explain Haskell design philosophies here.
+09:52:05 <tty1> bor0: I never said anything was wrong with them, huh?
+09:52:19 <Solonarv> bor0: haskell classes ≠ OO classes
+09:52:28 <flebron> tty1: You can have types be instances of these typeclasses, if you want. So class (Graph g) => DirectedGraph g where ...
+09:52:33 <bor0> Solonarv, I know :)
+09:52:46 <bor0> I meant exactly what flebron just said
+09:52:47 <flebron> But yes, designs in general do not survive language changes.
+09:53:29 <tty1> right
+09:53:34 <bor0> tty1, in Haskell the design usually relies on OOP's "interfaces" and function composition (e.g. calling foo(bar(z)))
+09:53:42 <flebron> A more Haskelly thing would be to have a newtype Directed, which takes a graph, and have an instance of Graph for DirectedGraph.
+09:53:51 <iqubic> tty1: I'd recommend making a typeclass like "class Graph a where ..." to define functionality that all graphs should have. Then you specialize with "class (Graph a) => DirectedGraph a where... "
+09:54:12 <iqubic> But honestly I think the newtype thing would be a better approach.
+09:54:43 <tty1> iqubic: right now i already have Graph defined but it is a `Data`
+09:55:13 <tty1> I have a sorta workable general definition for a Graph already
+09:55:26 <flebron> iqubic: If you want runtime polymorphism, you probably want typeclasses.
+09:55:39 <iqubic> flebron: How would you design a graph library in haskell?
+09:55:59 <iqubic> Using typeclasses here is the most practical thing.
+09:56:09 <flebron> Saying countNodes :: Graph g => g -> Int would, at implementation time, be similar to having an int countNodes(Graph* g) in C++.
+09:57:02 <iqubic> In fact, I just realized that a large chunk of code that I wrote yesterday could be rewritten with typeclasses.
+09:57:03 <flebron> iqubic: Never tried, but the two approaches you mentioned seem to be promising: Typeclasses with dependencies, or newtypes.
+09:57:22 <iqubic> How would the newtypes method work?
+09:57:33 <flebron> newtype Directed g = Directed g
+09:57:40 <iqubic> I was only mentioning newtypes because you brought them up.
+09:57:51 * hackage stratosphere 0.38.0 - EDSL for AWS CloudFormation  https://hackage.haskell.org/package/stratosphere-0.38.0 (jdreaver)
+09:57:54 <flebron> instance Graph (Directed g) where ....
+09:58:03 <iqubic> Right of course.
+09:58:33 <iqubic> Typeclasses are great. Just don't expect them to work like OOP classes.
+09:58:51 <flebron> I haven't really studied it much, but it would seem that a newtype is appropriate when the representation is identical, and it is only semantics that change. A typeclass gives you flexibility of representation as well.
+09:58:55 <tty1> hmmm typeclass is like an interface and Data is like an implementation... hmmm
+09:59:40 <flebron> A newtype would be something like struct S { T t; } in C++. You can make S inherit from a bunch of things that maybe even T inherits from, and even delegate to your T's implementations of those things. And there's no runtime cost, it's just bookkeeping.
+09:59:46 <iqubic> tty1: In general that is true. But I think comparing Haskell to any sort of OOP language is just going to make things harder in the long run.
+10:00:33 <tty1> iqubic: as long as it makes it easier in the short run I'll take it :)
+10:01:51 <flebron> Fun fact: When learning Haskell coming from C, I was so scared of recursion all my functions were of the form "f x y z = go (the, entire, state, of, a, for, loop, goes, here)   where go (...) = go (...)", and I'd change the state bit by bit :) I would say that was... maybe not the best way to learn Haskell.
+10:02:48 <iqubic> flebron: That is so not the way that Haskell is supposed to work.
+10:03:03 <flebron> factorial n = go (0, n, 1)  where go (i, n, k) | i == n = k  | otherwise = go (i + 1, n, k * i) haha.
+10:03:18 <iqubic> Oh lord, that looks horrid.
+10:03:33 <iqubic> also: factorial n = product [1..n]
+10:04:02 <Solonarv> not actually that terrible if you uncurry it, I think
+10:04:17 <iqubic> How would you uncurry it?
+10:04:33 <flebron> Yep. My university used Haskell as a way to level us all, regardless of whether you've been programming in some god-awful PHP or JS since you were 10, or this was your first programming thing, you almost surely were not comfortable with Haskell.
+10:05:28 <iqubic> flebron: That's actually a really cool way to do a programming cource.
+10:05:36 <iqubic> *course
+10:06:16 <davean> iqubic: my school requires us to work in C, scheme, prolog, ML, and Haskell.
+10:06:32 <Solonarv> uncurry = write 'go i n k' instead of 'go (i, n, k)'
+10:06:32 <iqubic> I don't know prolog.
+10:06:39 <davean> iqubic: most of us didn't
+10:06:40 <Solonarv> er, that's currying, oops
+10:06:54 <iqubic> Should I learn prolog?
+10:07:00 <MarcelineVQ> iqubic: yes
+10:07:01 <davean> at some level programming is programming, it doesn't REALLY matter much which language it is
+10:07:19 <iqubic> why should I learn prolog?
+10:07:23 <phadej> currying/uncurrying is like left and right; some people just never remember which way they are
+10:07:33 <phadej> iqubic: "why should I learn anything new"
+10:07:34 <MarcelineVQ> Why not
+10:07:38 <phadej> slash different
+10:07:59 <nisstyre> flebron: for OOP, they should skip Java and do ponylang.io instead
+10:08:17 <iqubic> phadej: I never remember which is which when it comes to currying/uncurrying.
+10:08:48 <phadej> I just remember that I want to use uncurry more often
+10:08:51 <phadej> > uncurry (:)
+10:08:53 <davean> iqubic: uh, its a logic programming language? Its kinda the super-powered version of SQL in a way
+10:08:54 <lambdabot>  error:
+10:08:54 <lambdabot>      • No instance for (Typeable a0)
+10:08:54 <lambdabot>          arising from a use of ‘show_M677149085925808710116155’
+10:08:55 <jgt> iqubic: how else would you build an expert system?
+10:08:56 <phadej> :t uncurry (:)
+10:08:58 <lambdabot> (a, [a]) -> [a]
+10:09:29 <davean> iqubic: If you like Haskell and you want to work at the type level, thats related?
+10:09:32 <MarcelineVQ> zincy_: So the issue with fromList there is that it promises a Vec n a, which means this "function results in a Vec that can satisfy any n and any a". Your use of :+ promises to work with something that is at least (n+1), so we're violating that fromList works for any n. We need a way to say in the type of fromList that if works for a more limited set of n, or a specific n.
+10:09:46 <davean> I mean why do you program at all? Thats where answers lie :-p
+10:09:53 <MarcelineVQ> zincy_: You'll run into a similar problem when you write filter for your Vec, we can't know ahead of time how long the resulting Vec will be, so it can't be filter : (a -> Bool) -> Vec n a -> Vec n a, if we filter anything at all these n will/must be different!
+10:10:32 <MarcelineVQ> zincy_: You should look at some of the sized list sort of packages on hackage for how they handle these problems, it's likely to involve singletons
+10:10:48 <zincy_> MarcelineVQ: Thanks!
+10:12:00 <MarcelineVQ> and if we write filter : (a -> Bool) -> Vec n a -> Vec m a, we run into the same problem as earlier, we promise a Vec that works for any m, but what we filter 2 off a Vect 7 a? it's a Vect 5 a, not vect _any_ m
+10:12:23 <iqubic> MarcelineVQ: The filter function is an example of when we need a dependant sum.
+10:12:31 <iqubic> A sigma type if you will.
+10:13:30 <iqubic> Basically you return a pair (n, Vect n a) where the first element is the length of the Vector.
+10:13:31 <MarcelineVQ> yes that's a great place for one, though I'd hazard towards calling it a dependent pair, just because sum can be confusing with all the other terms we have :>
+10:13:53 <zincy_> iqubic: Can you avoid sigma types for filter with continuations and RankNTypes?
+10:13:59 <MarcelineVQ> particularly sum types, when pair is a product type
+10:14:17 <iqubic> zincy_: I don't know.
+10:14:30 <iqubic> MarcelineVQ, you seem to know this better than I do.
+10:14:51 <MarcelineVQ> hard to say, the more I know the less I know, you know
+10:14:59 <iqubic> I know.
+10:16:21 <iqubic> MarcelineVQ: Do you know if there is any way to write a type safe filter without returning a (n :: Int, Vect n a)?
+10:17:07 <MarcelineVQ> I've only seen it done that way. And I haven't seen it done in haskell though it surely has been, I just haven't seen it
+10:18:40 <phadej> zincy_: "filter without Sigma?" yes, filter :: (a -> Bool) -> Vec n a -> (forall m. Vec m a -> r) -> r
+10:19:19 <zincy_> Does RankNTypes allow the callee to determine the type arguments to a function rather than the caller? 
+10:19:22 <iqubic> That
+10:19:30 <iqubic> that's the CPS style of doing that.
+10:19:54 <iqubic> zincy_: No...
+10:20:05 <iqubic> Least, I don't think so.
+10:20:16 <zincy_> phadej: What does the placement of forall m. alter there?
+10:21:55 <iqubic> It states that the function you pass it to "continue" the compution must be able to handle vectors of ALL lengths. The function you pass in as (forall m. Vec m a -> r) cannot make ANY assumptions about the size of the vector it gets.
+10:22:34 <iqubic> It must be able to take any length of Vector and reduce it to some value r.
+10:22:35 <phadej> zincy_: that's the same mind twister as implication and forall / exists in logic
+10:23:12 <iqubic> phadej: I didn't find it to be a mind twister. I was able to explain it fairly simply.
+10:23:30 <jle`> alternatively `(forall m. Vec m a -> r) -> r` is the same thing as [a]
+10:23:45 <jle`> (they're both `exists m. Vec m a`)
+10:23:53 <jle`> so you could have filter :: (a -> Bool) -> Vec n a -> [a]
+10:23:54 <phadej> iqubic: well, forall r. (forall m. Vec m a -> r)  <=>   exists m. Vec m a
+10:24:08 <iqubic> It does?
+10:24:17 <jle`> * forall r. (forall m. Vec m a -> r) -> r
+10:24:23 <phadej> jle`: +1
+10:24:43 <iqubic> I suppose that those are the same thing
+10:24:43 <phadej> iqubic: correction, forall r. (forall m. Vec m a -> r)  -> r <=>   exists m. Vec m a
+10:24:54 <phadej> iqubic: the mind twister is to convince yourself they are
+10:25:16 <jle`> zincy_: fun thing you can do is write the isomorphism between (forall r. (forall m. Vec m a -> r) -> r) and [a] :)
+10:25:16 <iqubic> Where did the r go?
+10:25:53 <iqubic> Shouldn't the rhs be "forall r. [a] -> r"?
+10:26:04 <phadej> which is the same as [a]
+10:26:05 <monochrom> And m too, while you're at it.
+10:26:07 <jle`> iqubic: that's why it's a mind twister :)
+10:26:13 <iqubic> Oh. I see.
+10:26:24 <iqubic> I'm now thouroughly confused.
+10:26:33 <iqubic> Where the hell did the r go?
+10:26:39 <phadej> iqubic: or actually isn't forall r. ([a] -> r) -> r
+10:26:51 <phadej> iqubic: google Yoneda lemma
+10:26:59 <phadej> https://www.cs.ox.ac.uk/jeremy.gibbons/publications/proyo.pdf
+10:27:15 <jle`> well, the r is brought into scope on the lhs, so it's something that is potentially on the chopping block
+10:27:19 <MarcelineVQ> think of the r as being your proof
+10:27:29 <jle`> that's like how we do `f x = negate x` => `f = negate`
+10:27:39 <jle`> if you bring it into scope, then it's necessarily arbitrary
+10:27:45 <iqubic> MarcelineVQ: Proof of what?
+10:27:57 <monochrom> Yikes profunctor. Or, w00t.
+10:28:08 <MarcelineVQ> That answer ruins the puzzle, for my way of thinking anyway
+10:29:24 <flebron> "forall r. ([a] -> r) -> r" ~ [a] is fairly intuitive if this was a conversation with people. I give you a machine that takes [a] and produces r. You don't know what r is, I make r up each time. And every time I give you such a machine, you come up with an r. No matter how wacky I make the r, you always come up with one. The only thing you have is what I gave you, an [a] -> r. It stands to reason you're 
+10:29:30 <flebron> using that to construct your r's, and the only way to do that is if you already have an [a] to give it :)
+10:32:35 <iqubic> Is it possible to write the isomorphism in Haskell?
+10:33:51 <lyxia> toCont xs k = k xs     fromCont xs = xs id
+10:34:38 <iqubic> What is that?
+10:35:14 <iqubic> Is that the "forall r. (a -> r) -> r" is isomorphic to "a"?
+10:35:26 <iqubic> Or rather, a proof of it?
+10:36:40 <lyxia> that's the isomorphism, the functions that convert between a and (forall r. (a -> r) -> r)
+10:36:47 <iqubic> I don't get how you write either "f :: (forall r. (a -> r) -> r) -> a" or "g :: a -> (forall r. (a -> r) -> r)"
+10:37:15 <lyxia> toCont :: a -> (forall r. (a -> r) -> r)     fromCont :: (forall r. (a -> r) -> r) -> a
+10:37:26 <iqubic> How did you produce an a?
+10:37:45 <lyxia> by specializing your polymorphic function to (a -> a) -> a  and applying it to id
+10:37:45 <iqubic> And why does toCont have two parameters?
+10:38:08 <lyxia> because there is (xs :: a) and (k :: a -> r)
+10:38:25 <iqubic> But the forall is inside the brackets?
+10:39:15 <lyxia> well there's no syntax for polymorphic functions, types are implicitly generalized where they can.
+10:39:19 <flebron> (The trick here is that the machine just returns whatever you gave it. When you show me the r you got, I can say "Gotcha!", because I've tricked you into showing me the a you had, since my machine is just the identity.)
+10:39:41 <iqubic> are these semantically different: "forall r. a -> ((a -> r) -> r)" and "a -> (forall r. (a -> r) -> r)"
+10:39:52 <lyxia> not in Haskell
+10:40:04 <bor0> a ~ b in this sense means proving a is the same as proving b
+10:40:15 <flebron> I've seen a couple situations where forall a. forall b. is not the same as forall a b, but IIRC it had to do with scopes.
+10:40:23 <lyxia> ah there's a distinction with TypeApplications
+10:40:32 <flebron> Yeah, that rings a bell.
+10:42:11 <iqubic_> Sorry for leaving.
+10:42:19 <iqubic_> My school wifi kicked me off.
+10:42:35 <iqubic_> So, can you pull the forall out, like I was just suggesting?
+10:42:53 <lyxia> yes you can
+10:43:08 <lyxia> Isn't it simpler to just try it though
+10:43:27 <bor0> if it's not bound in any other expressions you can put it at the outermost scope, I'd assume
+10:43:35 <iqubic_> I would, but I don't have access to GHC on the machine I'm currently using.
+10:44:32 <iqubic_> I wish there was some online version of GHC that I could use.
+10:44:58 <merijn> ugh...I thought that by now I understood ContT, but it's still frying my brain...
+10:45:18 <iqubic> What's so difficult about ContT?
+10:45:50 <merijn> The fact that you have to CPS your entire brain to think it through?
+10:45:58 <iqubic> I think continuations are not the simplest thing to understand, but then when you do it is real satisfying.
+10:46:06 <iqubic> CPS is really cool.
+10:46:37 <iqubic> How hard would it be to create a Prolog interperter in Haskell?
+10:46:38 <merijn> iqubic: I understand CPS and ContT in the abstract, but making them fit my actualy problems is...tricky
+10:46:47 <iqubic> merijn: Ah. I see.
+10:47:14 <iqubic> merijn: I guess I don't really understand ContT in the abstract.
+10:47:34 <merijn> iqubic: I have a couple of non-trivial brackets I was hoping to simplify working with, but figuring out how to fit them into ContT to actually do what I want is a struggle...
+10:47:54 <iqubic> what is a non-trivial bracket?
+10:48:16 <flebron> iqubic: https://repl.it/languages/haskell
+10:48:35 <iqubic> Nice. Thanks.
+10:49:00 <merijn> iqubic: I don't have a 1 step allocation, but 2 steps, one which needs to happen later, inside the final continuation
+10:49:13 <iqubic> Oh. I see.
+10:49:26 <nshepperd_> To understand ContT, just turn your brain inside out
+10:50:34 <Rembane> So if you have a problem that already is inside out ContT should be trivial.
+10:51:02 <iqubic> I just realized that the (forall r. (a -> r) -> r) we were talking about a few moments ago is basically just a continuation.
+10:51:37 <iqubic> idCPS :: a -> (a -> r) -> r
+10:51:49 <iqubic> idCPS a ret = ret a
+10:52:04 <iqubic> or, to put it another way: 
+10:52:12 <iqubic> idCPS = flip
+10:52:35 <iqubic> :t flip
+10:52:37 <lambdabot> (a -> b -> c) -> b -> a -> c
+10:53:14 <iqubic> @let idCPS a ret = ret a
+10:53:16 <lambdabot>  Defined.
+10:53:20 <iqubic> :t idCPS
+10:53:21 <lambdabot> t1 -> (t1 -> t2) -> t2
+10:53:40 <iqubic> Alright, you can't write that as idCPS = flip.
+10:54:04 <iqubic> @let idCPS = flip :: a -> (a -> r) -> r
+10:54:05 <lambdabot>  .L.hs:165:1: error:
+10:54:06 <lambdabot>      Multiple declarations of ‘idCPS’
+10:54:06 <lambdabot>      Declared at: .L.hs:161:1
+10:54:13 <iqubic> @undefine
+10:54:14 <lambdabot> Undefined.
+10:54:21 <iqubic> @let idCPS = flip :: a -> (a -> r) -> r
+10:54:22 <lambdabot>  .L.hs:157:9: error:
+10:54:22 <lambdabot>      • Couldn't match type ‘a1’ with ‘a0 -> (a1 -> r1) -> c0’
+10:54:22 <lambdabot>        ‘a1’ is a rigid type variable bound by
+10:54:23 <merijn> What I (seem) to want is to collapse the ContT from within it's own do block, but that's not really sensible, so I'm trying to formulate what would be sensible reformulation
+10:57:35 <cocreature> merijn: I would advise against callCC’ing your brain
+10:58:12 <merijn> cocreature: I'm trying to avoid it, but without much success
+11:01:28 <iqubic> What the heck is CallCC?
+11:01:35 <iqubic> :t callCC?
+11:01:36 <lambdabot> error:
+11:01:37 <lambdabot>     parse error (possibly incorrect indentation or mismatched brackets)
+11:01:40 <iqubic> :t callCC
+11:01:41 <lambdabot> MonadCont m => ((a -> m b) -> m a) -> m a
+11:01:48 <iqubic> Huh???
+11:01:52 <hyperisco> it is how you run a continuation
+11:02:24 <TrueBoxGuy> How do you update ghc/ghci?
+11:02:29 <TrueBoxGuy> Do you just reinstall
+11:02:36 <Solonarv> TrueBoxGuy: generally yes
+11:02:39 <merijn> TrueBoxGuy: Yes
+11:02:41 <Solonarv> how did you install it in the first place?
+11:03:10 <jgt> TrueBoxGuy: If I want a new compiler, I bump the version in the Nix expression
+11:03:20 <zincy_> Say you have this function - what would be a sensible argument for the second parameter? fromList :: [a] -> (forall n. Vec n a -> r) -> r 
+11:03:20 <jgt> but that's not going to work for you if you don't use Nix
+11:03:22 <merijn> TrueBoxGuy: Actually, generaly I don't update so much, as I just "add a newer GHC", 'cause I generally have about 3-5 versions installed
+11:03:22 <iqubic> jgt: Me too. LOL
+11:04:05 <iqubic> merijn: I can just choose whichever version I want/need because I have Nix and Nix is awesome.
+11:04:14 <zincy_> more contet: https://repl.it/repls/NotedFrozenCheckpoint
+11:04:16 <TrueBoxGuy> Well I have a severely bugged version of GHC
+11:04:18 <zincy_> *context
+11:04:26 <TrueBoxGuy> The #ghc people told me to update it
+11:04:29 <TrueBoxGuy> I'm on windows :(
+11:04:36 <oni-on-ion> is Nix like Guix ? (i dont know either of them) 
+11:04:47 <dmwit> zincy_: Say, `sum`.
+11:04:48 <oni-on-ion> TrueBoxGuy, install new haskell platform ?
+11:04:54 <TrueBoxGuy> I really can't be bothered to reinstall haskell but here we go
+11:05:02 <iqubic> oni-on-ion: Nix is like Guix-SD.
+11:05:09 <merijn> iqubic: Same thing with just multiple installs, though...
+11:05:12 <oni-on-ion> the computer+software does all of the work for you, TrueBoxGuy .
+11:05:13 <iqubic> they have very similar philosphies.
+11:05:21 <dmwit> zincy_: Or any other function which can work on a vector of any size containing elements of the type you passed in the first list. =)
+11:05:30 <Solonarv> TrueBoxGuy: I recommend installing ghc+cabal via chocolatey
+11:05:33 <oni-on-ion> iqubic, ah, interesting. next time i do an OS install (debian atm) i will try one of them 
+11:06:09 <TrueBoxGuy> What's the chocolatey command for that?
+11:06:20 <zincy_> dmwit: If you just want to construct a vector would you pass in `vConcat` or something like that?
+11:06:23 <iqubic> oni-on-ion: Just be aware that Guix-SD only gives you free (as in source code is free to look at) drivers.
+11:06:35 <Solonarv> choco install ghc cabal
+11:06:42 <dmwit> zincy_: What's `vConcat`? But my answer is almost certainly "no".
+11:06:54 <Solonarv> Doesn't get much simpler than that!
+11:06:58 <oni-on-ion> iqubic, no problem. i think that i am using the "free" ati/amd drivers atm
+11:07:05 <iqubic> If you need non-free drivers for your hardware, then guix-sd won't work.
+11:07:06 <zincy_> dmwit: it would be (++) for fixed length vectors
+11:07:15 <dmwit> zincy_: You could `data SomeVector a = forall n. SomeVector (Vector n a)` (write an existential wrapper) and then `fromList _ SomeVector`.
+11:07:18 <oni-on-ion> iqubic, would it prevent installing them later? =)
+11:07:26 <hyperisco> iqubic, it lets you choose how or how to run the continuation, as itself a continuation, I should better say
+11:07:39 <dmwit> zincy_: That's very unlikely to work, because the return type `r` will depend on `n`, which is not allowed in that type signature.
+11:07:51 <iqubic> oni-on-ion: guix-sd gives you no way to install non-free drivers.
+11:07:52 <dmwit> zincy_: (Since `n` is not in scope in the second occurrence of `r`.)
+11:07:54 <zincy_> dmwit: yeah 
+11:08:08 <oni-on-ion> iqubic, okay, thats cool. dont think i will need anything non-free 
+11:08:43 <zincy_> dmwit: So is SomeVector the only way of just constructing a vector from a list
+11:08:55 <dmwit> Pretty much, yes.
+11:09:05 <dmwit> If you don't know the length of the list, you can't just magically start knowing it.
+11:09:19 <merijn> cocreature: ugh, sadly I think callCC might be want I want/need
+11:09:33 <merijn> cocreature: Which is unfortunate, because I don't get it :p
+11:09:37 <cocreature> merijn: sounds like you might want to reconsider your life choices :)
+11:09:45 <zincy_> dmwit: Ah makes sense. Of course `r` cannot depend on `n`
+11:09:49 <iqubic> hyperisco: I feel like the last line here is pointless. http://dpaste.com/0HCSVFM
+11:10:32 <hyperisco> it isn't pointless if you'd like the result to be 25 *shrug*
+11:10:35 <dmwit> zincy_ leveled up!
+11:10:38 * dmwit claps
+11:10:50 <zincy_> dmwit: woot :D
+11:11:05 <merijn> cocreature: Yes...especially since all the examples are rather...opaque
+11:12:04 <iqubic> hyperisco: But the callCC runs into the "k n" first and just stops there.
+11:12:11 <cocreature> merijn: my experience with manually cpsing code is mostly that even if you can get it to work and it might actually simplify things, it’s not worth it since you’ll have to decypher it when you next look at it in a few months
+11:12:35 <hyperisco> iqubic, why would it stop there?
+11:12:50 <iqubic> Because that's how callCC works, isn't it?
+11:13:05 <hyperisco> no :)
+11:13:20 <iqubic> What does that chunk of code do that I wrote?
+11:13:48 <TrueBoxGuy> ouch
+11:13:57 <hyperisco> it runs k with 5 and then returns the result 25
+11:14:12 <hyperisco> which is also  25 <$ k 5
+11:14:16 <merijn> cocreature: Maybe, but I can't figure out how to sanely write it any other way either
+11:14:24 <iqubic> I see.
+11:15:04 <hyperisco> you're basically adding to what is done with a result, using callCC
+11:15:30 <iqubic> callCC confuses the heck out of me.
+11:15:33 <monochrom> merijn: Do you think my http://www.vex.net/~trebla/haskell/cont-monad.xhtml helps? Or you already know all that?
+11:15:38 <iqubic> I'm just going to put that out there.
+11:16:20 <monochrom> Maybe http://www.cs.utoronto.ca/~trebla/CSCC24-2019-Winter/Continuation.hs is even better because it is an interpreter of a language that has built-in call/cc!
+11:16:33 <monochrom> Or worse because it is more distracting!
+11:17:34 <hyperisco> iqubic, a  ContT r m a  is an action waiting for an  a  and will produce an  r  result using  m  effects
+11:17:45 <iqubic> I see.
+11:18:00 <iqubic> But how does that help me understand callCC?
+11:18:52 <hyperisco> iqubic, so what you give callCC, takes a function which needs an  a  , and returns an action waiting for an  a
+11:19:09 <merijn> hyperisco: No, ContT r m a *has* an 'a' and is waiting for an action to do with it
+11:19:20 <merijn> It's not waiting for an 'a'
+11:19:32 <merijn> monochrom: Yes, no, maybe? >.>
+11:19:34 <hyperisco> iqubic, so, once your action has an  a  it can decide how the other function sees it, or whether it sees it at all
+11:19:42 <iqubic> And this is why continuations confues me.
+11:20:00 <monochrom> MonadUncertainty :)
+11:20:12 <iqubic> Because y'all can't even agree on what the right semantics are.
+11:20:18 <monochrom> instace MonadUncertainty Maybe where ... :)
+11:21:16 <iqubic> Just....
+11:21:25 <iqubic> Oh, Nothing.
+11:21:41 <hyperisco> merijn, depends on how you squint, but sure
+11:22:40 <hyperisco> it has an  a  in a weak sense
+11:23:18 <hyperisco> it could have an  a  or it might not or it might know how to get one with  m  effects or it might know how to possibly get one with  m  effects
+11:23:20 <cocreature> merijn: do you have a reasonable small version of your non-cps’ed code to look at?
+11:23:52 <merijn> cocreature: tbh, not really
+11:24:33 <merijn> Lemme sketch out some times for the individual bits
+11:25:58 <hyperisco> a common use is for asynchrony, in which you are waiting for values, and that is why I used the verb "waiting"
+11:29:08 <Berengal> I'm getting some strange behavior in ghci: https://gist.github.com/Berengal/5fe98cd2a3612c0f6006815b019ce555
+11:31:05 <merijn> cocreature: I have a situation somewhat like: http://dpaste.com/296SXA5
+11:31:43 <monochrom> (Bar -> m r) -> m r  looks really like ContT r m Bar you know... :)
+11:32:18 <merijn> cocreature: Except I have to be able to nest any number of withFoo's with a final withBar (since my mkConfig handles any number of Foo's), so I want to push those "prepare"s into that final bracket
+11:32:31 <monochrom> I am not really a fan of callCC, but I am a fan of ContT and using runContT directly.
+11:32:36 <merijn> monochrom: Yes, I'm aware, hence why I keep coming back to ContT, but I can't quite make it fit
+11:33:37 <merijn> monochrom: just using ContT doesn't help me push the "prepare's" into the final continuation
+11:33:38 <hyperisco> you can't bracket over arbitrary Monads
+11:33:56 <merijn> hyperisco: It's not an arbitrary one, but the details of what it's doing aren't important here
+11:34:04 <cocreature> merijn: so basically you want to generalize to something where mkConfig :: [Foo] -> Bar?
+11:34:17 <merijn> cocreature: no, that I can deal with
+11:34:35 <merijn> cocreature: I need to figure out how to push prepare1, etc. into the final continuation
+11:34:57 <hyperisco> merijn, I read the backlog but I have missed what your problem is.
+11:35:27 <merijn> My problem is formulating exactly what the problem is, because if I knew exactly what it was, I'd have solved it :p
+11:35:33 <hyperisco> I may be of more than zero help because I have dealt with a lot of bracketing over the past few months.
+11:37:28 <cocreature> merijn: so you want to generalize this to "runStuff :: Natural -> (Bar -> m r) -> m r" where the natural indicates the number of withFoo calls, mkConfig :: [Foo] -> Bar and you "sequence" all the "prepare"s within withBar?
+11:37:46 <merijn> cocreature: Something like that, yeah
+11:38:04 <monochrom> Oh w00t, I think I know how to do that.
+11:39:38 <merijn> cocreature: Actually writing out the individual withFoo's in each context I don't think I can avoid, but I don't want to also write all that extra bookkeeping for the cleanups. So I want to basically have "ContT r m Foo" instead of "ContT r m (Foo, m ())" and somehow propagate those "m ()" to inside my final withBar call
+11:39:55 <merijn> cocreature: Because that bookkeeping is error prone
+11:40:59 <merijn> cocreature: I was thinking something like "aggregate all the 'm ()' in ReaderT/State and then have withBar extract that and propagate it into it's continuation" but fitting that together with ContT was...confusing
+11:41:30 <monochrom> OK so if I write "replicateM n (ContT withFoo)" I get "ContT r m [(Foo, m ())]"
+11:41:53 <hyperisco> a bracket is roughly  m a -> (a -> m ()) -> (a -> m b) -> m b  which is  acquire, release, do-something-with
+11:42:23 <monochrom> Then I can, say, fmap unzip. (Or use >>=.)
+11:43:42 <cocreature> yeah I would have gone for something along the lines that monochrom is describing
+11:43:53 <hyperisco> it doesn't work over an arbitrary Monad m because you have to know enough about the effects to make some sense of acquire and release (that release always happens if acquire happens)
+11:44:15 <hyperisco> and you can nest brackets arbitrarily deep
+11:44:31 <hyperisco> so, as far as I can tell, that is another solution to the problem
+11:44:59 <merijn> hyperisco: I already *have* the brackets, it's dealing with them that's annoying
+11:45:17 <hyperisco> what part of the dealing? the interpreting?
+11:45:19 <hyperisco> the using?
+11:45:49 <monochrom> hyperisco, merijn: I propose s/m/M/ so we all agree it is a specific (just undescribed) monad rather than "forall m".
+11:46:04 <hyperisco> sure :)
+11:46:26 <monochrom> And yes this is a popular mistake of all of #haskell. To use a lowercase variable wantonly.
+11:46:41 <monochrom> Even the experts keep doing it. It is annoying.
+11:46:58 <merijn> monochrom: Consider the types "necessary, but not sufficient" descriptors ;)
+11:48:05 <cocreature> what we need is a middlecase for when we cannot decide between lower and uppercase
+11:48:25 * Clint claps.
+11:48:39 <merijn> monochrom: The problem I was having is that that approach works, but I lose the ability to name the Foo's. I was hoping to use ContT's do notation to deal with binding the foo's (to more easily construct my Config from named Foos), but without having to track the prepares
+11:48:43 <monochrom> That sounds zeno. Because afterwards someone will also need a quarter case between lower and middle...
+11:49:36 <merijn> withBar is a natural "end" to the entire block, there can be no more nesting after that, but I don't think I can effectively encode that
+11:51:04 <hyperisco> Mm, you possibly can. If you can come up with a grammar then I am pretty sure you can.
+11:52:14 <hyperisco> S ::= aS | b  is a bunch of the same thing followed by one terminator of something else
+11:52:47 <hyperisco> and you can construct a Monad similarly
+11:53:49 <merijn> I'm going to ponder this some more, but not today...
+11:54:27 <hyperisco> What I did for designing something like this for file downloads is I drew a graph. Each vertex was a state (progressing, paused, failed, completed), and each edge was a transition (pause, resume, fail, complete)
+11:54:56 <hyperisco> some were actions I could use, like pause and resume, and others like fail and complete can happen outside my control
+11:55:30 <monochrom> merijn: What do you think of this? http://dpaste.com/32V2E6F
+11:55:32 <hyperisco> in the progressing state I have an effect to get a progress event
+11:55:42 <hyperisco> I can transition to the paused state with a pause effect
+11:55:54 <hyperisco> in the paused state I don't have a pause effect, nor an effect to get a progress event
+11:56:17 <hyperisco> and all this sort of stuff can captured
+11:57:00 <monochrom> I think I forgot that fooList is meant for mkconfig.  withBar (mkconfig fooList).
+11:58:20 <hyperisco> this graph is a DFA, so that is the relation to grammars
+11:59:23 <hyperisco> but you also see it in how you naturally define the needed ADTs (as you often do when defining ASTs for parsers)
+11:59:53 <monochrom> hyperisco: How would you code up S ::= aS | b, or more succintly a*b?
+12:01:08 <hyperisco> in this case we're saying there are just S effects, and an S effect is either  aS  or  b  (and pure / the empty effect of course)
+12:02:03 <hyperisco> if we add other nonterminals then we can get different domains of effects
+12:03:43 <Solonarv> monochrom: data S = S1 A S | S2 B, I think
+12:03:48 <hyperisco> Progressing ::= progress Progressing | Paused; Paused ::= resume Progressing
+12:04:02 <hyperisco> so,  progress progress resume progress  …
+12:04:16 <hyperisco> er,   progress progress pause resume progress   …
+12:04:27 <hyperisco> Progressing ::= progress Progressing | pause Paused
+12:04:54 <Guest23> https://www.swagbucks.com/p/register?rb=57367224
+12:06:12 <hyperisco> these could be monad transformers, so they'd also have some arbitrary other effects, or maybe just MonadIO, or something
+12:07:52 <hyperisco> monochrom, a download completing or failing or being canceled is out of my control, so actually the  progress  action can transition to other states (it doesn't always correspond to the progress edge, it depends on what has happened)
+12:08:14 <hyperisco> so that is how I handled exceptional cases… not unlike exceptions
+12:09:33 <hyperisco> and my purpose was to add discipline to file downloads, with progress events, with pause/resume, with cancelation
+12:50:20 * hackage debug-dump 0.1.0.0 - File-based debug output  https://hackage.haskell.org/package/debug-dump-0.1.0.0 (vmchale)
+13:02:42 <Marge99> You want to look at mе without clothes, sweetie (EXCLUSIVE FREE FOR NEXT 3 PEOPLE!!) ;-) follow the link and add me as a friend -----------> http://um.lk/user-Marge99
+13:03:58 <rotaerk> do we have someone in here who goes by "sweetie"?
+13:09:15 <MarcelineVQ> I'll never tell
+13:20:50 * hackage magico 0.0.2.1 - Compute solutions for Magico puzzle  https://hackage.haskell.org/package/magico-0.0.2.1 (HenningThielemann)
+13:24:04 <jeffh_> Hey, I'm learning how to work with I/O in Haskell and looking for some help. Let's say I have `data Foo = Foo Int String deriving(Show,Read)`. I have an input formatted like so: #\n String\n, repeated... assume all #s are non-zero. The end of the input is denoted by a '0'. How can I read the input into [Foo]? 
+13:24:46 <jeffh_> A sample input would be 2\n 
+13:24:47 <jeffh_> bacab\n 
+13:24:47 <jeffh_> 3
+13:24:47 <jeffh_> rwlb
+13:24:47 <jeffh_> 11
+13:24:47 <jeffh_> baaabaaaabbbaba
+13:24:49 <jeffh_> 0
+13:25:07 <hyperisco> jeffh_, the first line is for C programmers who want to malloc some space upfront, usually, heh
+13:25:24 <hyperisco> so typically you drop the first line, then you read as many lines as there are afterwards
+13:25:46 <hyperisco> if I am reading you right =\
+13:25:56 <Cale> I don't think that's the case here
+13:26:05 <Solonarv> you're not - the number is not necessarily the same as character count
+13:26:19 <hyperisco> I didn't realise there was a number every other line
+13:26:21 <Cale> The initial number in this case is part of the first record
+13:26:26 <Cale> yeah
+13:26:32 <zaunlen> is there a conceptual difference between | (as used in defining algebraic data types) and "Either"? I know that there is a difference, since one is used with the "data" keyword and one with the "type" keyboard, but conceptually both are for me a disjoint union, so I wonder why use two different things for the same concept.
+13:27:10 <Cale> jeffh_: So, you could start by applying lines to the input, which will get you a list of Strings.
+13:27:14 <Solonarv> zaunlen: you are correct that they correspond to the same concept
+13:27:22 <jeffh_> yeah, basically every 2 lines would be part of '1' input, and the end of the file is denoted by '0'. I want to parse each "2 lines" into my data Type. Sorry for poor formatting
+13:27:36 <Solonarv> however! 'Either' is defined using |, like so: data Either a b = Left a | Right b
+13:27:42 <Cale> zaunlen: Either is a specific data type defined using the data syntax of which | is a part
+13:27:55 <Cale> | can't occur in types
+13:28:10 <Cale> It's punctuation which separates the clauses of a data declaration
+13:28:27 <Cale> On the other hand, Either *is* a type
+13:28:41 <hyperisco> zaunlen, in Haskell there is a difference but conceptually one might say there isn't a significant difference, because you can build ADTs with Either and without |
+13:29:10 <Cale> jeffh_: So, there are various ways you could chunk the input. You might start just with a basic recursive solution:
+13:29:25 <jeffh_> Cale: I've tried something like readFoo a = read a::[Foo]
+13:29:25 <jeffh_> main :: IO ()
+13:29:25 <jeffh_> main = interact f where 
+13:29:25 <jeffh_>     f str = show $ readFoo $ unlines $ takeWhile (/="0") (lines str), a bit clueless about how the 'read' works exactly
+13:29:29 <Cale> collectFoos :: [String] -> [Foo]
+13:29:50 <Cale> collectFoos (x:y:xs) = Foo (read x) y : collectFoos xs
+13:29:50 <c_wraith> one could say Either is a reification of |
+13:30:04 <hyperisco> any time you want to do something with the structure of ADTs without being particular to any one type, it is usual to work with Either (sums) and (,) (products)
+13:30:09 <zaunlen> cale hyperisco you are both repeating what I said.
+13:30:15 <Solonarv> one could also say "Either is for when defining a new type would be annoying and verbose"
+13:30:41 <Cale> zaunlen: I thought I answered the heart of your question. Perhaps I was unclear in some way?
+13:30:47 <jeffh_> Cale: ah I see, I'll give that a try. Thanks!
+13:31:02 <Cale> jeffh_: You'll need to add a couple base cases to that
+13:32:15 <jeffh_> Cale: yup! 
+13:32:17 <Cale> zaunlen: One is syntax, the other is a type.
+13:32:31 <zaunlen> Cale: As I wrote, I know that | is used with the data keyword whereas Either is used with the type keyword. This is basically your answer. I want to know *why* it is like this. It's seems it is just stupid design. Both denotes disjoint union.
+13:32:45 <hyperisco> zaunlen, okay, then because it is cumbersome to deal with the sum of n>2 terms if all you have is Either
+13:32:56 <Cale> zaunlen: Well, what is your proposal for how else it ought to work?
+13:33:20 <Cale> zaunlen: It makes sense to have some bit of punctuation separating the cases of a data declaration
+13:33:30 <Cale> which are not themselves types, by the way
+13:33:31 <hyperisco> zaunlen, the  type  keyword introduces a type synonym.
+13:33:43 <zaunlen> My proposal is that instead of writing Either a b it should be possible to use a | b.
+13:33:48 <zaunlen> cale:
+13:34:01 <Cale> Each clause of a data declaration consists of a data constructor, followed by the types of its arguments
+13:34:03 <c_wraith> zaunlen, OK, how do you distinguish them as inputs to a function?
+13:34:08 <zaunlen> hyperisco: thanks, could you elaborate on this a bit more?
+13:34:14 <hyperisco> zaunlen, then it isn't discriminated, a | b
+13:34:15 <Cale> zaunlen: You need a way to name the tags then...
+13:34:35 <Cale> zaunlen: Did you mean something like writing (Left a | Right b) as a type?
+13:34:41 <hyperisco> zaunlen, a type synonym is another name for a type. It does not introduce a new type.
+13:35:03 <Solonarv> well, we could totally imagine having a "sum" analogue to tuples
+13:35:07 <Cale> zaunlen: But then, what type would Left have on its own?
+13:35:26 <Solonarv> in fact that is already in GHC, but it's unboxed
+13:35:33 <hyperisco> Cale, maybe we could have anonymous sums, or in other words they are named by their definition
+13:35:34 <Cale> zaunlen: Perhaps you want some system of anonymous extensible variants, but that's not what algebraic sum types are
+13:36:00 <hyperisco> Cale, so  Left a | Right b  *is* the name of the type defined as the same. Hm.
+13:36:17 <Solonarv> the type is written like this: (# Int | Char | Bool #), values like so: (# 5 || #), (# | 'a' | #), (# || False #)
+13:36:25 <Cale> haha
+13:36:29 <Solonarv> to be clear, this is already in GHC
+13:36:33 <zaunlen> c_wraith: what do you mean by "how do you distinguish them as inputs to a function?"?
+13:36:33 <c_wraith> Solonarv, that doesn't change anything. "why do you have both (,) and juxtaposition within a constructor definition to denote multiple arguments?" it ends up being the same question.
+13:36:35 <hyperisco> Solonarv, <3
+13:36:51 <Cale> zaunlen: You left the data constructors out
+13:36:59 <zaunlen> Cale: what do you mean by "tags"?
+13:37:02 <Cale> zaunlen: There would be no way to tell which of the cases you had
+13:37:12 <hyperisco> zaunlen, do you know what a disjoint/discriminated union/sum is?
+13:37:34 <zaunlen> hyperisco: what do you mean by "new type"?
+13:37:52 <c_wraith> zaunlen, if you have a function of type (String | String) -> String, how do you distinguish which side the argument was passed on?
+13:38:16 <hyperisco> A type synonym is type equal to whatever it is a synonym for, whereas a new type would not be type equal to the type that defines it (which we literally call newtypes)
+13:38:46 <Cale> The syntax of a data declaration is as follows. You have the keyword 'data', followed by the name of the type being defined, followed by a (possibly empty) whitespace separated sequence of variables used as type parameters, then either nothing at all (in which case the type so defined is empty), or an equals sign followed by a nonempty, |-separated sequence of clauses
+13:39:00 <Solonarv> c_wraith: my answer would be to use patterns like this: ( foo | ) or ( | bar)
+13:39:01 <Cale> and each clause consists of a name for a data constructor being introduced
+13:39:14 <Solonarv> (the number of pipes to the left/right indicates which alternative we have)
+13:39:16 <Cale> followed by a whitespace-separated list of types for the types of its arguments
+13:39:21 <Cale> So when we write
+13:39:26 <Cale> data Either a b = Left a | Right b
+13:39:32 <Cale> The "Left a" is not a type
+13:39:36 <dmwit> zaunlen: | is used to declare a new disjoint union; Either is used to describe a particular, existing disjoint union, and was created using |
+13:39:46 <Cale> Left is the name of a newly introduced data constructor ("tag")
+13:40:03 <Cale> which is a function of type  a -> Either a b
+13:40:04 <c_wraith> Solonarv, so you've just got either again, with special syntax. that doesn't help anything. but mostly it's missing my actual point entirely, which is that zaunlen appears to be missing the importance of constructors.
+13:40:12 <restrictedchoice> jeffh_: something like this? https://pastebin.com/ejhTJrJQ
+13:40:19 <Solonarv> c_wraith: yes, I agree
+13:40:22 <Cale> and similarly, we have that  Right  is a function of type  b -> Either a b
+13:40:29 <Cale> also being introduced by this data declaration
+13:40:31 <zaunlen> Cale hyperisco c_wraith ah, so | remembers in which summand an element lies (that's expressed by the tag) where as Either does not remember?
+13:40:53 <Cale> Either is a type, | isn't really anything at all, it's just punctuation which is part of some syntax
+13:41:14 <Cale> It's just there so we know where the next data constructor being defined starts
+13:41:50 <Cale> because otherwise it would be impossible to parse, since syntactically, they look quite similar to types (and may have the same names as types even, since data constructors are values and live in a separate namespace from types)
+13:42:03 <Cale> e.g. it's possible to define
+13:42:10 <Cale> data Foo = Int Int | String String
+13:42:25 <Cale> which defines data constructors  Int :: Int -> Foo  and  String :: String -> Foo
+13:42:27 <zaunlen> Mathematically, this does not make sense.
+13:42:41 <Cale> Sure it does, it's just not usual mathematical syntax
+13:43:25 <zaunlen> What's the mathematical interpretation of Either, and what's the mathematical interpretation of |?
+13:43:35 <zaunlen> I guess one of them is the disjoint union.
+13:43:55 <Cale> When we write something like  data Either a b = Left a | Right b, you can think of this as defining  Either a b  to be the union of  {"Left"} x a  and {"Right"} x b
+13:43:59 <Cale> where x is Cartesian product
+13:44:25 <Cale> i.e. these are "tags" used to ensure that the union is indeed disjoint
+13:44:58 <dmwit> The mathematical interpretation of Either is a function which takes two domains as arguments and produces a third domain that "disjoint union" is not a bad summary of. The mathematical interpretation of | is not possible because it is not a complete syntactic clause.
+13:45:42 <Cale> Yeah, | doesn't really mean anything. We could equally have gone with newline or something to serve as the separator there
+13:45:42 <dmwit> (It is something akin, though not precisely, similar to asking "what is the mathematical interpretation of the . in 3.14159?".)
+13:45:48 <zaunlen> Cale: So | is union and Either is disjoint union?
+13:45:59 <dmwit> No. Abolish this belief from your mind.
+13:46:00 <Cale> no, | is nothing and Either is disjoint union
+13:46:13 <Cale> | is basically a comma of sorts
+13:46:24 <Cale> it's not a complete piece of mathematically meaningful syntax
+13:46:28 <monochrom> I prefer to ask "what does e mean in 'mathematics'"
+13:46:28 <Solonarv> '|' by itself is about as meaningful as ','
+13:46:47 <zaunlen> your phrase " to be the union of  {"Left"} x a  and {"Right"} x b" which describes the function of | indicates that | is a union.
+13:46:51 <Cale> Maybe it would help to show the definition of Either using a different (more flexible) syntax which is introduced by the GADTs extension:
+13:46:52 <monochrom> Every character is just punctuation.
+13:46:56 <Cale> data Either a b where
+13:47:02 <Cale>   Left :: a -> Either a b
+13:47:07 <Cale>   Right :: b -> Either a b
+13:47:15 <Cale> Is that any clearer?
+13:47:45 <Cale> It's clearer now that we're defining two primitive injections named Left and Right
+13:47:49 <Cale> and we're giving their types
+13:47:59 <monochrom> If | were union, "Int | Bool" would make sense. Contradiction.
+13:48:12 <hyperisco> I think a book on Haskell could be of help. It can gradually build up these concepts and make them more meaningful. That could be especially useful if you're having trouble seeing what the point is.
+13:48:49 <Cale> zaunlen: | also appears elsewhere in the syntax of Haskell, and means different things in different places
+13:49:33 <Cale> For example, it appears in the syntax of list comprehensions, separating the generic term from the clauses which select elements of lists and place conditions on the things selected:
+13:49:54 <Cale> > [(x,y,z) | x <- [1..20], y <- [x..20], z <- [y..20], x^2 + y^2 == z^2]
+13:49:56 <lambdabot>  [(3,4,5),(5,12,13),(6,8,10),(8,15,17),(9,12,15),(12,16,20)]
+13:50:22 <zaunlen> Thank's for your help and suggestion, guys! I guess I have to think more from a syntactic / computer language perspective than from a mathematical / semantic perspective.
+13:50:33 <Cale> It also appears in the syntax of class declarations, when the FunctionalDependencies extension is turned on, and separates the parameters to the class from specifications of the functional dependencies
+13:50:37 <Solonarv> zaunlen: thinking about semantics is still a good approach
+13:50:48 <Cale> class VectorSpace f v | v -> f where ...
+13:50:52 <dmwit> Mathematics/semantics is fine. You just need to specify complete clauses before it's sensible to ask about their semantics.
+13:50:57 <Solonarv> but you should think about the semantics of the entire 'data Either a b = Left a | Right b' declaration
+13:51:11 <zaunlen> Solonarv: Well, then you are free to tell me the syntax of |. ;-)
+13:51:12 <monochrom> Math is also full of meaningless individual punctuations.
+13:51:23 <dmwit> Asking "what is the meaning of f(x) = x+5" is sensible. Asking "what is the meaning of f(x" is not.
+13:51:28 <Cale> zaunlen: It's kind of like asking what { means in set theory
+13:51:47 <Cale> zaunlen: It... doesn't have meaning on its own :)
+13:51:59 <monochrom> When given "(X,Y)" no one asks "what does , mean?". It doesn't. You have to take the whole "(X,Y)".
+13:52:50 <monochrom> Reductionism doesn't work. I say this as a reductionist.
+13:53:10 <hyperisco> "(" means the beginning has begun, and "," means more is to come, and ")" means the ending has ended.
+13:53:30 <zaunlen> so recently i watched a video of bartosz milewski about algebraic data types where he explained that the name "algebraic" came from considering | as disjoint union and things like "Con a b" as a product a x b. Now a definition of an algebraic data type is just the solutation to an equation using disjoint unions and products
+13:53:55 <monochrom> Did he say that space means product?
+13:53:57 <hyperisco> "|" means there are more choices to be had.
+13:54:13 <monochrom> Because space is what happened between "a" and "b".
+13:54:14 <zaunlen> to me, this strongly suggests that | has as semantics disjoint union
+13:54:23 <Cale> zaunlen: Very loosely, sure
+13:54:44 <hyperisco> That's about as much meaning as I can devise for these symbols.
+13:54:49 <Cale> zaunlen: But you can't take that too seriously, because | isn't part of the syntax of Haskell types.
+13:55:10 <Cale> zaunlen: This particular usage of | only occurs inside data declarations
+13:55:23 <zaunlen> monochrom: well in this case the constructor in front of a and b is suggesting that at this point a pair of an a and a b is meant.
+13:55:34 <Cale> and the data declaration as a whole defines a type which is semantically a disjoint union of a bunch of products
+13:55:55 <Cale> (a tagged disjoint union, with the tags being the first thing which occurs in each of the clauses)
+13:56:05 <hyperisco> Kind of like how this discussion began, I think we're assuming a definition of "meaning" that zaunlen is not intending.
+13:56:19 <monochrom> Yeah what does meaning mean?
+13:56:33 <zaunlen> Cale: that's what i am saying. | is disjoint union. so now do you agree with me?
+13:56:59 <Cale> zaunlen: Well, it might be more correct to say that data declarations define types which are disjoint unions of products
+13:57:14 * nshepperd_ . o O (, is the comma operator, which adds a comma to the source code)
+13:57:15 <hyperisco> monochrom, the only solution is to find the fixpoint!
+13:57:19 <Cale> zaunlen: and | does separate the bits of information which go into specifying each summand, sure
+13:57:38 <Cale> zaunlen: But each of those clauses is not itself a type
+13:57:46 <monochrom> I already did. The least fixed point is empty. I.e., there is no such thing as meaning.
+13:57:51 <monochrom> Yes I'm a formalist.
+13:57:57 <Cale> Each of the "operands" of | as it were is not something that can occur anywhere else in Haskell syntax
+13:58:10 <monochrom> So called "meaning" is just translating one sytactic system to another.
+13:58:29 <monochrom> Oh the translation is also defined under a syntactic system, too.
+13:58:57 <Cale> zaunlen: The things separated by | there are data declaration clauses, not types
+13:59:25 <zaunlen> Cale: okay, i understand this, but then my point is that this is badly designed: if | can be thought at this point as a disjoint union, it should be an operation on types that yields the disjoint union
+13:59:36 <Cale> Each data declaration clause consists of a new identifier (the constructor being defined), followed by a whitespace-separated sequence of types
+13:59:47 <zaunlen> Cale: then data declarations should be types
+14:00:08 <Cale> Okay, okay, let's say we go that way. How do we talk about this type:
+14:00:18 <Cale> data Tree a = Tip | Branch a (Tree a) (Tree a)
+14:00:36 <monochrom> I can agree that Haskell is badly designed. FSVO badly. For example "f :: Int | Bool -> Char" is disallowed. You could conclude that Haskell is badly designed.
+14:01:03 <Cale> monochrom: haha
+14:01:22 * monochrom is a great negotiator!
+14:01:29 <Cale> monochrom: Should that be interpreted as (Int | Bool) -> Char or  Int | (Bool -> Char)?
+14:01:32 <Cale> :D
+14:01:39 <zaunlen> Cale: I think it is a sociological question how *we* talk about something.
+14:01:56 <Cale> zaunlen: I mean, in your putative future Haskell
+14:02:33 <Cale> zaunlen: How do we define a type corresponding to that one?
+14:02:43 <Cale> and how do we write functions using it?
+14:02:48 <zaunlen> exactly the same ...
+14:04:11 <Cale> Okay, so... what if I write something like
+14:04:16 <Cale> depth :: Tree a -> Integer
+14:04:28 <Cale> depth Tip = 0
+14:04:44 <Cale> depth (Branch x l r) = 1 + max (depth l) (depth r)
+14:05:02 <Cale> Now, am I allowed to substitute the definition of Tree into that type?
+14:05:06 <hyperisco> monochrom, there is only one piece I feel I need to add to that, and that is how it is that the translation is done
+14:05:19 <hyperisco> monochrom, not the rules, but the carrying out of the rules, how to follow them
+14:05:28 <Cale> depth :: (Tip | Branch a (Tree a) (Tree a)) -> Integer ?
+14:05:50 <Cale> Certainly at the very least, I'll need to have Tree defined already
+14:06:10 <Cale> But then, I seem to be trampling on the names of the existing data constructors... Tip and Branch
+14:06:26 <Cale> How does the scoping for defined data constructors work?
+14:06:31 <zaunlen> ah, i see what you mean
+14:06:32 <zaunlen> mhm
+14:07:35 <zaunlen> thanks again guys, and please excuse me for my ignorance, i probably have to first become a bit more experienced with haskell.
+14:08:42 <Cale> It's possible that there's some way to answer all these questions -- maybe we ought to make the fixed point more explicit
+14:09:08 <Cale> and maybe if we give up on defining data constructor functions implicitly along with our types...
+14:09:29 <Cale> It might be possible somehow to make it all work, but it's just not the particular set of compromises we've happened to make in Haskell
+14:09:37 <Cale> Just a different set
+14:09:53 <Cale> It certainly *does* turn out to be handy that data constructors are functions
+14:10:18 <Cale> There are ML-family languages where that is not the case, and it's kind of annoying :)
+14:10:54 <Cale> I like being able to write stuff like   map Right xs
+14:11:11 <Cale> and not being forced to turn that into a lambda for no special reason
+14:11:20 <hyperisco> monochrom, so at one point I was trying to think whether there were a fundamental set of things you had to know a priori, but I didn't figure out much, other than repetition seemed important, which is often noted "…". I think this is a philosophy/logic question.
+14:11:57 <Cale> (and I'm one of the most lambda-happy individuals these days)
+14:12:20 * hackage cpkg 0.2.0.1 - Build tool for C  https://hackage.haskell.org/package/cpkg-0.2.0.1 (vmchale)
+14:12:48 <Cale> Sometimes, especially in really tiny cases like this, point-free style really is nice.
+14:13:08 <Solonarv> Cale: tangentially, how do you like LambdaCase ?
+14:13:16 <Cale> I like it well enough
+14:13:19 <Cale> I use it
+14:13:21 <hyperisco> monochrom, but I now figure metamath (the software, not the branch) or k-framework are possible answers.
+14:13:36 <Cale> I'm still very slightly salty that it doesn't have the syntax I was hoping it would
+14:13:56 <Cale> I always thought it would be nice to have "sections" of case
+14:14:01 <lavalike> > ((.) . (.)) (map toUpper) (++) "it " "is!"
+14:14:03 <lambdabot>  "IT IS!"
+14:14:05 <Cale> where you leave out the scrutinee and it becomes a function
+14:14:29 <Cale> But the only difference is that the syntax would be  case of  instead of \case
+14:14:37 <Solonarv> ah, I see
+14:16:06 <hyperisco> Cale, you could always switch to PureScript ;)
+14:16:16 <Cale> Oh, is it like that in Purescript?
+14:16:40 <hyperisco> You can use _ in special places, case/of being one of them, to make them functions, yes.
+14:17:21 <Cale> oh
+14:17:22 <Cale> huh
+14:17:30 <Cale> I'm not sure I like that either
+14:17:33 <Cale> :)
+14:17:34 <hyperisco> which is particularly nice for  … >>= case _ of …
+14:17:39 <Cale> I prefer using _ for holes
+14:18:17 <lavalike> just … >>= case _ of … ? no lambda/lambdacase?
+14:18:31 <hyperisco> that's right
+14:18:39 <lavalike> what a world
+14:19:08 <monochrom> But then you would need another notation for typed holes.
+14:21:17 <hyperisco> that's what  ?q  is for, or whatever name you'd like
+14:21:37 <monochrom> Oh neat.
+14:21:46 <hyperisco> iirc that is how it is in Idris too
+14:22:22 <monochrom> But why don't we use ?q for parameters, _q for typed holes? </bikeshedding>
+14:22:29 <hyperisco> lol
+14:22:51 <hyperisco> well _ is unnamed, and you only get one, it is very special
+14:23:03 <monochrom> But _q is also allowed
+14:23:11 <hyperisco> haha, yes it is
+14:23:14 <monochrom> Or, if really parannoid, __q__
+14:23:30 <hyperisco> (x `f` _)  is also how PS does the equivalent of sections
+14:23:51 <hyperisco> well that's a silly example but you get the point :P
+14:24:55 <monochrom> Let's confuse the hell out of Python people by writing like "if __name__ == main"
+14:25:11 <Rembane> :D :D :D
+14:27:27 <lavalike> Found hole `__name__' with type [Char]
+14:32:02 <hyperisco> Hm… a challenge to write programs which are valid in at least two unique languages, and the output has to be that PL's name.
+14:32:34 <hyperisco> This is vaguely familiar in web development, lol.
+14:33:24 <monochrom> hahaha
+14:34:14 <monochrom> There are such things as "polyglots".
+14:34:35 <hpc> polyglot quines are pretty impressive
+14:34:45 <monochrom> Then again they don't output different PL names.
+14:34:47 <hpc> there's one that's a chain of something like 20 languages
+14:35:06 <hpc> run perl quine.pl and it outputs quine.rb
+14:35:17 <hpc> continue through the cycle until you get back to quine.pl, and it's the same file
+14:35:31 <monochrom> Oh wow a polyglot quine.
+14:35:45 <Solonarv> depending on the language pair you should be able to do this fairly easily
+14:35:52 <Solonarv> if they have different comment syntax
+14:36:04 <lavalike> this comes to mind https://github.com/mame/quine-relay
+14:37:41 <hpc> ah, that's the one
+14:37:50 <Solonarv> #define echo main = putStrLn "haskell with CPP" --
+14:37:51 <Solonarv> echo "bash"
+14:37:55 <Solonarv> :>
+14:46:05 <hyperisco> A possible use of the Quine Relay is to ensure a new machine is ready for software development.
+14:49:29 <Solonarv> don't really need a cycle for that, though
+14:49:51 <hyperisco> Eh, it is a parity check :P
+14:49:55 <Solonarv> oh wait, do you mean as a test to check that everything's working properly
+14:49:56 <Solonarv> ah yes
+14:49:58 <hyperisco> Speaking of which, https://github.com/mame/radiation-hardened-quine
+14:49:59 <Solonarv> that makes sense
+14:51:49 <hyperisco> I don't know who this person is but I like what they do
+14:58:44 <iqubic> monochrom: What does the e in "Mathematics" mean?
+14:59:10 <iqubic> I'd say it refers to Euler's Constant, which is about 2.71828
+15:02:49 <hyperisco> "M" is for mega, "a" is for acceleration, "t" is for time, "h" is for Planck's constant, "e" is for Euler's constant (well done!), "m" is for metre, "a" is for atto, "t" is for period, "i" is for √-1, "c" is for the speed of light, and "s" is for the strange quark!
+15:03:39 <iqubic> I'm not sure why, but reading through the log of the conversation where you try to explain the meaning of `|' made me laugh so much.
+15:04:19 <iqubic> I was sitting a hard Calculus test while that conversation was going on.
+15:04:42 <hyperisco> you think they'd at least provide you a cushion
+15:05:20 <iqubic> What do you mean?
+15:06:25 <Cale> iqubic: It was a pun
+15:06:42 <iqubic> Also, BRB. Switching OSes. I dual boot Windows and NixOS. I needed to use Windows while at school today, and I haven't rebooted this laptop since getting home.
+15:30:41 <oo_miguel> Any suggestions what to use for syntax completion? ghc-mod seems not to be comaptible with recent stack anymore :(
+15:31:30 <lavalike> I look up the docs and type things out
+15:35:32 <oo_miguel> lavalike: this was my approach too. But realized there are some people using intero for instance
+15:36:05 <Rembane> I have used Haskell Ide Engine, and it has worked and also not worked. 
+15:36:08 <oo_miguel> I am also aware this is not strictly a haskell.ghc question
+15:39:28 <oo_miguel> Rembane: ok thank you. I mioght have a look at this one. hope it integrates with vim (or nvim at least)
+15:39:34 <oo_miguel> might
+15:40:12 <Rembane> oo_miguel: Good luck! 
+15:40:24 <Rembane> oo_miguel: HIE works with nvim, I think it works with a modern vim too. 
+15:40:34 <Rembane> oo_miguel: I'm using ALE together with HIE.
+15:42:24 <oo_miguel> never used ALE so far, but will have a look. thank you.
+15:42:28 <oo_miguel> more suggestions are welcome
+15:43:18 <Rembane> oo_miguel: If you have another plugin for LSP that might work as well
+15:43:44 <oo_miguel> (I just used a mostly plain text editor so far, but since I am now engaging in sime biger project with an existing codebase I have to navigate and understand I am coming back to this "IDE" topic)
+15:44:09 <Rembane> I usually jump out in the terminal and run grep -r or ack or something. 
+15:46:29 <oo_miguel> Rembane: ... mmmm what is LSP?
+15:47:15 <Rembane> oo_miguel: Language Server Protocol, a nice invention from the folks at Microsoft.
+15:47:42 <Rembane> oo_miguel: It's a way to communicate between a compiler and an editor.
+15:48:26 <oo_miguel> ooh, ok thanks
+15:48:49 <Rembane> No worries. :)
+15:49:03 <oo_miguel> I was not aware there is some "standard" for taht
+15:49:17 <boj> i think it's fairly new
+15:52:33 <Rembane> It's only a few years old. 
+15:53:20 * hackage trivial-constraint 0.5.0.0 - Constraints that any type, resp. no type fulfills  https://hackage.haskell.org/package/trivial-constraint-0.5.0.0 (leftaroundabout)
+16:05:44 <hpc> that's a neat package
+16:20:34 <shapr> if I put -A64m into ~/.cabal/config in the program-default-options ghc-options: will that apply for every cabal new-build I run after that?
+16:22:39 <shapr> for that matter, is there a sensible way to profile a cabal new-build? I'd like to expand -A and -n and maybe other values? until builds are slower
+16:37:23 <sm> oo_miguel: if you're an emacs user, what about M-/ (dabbrev-expand). Might be good enough
+16:39:26 * sm learns that hitting it repeatedly cycles through completions. Cool
+16:55:21 <oo_miguel> ok thanks (unfortunatelly i am vim/nvim)
+16:55:29 <axelito1010> hello anyone here?
+16:55:54 <hpc> no
+16:55:56 <hpc> we are all bots
+16:56:04 <hpc> beep boop
+16:56:35 <axelito1010> Goood, i'm new in haskell , surelly I'll have many question 
+16:56:47 <axelito1010> sorry my english, is so bad
+16:59:00 <sm> welcome axelito1010 
+16:59:39 <axelito1010> thanks
+17:19:34 <Nevoic> Hey, I'm coming from an OO background, been doing Haskell for a couple months. I got a pretty decent vim setup (inline compile time errors/warnings, compile-time function autocomplete with type information etc.) but it still feels kind of lacking compared to something like Intellij + Kotlin or C# + Resharper.
+17:19:35 <Nevoic> The biggest lacking thing right now is autocomplete for functions. If I wrote: `val name = "Yeet"; val age = 24; fun show(x: String) = println(x)` in Kotlin, then typed show(, it would suggest "name" and not "age", due to the types lining up. I can't seem to get anything like this in Haskell.
+17:21:23 <Nevoic> It's not a problem for small scripts, I can read the types, and if I get them wrong errors show up. But the way I interact with libraries that have little or no documentation but have complex functions is by calling a function, and seeing what it could take. I'm able to get things done a lot quicker in Kotlin because of that.
+17:21:23 <Nevoic> Is there some workaround you guys have? Some ghci command I don't know about to lookup compatible functions or figure out how they might fit together? It seems pretty hard to use libraries that lack documentation, compared to languages with "better tooling" at least.
+17:23:15 <Rembane> Nevoic: The trick when everything else fails is to use typed holes, are you familiar with them?
+17:24:27 <Nevoic> Somewhat, I remember watching an Idris 2 talk where he used typed holes a lot to see what existed in that context, I thought that tooling was specific to idris 2 and I (personally) couldn't get anything functionally equivalent in Idris 1 when I was playing around with that.
+17:24:42 <Nevoic> iirc Haskell has them too, I assume that's why you brought them up, just never used them in Haskell.
+17:27:00 <ski> hm, Kotlin is an ML descendent ?
+17:27:15 <Rembane> ski: Nah, it's rather a better Java. 
+17:27:35 <ski> the syntax example above looked MLish
+17:27:36 <Nevoic> Yeah it's not ML, like I said my background is in OO.
+17:28:17 <Rembane> Nevoic: Lets say we have a function f and we want to know which type it has, then we can above f input: f :: _ 
+17:28:24 <Nevoic> It does have some aspects that are more "functional" than say Scala (i.e top level functions, you can write code without classes or objects, immutability is default etc.) but it's definitely an OO language.
+17:28:24 <Rembane> Nevoic: And GHC will tell us
+17:28:27 <MarcelineVQ> Nevoic: holes function similar enough, where you'd use ?foo in idris you'd type _foo in haskell
+17:29:41 <Rembane> ski: I think it's a quite natural way to write types inline. Rust looks something similar, but has a certain fondness for <> 
+17:29:51 <Nevoic> Do holes grant you anything outside of type information? In Idris 2 you also got a list of things in the local context that could be usable to fill the holes iirc, I'm looking for something like that but with functions.
+17:30:20 <boj> they were just talking about HIE a bit ago. might help if you are willing to set it up
+17:30:27 <Nevoic> Yeah I'm using HIE.
+17:30:38 <Nevoic> That's how I'm getting inline compile errors/function types in vim.
+17:30:45 <boj> ah ok
+17:32:14 <MarcelineVQ> You also get context of what's bound and in scope, though it's quite wordy. and rudimentary suggestions for what to fill with in recent ghc's, but it won't do the filling in for you
+17:32:37 <MarcelineVQ> actually lemme double-check that, I thought it gives you the contexts on holes, let's see
+17:32:59 <MarcelineVQ> yeah it does
+17:34:21 <Nevoic> That sounds like something I'd be interested in. In a practical sense, what happened was I was using like 8.0.2 for ghc-mod compatibility before I hooked up HIE, so I was using a specific version of this library (which happened to be the latest version that it had documentation), so I was able to get things working.
+17:34:21 <Nevoic> When I upgraded to 8.24 for HIE compatibility (and newer features), the library broke, and there are no docs to describe what needs to change.
+17:35:41 <Nevoic> So now to run the code at the top level, the function takes "EventHandler f m => Data.Proxy.Proxy (m f ) -> IO ()", and I need to use tools to help me find things could fit into that.
+17:35:58 <Nevoic> I don't feel like reading thousands of lines of source code to find it.
+17:36:29 <boj> @hoogle
+17:36:29 <lambdabot> package base
+17:36:29 <lambdabot> package bytestring
+17:36:29 <lambdabot> package containers
+17:36:33 <boj> Oh.
+17:36:41 <boj> There is hoogle, if you are not familiar?
+17:36:54 <boj> @where hoogle
+17:36:54 <lambdabot> http://haskell.org/hoogle http://hoogle.haskell.org http://fpcomplete.com/hoogle – See also Hayoo, which searches more packages: http://hayoo.fh-wedel.de/
+17:37:24 <Nevoic> I've used it before, I do prefer things that can be done with compile-time information instead of googling for documentation/examples, but I'll give it a go rn.
+17:38:00 <boj> for those of us in the dark ages it's what we have :)
+17:38:02 <Nevoic> It's cooler to have the compiler help me through things that line up instead of me having to inspect the type, open a website, and search for the type that lines up with it. Feels a lot more like Python than a new static language (Kotlin/F#/Swift)
+17:39:06 <Nevoic> Hoogle iddn't return any results for the type I specified.
+17:39:35 <Nevoic> I don't think it has information for the package I'm using.
+17:39:46 <boj> i think v4 (the first) only has a subset of libraries
+17:41:21 <Nevoic> hayoo isn't even loading for me xp
+17:41:33 <Nevoic> And haskell.org/hoogle & hoogle.haskell.org redirect to the same page.
+17:41:59 <boj> ah, do they? they used to be v4 and v5 respectively at one point
+17:42:16 <Rembane> boj: They both point to v5 now, the future is here.
+17:42:26 * boj cheers!
+17:43:23 <Nevoic> I tried stackage.org as well, which just says "hoogle search" and also returns no results.
+17:43:34 <Nevoic> I'm just putting in the types, is that the right thing to do?
+17:43:45 <Nevoic> I assumed it was.
+17:43:52 <boj> what are you searching for?
+17:44:04 <Nevoic> Something to pass into this function.
+17:44:16 <boj> a -> a, for exampke, returns id at the top
+17:44:22 <Nevoic> The type of which is:
+17:44:22 <Nevoic> EventHandler f m => Data.Proxy.Proxy (m f) -> IO ()
+17:44:33 <Nevoic> So I'm looking for a function that returns:
+17:44:34 <Nevoic> EventHandler f m => Data.Proxy.Proxy (m f)
+17:44:46 <Nevoic> so I can pass it into this function and get back an IO ()
+17:45:25 <boj> i am not sure that would show up anyways
+17:45:41 <Nevoic> Ah okay, is the type information too complex?
+17:45:49 <boj> yeah, Proxy is a tad magical
+17:46:14 <Nevoic> I don't know what that means but that sounds bad. I generally hate magic in programming.
+17:46:17 <Nevoic> I prefer explicitness.
+17:46:32 <Rembane> Where does EventHandler come from? Which package?
+17:46:42 <boj> ok, then to ease your mind, Proxy is for moving types around as values
+17:46:48 <boj> which is a tad high level
+17:46:48 <Nevoic> I don't know.
+17:47:16 <Nevoic> You mean demoting types to values? I thought that was only valid in the context of values that were promoted to types.
+17:47:24 <Nevoic> I.E if you promoted "3" to a type, you could then demote it to a value.
+17:47:51 <Nevoic> Otherwise "moving types around as values" sounds like dependent typing, which is something that I think Haskell doesn't have but is planning on implementing.
+17:48:35 <Nevoic> Rembane: I don't know.
+17:48:49 <Nevoic> The function that takes it is in Network.Discord.
+17:49:00 <Nevoic> But EventHandler I don't know.
+17:49:14 <dcoutts_> Phyx-: http://www.lenholgate.com/blog/2008/02/major-vista-overlapped-io-change.html
+17:49:21 <Nevoic> And when I do :t EventHandler it says not found.
+17:49:45 <dcoutts_> Phyx-: apparently I/O associated with an IOCP is not cancelled when the issuing thread terminates.
+17:50:29 <boj> Nevoic: it allows you to ferry an type unknown ahead of time into a function. i admit i am not the best person here to explain this though
+17:51:43 <dcoutts_> Phyx-: so would allow the (OS thread holding the capability executing the) Haskell thread to issue the IO ops directly, rather than posting the IO ops to the IO manager thread(s).
+17:51:56 <Nevoic> Alright, well it's not important for what I need to know right now. I dive into type theory on occasion and I'll probably learn about it eventually. I assume (and hope) that that knowledge isn't necessary for getting things done in Haskell.
+17:52:29 <boj> Nevoic: correct, it is not generally useful for getting things done. it is useful to know that it won't help you much with hoogle searches
+17:52:41 <Nevoic> Ah, sounds good.
+17:53:02 <Nevoic> My question is, is this library usable without reading/understanding all the source code if it lacks documentation? I'm used to "dead libraries" in Python due to lack of documentation, or libraries that are really hard to use because of lack of documentation. But in my experience, static languages helped curb this problem immensely.
+17:53:42 <Nevoic> And to my surprise, Haskell seems to have gone backwards a bit with this, so the reason I came here was because I assumed I was wrong in thinking that, and hoping that there's some tool that helps me use this library.
+17:53:59 <MarcelineVQ> what lib is this anyway
+17:54:10 <boj> that is hard to say. some of us think types alone are usually enough to understand the intenet of a library's functions, but most of us would prefer to have good documentation (which we know is generally lacking)
+17:54:25 <Nevoic> discord-hs
+17:54:41 <MarcelineVQ> boj: I don't know if some of us do think that, I think it's actually that some people think some of us think that
+17:55:11 <boj> maybe i am part of the problem? :p
+17:55:31 <Nevoic> I generally lean on the side of types over documentation, especially if we're talking about in code. I pretty much resent comments, and find comments of types in places like Python/Ruby a sign of a significant fault of the language.
+17:55:44 <hpc> i prefer types as well
+17:55:45 <Nevoic> In terms of like wiki pages of usages I still enjoy using that though.
+17:55:52 <boj> definitely not talking about comments, if you have to dig that deep then it's a terrible library
+17:55:53 <hpc> they're never wrong, and you know how much they aren't telling you
+17:56:19 <MarcelineVQ> oh so EventHandler is from this lib
+17:56:20 <Nevoic> boj: agreed, but I've found terrible libraries can still be usable in some contexts, if the compiler can support you in using them.
+17:59:09 <Nevoic> MarcelineVQ: How did you figure that out?
+18:00:04 <MarcelineVQ> I looked at the docs https://hackage.haskell.org/package/discord-hs-0.4.2 -> https://hackage.haskell.org/package/discord-hs-0.4.2/docs/Network-Discord.html
+18:00:08 <MarcelineVQ> EventHandler is a class defined there
+18:00:19 <Nevoic> Ah. Is there anyway to search for a class in the ghci?
+18:00:27 <Nevoic> or a data type?
+18:00:37 <Nevoic> iirc :t is just for functions
+18:00:51 <hpc> yeah
+18:00:52 <hpc> Prelude> :info Num
+18:00:59 <MarcelineVQ> you can :browse a loaded module
+18:01:02 <hpc> ...
+18:01:03 <hpc>   	-- Defined in ‘GHC.Num’
+18:01:11 <ski> Nevoic : `:type' is for any expression
+18:01:53 <Nevoic> class (DiscordAuth m, Event ~ Domain f, () ~ Codomain f, EventMap f (DiscordApp m)) => EventHandler f (m :: * -> *)
+18:01:58 <Nevoic> I'm a simple man, that makes no sense to me.
+18:02:21 <Nevoic> I think m :: * -> * is a type constructor.
+18:02:37 <ski> `m' is a type function
+18:02:51 <ski> like `Maybe' or `Either String' or something
+18:03:10 <ski> or, perhaps, `IO', in this case
+18:03:15 <Nevoic> Yeah I think that's what i meant, something that "constructs" a type.
+18:03:19 <Nevoic> I thought that was called a type constructor.
+18:03:26 <Nevoic> "Maybe" can construct a type if you give it String or Int etc.
+18:03:37 <ski> there's two terminologies
+18:04:21 <ski> according to one, it would be a type constructor. and then a type is something which can appear to the right of a `::' in a type signature
+18:04:32 <ski> you can't say `x :: Maybe', so `Maybe' wouldn't then be a type
+18:05:35 <ski> in the other one, all these are types, but things like `Maybe',`Either',`Either String' are specifically type functions. also, in this one, only "atomic" things like `Int',`Maybe',`Either' (but not `Either String') would be "type constructors"
+18:06:20 <Nevoic> Why would `Int` be a type constructor?
+18:06:22 <ski> (and things that can appear as the right-hand-side of a type signature would sometimes be called a "concrete type")
+18:06:35 <ski> why is `False' and `Nothing' called data constructors ?
+18:06:51 <fr33domlover> o/ my stack.yaml file lists an extra dep that is a local dir, what's the canonical way to trigger rebuild if that dep changes? Plain stack build didn't work. I did `stack exec -- ghc-pkg unregister my-local-dep` - is there a better way? ^_^
+18:06:51 <ski> they don't take inputs
+18:07:09 <shachaf> Obviously they should be called data constructeds.
+18:07:11 <fr33domlover> (the command did work)
+18:07:27 <hpc> fr33domlover: i suspect the version number in the dependency needs to change for it to notice
+18:07:59 <hpc> when it resolves those sorts of extra dependencies, it thinks of them like hackage packages, not like source directories
+18:08:02 <Nevoic> Interesting, I suppose that's a good point.
+18:08:19 <Nevoic> The rest of the class definition still makes pretty much no sense though.
+18:08:31 <Nevoic> Event ~ Domain f, () ~ Codomain f.
+18:08:32 <Nevoic> etc.
+18:08:40 <ski> `~' means equality of types
+18:08:43 <ski> (as a constraint)
+18:09:16 <Nevoic> I don't follow.
+18:09:23 <fr33domlover> hpc, hmm I see, makes sense. I suppose I'll use the ghc-pkg thing
+18:09:35 <hpc> in this case, Domain and Codomain are probably type families
+18:09:36 <Nevoic> I follow the (as a constraint) part, not the equality of types.
+18:09:57 <fr33domlover> (I've been listing them as packages until now, but that seems to confuse ghci when loading modules)
+18:09:57 <ski> presumably the type class `EventHandler' (or maybe a superclass of it, like `EventMap') has some associated types (type members), `Domain f',`Codomain f'
+18:10:04 <hpc> which are sort of like type aliases with extra logic around the instance resolution mechanism
+18:10:30 <hpc> so the type (Domain f) could be Int or Double or Event or [String] or IO ()
+18:10:48 <Nevoic> If I say Person ~ Car, that seems to be nonsense, similar(ish) to True == False, except the latter evaluates to a usable expression and the former is a constraint that produces a type of zero values.
+18:11:03 <hpc> and the constraint (Event ~ Domain f) means that for whatever f is chosen, (Domain f) evaluates to Event
+18:11:15 <Nevoic> Are type families == kinds?
+18:11:28 <hpc> no
+18:11:33 <Nevoic> damn
+18:11:44 <hpc> so
+18:11:57 <ski> type families are type functions, which can compute different types, depending on which types are given as input parameters
+18:12:08 <hpc> maybe when you were learning the type keyword, you wondered if you could say "if the parameter type is this, the result type is that"
+18:12:29 <hpc> type families are that thing, with a bunch of... well... constraints
+18:12:30 <ski> otoh type synonyms are "uniform", they give the same result type, only with some parts of it replaced by the given type parameters
+18:12:43 <Nevoic> I only ever used the type keyword as an alias in Haskell.
+18:12:47 <ski> type families gives you pattern-matching on types
+18:12:52 <Nevoic> Like type Number = [Digit]
+18:13:01 <ski> that's a type synonym, yes
+18:13:09 <hpc> a realistic type family might be
+18:13:41 <ski>   type ReadS a = String -> [(a,String)]  -- a parameterized type synonym. we don't check what type `a' is, we just plug it into the result
+18:13:42 <hpc> class HasElements c where type family Letter c; lookup :: c -> Int -> Letter c
+18:14:00 <hpc> instance HasElements ByteString where type family Letter ByteString = Word8; ...
+18:14:11 <hpc> instance HasElements [a] where type family Letter [a] = a; ...
+18:14:13 <fr33domlover> Do people still use functional dependencies? I haven't seen them in code in a while ^_^
+18:14:35 <ski> `Letter ByteString' will evaluate to `Word8', but `Letter String', which is `Letter [Char]', will evalute to `Char'
+18:14:36 <fr33domlover> And I tend to use type familities for stuff, it seems
+18:14:40 <ski> fr33domlover : yes
+18:15:06 <Nevoic> Lots of information there, I'm trying to absorb it all but reckon I'll only get like 40% of it max.
+18:15:13 <hpc> (basically saying, when you index a bytestring you get bytes, when you index a list of some type, you get that type)
+18:16:00 <Nevoic> hpc: How is that any more descriptive than x :: [a] -> Int -> a ?
+18:16:36 <ski> Nevoic : hpc's example also works on `ByteString', which is not a synonym for `[Word8]'
+18:16:51 <hpc> ^
+18:17:25 <ski> Nevoic : that class is similar to saying
+18:17:25 <hpc> https://hackage.haskell.org/package/base-4.12.0.0/docs/Prelude.html#v:-33--33- and https://hackage.haskell.org/package/bytestring-0.10.8.2/docs/Data-ByteString.html#v:index don't unify cleanly otherwise
+18:17:42 <ski>   class HasElements l c | c -> l where lookup :: c -> Int -> l
+18:17:59 <ski>   instance HasElements Word8 ByteString where ...
+18:18:03 <Nevoic> btw idk what Word8 is, an 8 byte string?
+18:18:08 <ski>   instance HasElements a [a] where ...
+18:18:10 <hpc> it's an unsigned byte
+18:18:16 <hpc> its values are the numbers 0 to 255
+18:18:24 <ski> `8'-bit unsigned integer
+18:18:33 <fr33domlover> Nevoic, not the most gentle introduction but maybe still useful: https://wiki.haskell.org/GHC/Type_families
+18:18:41 <Nevoic> Word8 is a number, not a word?
+18:18:47 <ski> `Int8' is the corresponding signed version
+18:18:47 <Nevoic> Is that some nod to math terminology?
+18:18:51 <hpc> (there's also Int8 which has the values -128 to 127)
+18:19:14 <shachaf> The term 8 is originally from maths.
+18:19:21 <hpc> it refers to machine words, which is terminology from lower-level languages
+18:19:29 <dmwit> The "word" part comes from the terminology in CPU architectures, where "word" refers to the number of bits that the processor stores in each register.
+18:19:31 <shachaf> "word" is a computer thing, though.
+18:19:32 <ski> "word" in the low-level machine code sense, not in the linguistic sense of a string of letters
+18:20:08 <hpc> i am sure there's some interesting bit of history around that word choice
+18:20:08 <dmwit> Word is a type whose size depends on the CPU architecture on which it is compiled; meanwhile Word8, Word16, Word32, and Word64 are like Word but with a size that does not depend on architecture.
+18:21:32 <Nevoic> Kind of off topic, but isn't Haskell supposed to be high level? Why would they name something "word" in reference to some low level CPU architecture terminology instead of just calling it like uInt.
+18:22:47 <shachaf> The Haskell committee is part of an evil conspiracy whose goal is word domination.
+18:23:00 <hpc> it's oddly easier to keep track of that way
+18:23:26 <hpc> every morning i give thanks that i don't have to unravel what "unsigned long long" means in my day to day life
+18:24:07 <hpc> certain conventions carry a lot of useful information with them
+18:25:23 <Rembane> Nevoic: Haskell has some of the best bit crunching functionality I've ever seen and makes low level programming a very nice experience. 
+18:25:53 * ski likes the pattern-maching facilities on bits and words, in Erlang
+18:26:50 * hackage ms-tds 0.1.0.1 - TDS Protocol implemented in Haskell  https://hackage.haskell.org/package/ms-tds-0.1.0.1 (tkmsm)
+18:27:21 <Rembane> ski: Can you pattern match on certain errr... patterns in the series of bits? 
+18:31:01 <ski> you can extract parts of the sequence of bits, and you can use that to determine how many further bits to extract
+18:31:15 <ski> i think it's primarily meant for binary protocols
+18:32:13 <ski> <http://erlang.org/doc/programming_examples/bit_syntax.html><http://erlang.org/doc/efficiency_guide/binaryhandling.html>
+18:36:09 <Phyx-> dcoutts_: yes I know. My I/O manager is based on this principle that requests are decoupled from the issuing threads
+18:37:02 <ski> Rembane : i don't think it has facilities for regexen-like matching on bits, if that's what you had in mind
+18:37:13 <sarahzrf> https://i.imgur.com/ATDD76x.jpg
+18:37:16 <sarahzrf> er wrong channel
+18:37:57 <nyaomi> same
+18:45:34 <monochrom> "unsigned integer" is like "non-eccentric ellipse"
+18:46:07 <monochrom> At any rate, "word" is terminology from assembly languages, the Haskell people did not make it up.
+18:48:51 <monochrom> Oh OK you're saying that's too low level.
+18:49:07 <monochrom> Is "unsigned int" really all that high-level?
+18:50:26 <monochrom> If all it means is "non-negative integers but has an upper bound and it's going to wrap around" I don't see how it's any higher level than being candid and just say "word".
+18:51:02 <monochrom> For genuinely high level, see Haskell's Natural and Integer. (Unbounded.)
+18:51:54 <monochrom> Advice: It it's not math, it's not high level.
+18:52:02 <monochrom> s/It/If/
+18:52:20 * hackage rattletrap 6.3.2 - Parse and generate Rocket League replays.  https://hackage.haskell.org/package/rattletrap-6.3.2 (fozworth)
+18:52:46 <shachaf> Z/2^64Z isn't math?
+18:53:13 <monochrom> It is.
+18:54:32 <shachaf> Computer programmers should recognize that they're programming computers.
+18:55:19 <monochrom> No disagreement there.
+18:56:05 <monochrom> Instead, as David Parnas pointed out, programmers do mix up "vague" with "high level".
+18:56:25 <monochrom> or maybe it was "vague" vs "abstract" but meh.
+18:57:02 <monochrom> If the point of "unsigned int" is "there is an upper bound BUT I WON'T TELL YOU WHAT" then it's vague not high level.
+18:57:34 <shachaf> Programming computers means making computers do the thing you want them to do. So there are two important domains: The domain of what computers can do and the domain of what you want to do.
+18:57:48 <shachaf> "low-level" means something like the former, and "high-level" means something like the latter.
+18:58:02 <shachaf> Many things are neither high-level nor low-level, but just bad and irrelevant.
+18:59:48 <dmwit> Word64 isn't Z/2^64Z.
+18:59:54 <dmwit> The multiplication is all wrong.
+19:01:30 <shachaf> It is?
+19:01:34 <kwantam> but isn't the point of "unsigned int" really "this is the fastest way to do (unsigned) arithmetic for smallish aon your machine"? That's not vague, though it's perhaps slightly esoteric.
+19:01:46 <kwantam> erm, "smallish numbers"
+19:02:14 <kwantam> (and maybe there's a "probably" stuck in there somewhere)
+19:02:37 <monochrom> I'm OK with that, but then it also means "unsigned int" is not high level either.
+19:02:53 <monochrom> Because really "word" means the same.
+19:02:59 <kwantam> word.
+19:03:25 <monochrom> It would be ideal to ask Ritchie why coin the new name "unsigned int".
+19:04:30 <dmwit> shachaf: For a smaller example, consider Z/2^2Z, whose multiplication table is listed here: https://en.wikipedia.org/wiki/Finite_field#Field_with_four_elements
+19:04:31 <monochrom> But I suspect it's a premature refactoring of names. {unsigned, signed, unspecifed}x{char, short, int, long} so you don't need 12 different names.
+19:05:00 <dmwit> shachaf: Read `a` as `2` and you will see that the addition coincides with what Word2 does (would do, if it existed).
+19:05:06 <dmwit> shachaf: But the multiplication is very different.
+19:05:26 <monochrom> dmwit, Z/4Z is not a field.
+19:05:38 <nshepperd> dmwit: huh?
+19:06:35 <monochrom> Z/4Z is merely {0, +/-1, +/-2, +/-3, ...}/{0, +/-4, +/-8, +/-12, ...}
+19:06:42 <shachaf> dmwit: I am confusil. The diagonal of the addition table is 0.
+19:07:07 <dmwit> You are right. The addition is different, too. What am I thinking.
+19:07:08 <shachaf> Word64 isn't a field.
+19:07:09 <nshepperd> that's not the multiplication table for Z/4Z
+19:07:57 <monochrom> A finite field of 4 elements would be (Z/2Z)[x]/(the ideal generated by an irreducible degree-2 polynomial of (Z/2Z)[x])
+19:08:20 <nshepperd> the point of 'unsigned int' in C mostly seems to be a way to make new and exciting bugs happen when numbers go negative
+19:10:44 <Nevoic> shachaf: I disagree on the definition of low level and high level being the domain of "what computers can do" and the domain of "what you want to do". By that definition, once computers can do everything that humans can, low level programming will contain higher abstraction points than high level programming, which I think makes no sense. High leve
+19:10:44 <Nevoic> l programming is about the abstraction level, it abstracts away unnecessary information (for that domain).
+19:11:23 <monochrom> You probably didn't hear that about 20 years ago assembly languages got while-loops too.
+19:11:44 <monochrom> That's right, "low level" was, is, and will be a moving target.
+19:12:42 <nshepperd> Nevoic: once computers can do everything that humans can, we'll just start wanting ever more amazing and outlandish things
+19:12:54 <monochrom> Did you also know that "long" vs "short" trouts etc is also a moving target? Average trout length 200 years ago was much longer than today's.
+19:13:38 <monochrom> Also "old" vs "young", "retirement age", "fat" vs "fit".
+19:14:30 <shachaf> Computers can only do very simple operations like addition in Z/2^64Z
+19:14:44 <monochrom> Even that one is a moving target.
+19:14:49 <shachaf> If that happens to be your domain, then high level is the same as low level
+19:14:54 <monochrom> When I was a kid, it was Z/256Z
+19:15:00 <shachaf> Of course it is.
+19:15:25 <monochrom> Z/2^64Z required like 10 instructions.
+19:15:39 <shachaf> You can teach computers to do more complicated things. The more you have to teach them, the less low-level your thing is.
+19:16:33 <monochrom> To be sure, in that context, "unsigned long long long" was high level, because one single "x+y" would generate those 10 instructions.
+19:17:20 <dmwit> Ah, the age-old problem with Kolmogorov complexity: "But which language do you choose to measure the length of your programs in?".
+19:17:22 <monochrom> Today "unsigned long long long" is "LOL that's just one word". You need to go multiple-precision for high level.
+19:17:34 <monochrom> Clearly, 6502.
+19:18:02 <monochrom> I heard that Z80 was nicer. I can be talked into changing to that.
+19:18:37 <monochrom> If you go all the way back to Turing machines, addition was high level.
+19:18:43 <monochrom> Any addition at all.
+19:18:57 <siraben> Z80 doesn't even have a multiplication instruction
+19:19:05 <monochrom> Oh darn haha
+19:19:10 <dmwit> One advantage of 6502: no spectre or meltdown.
+19:19:11 <siraben> Yet TI made a graphing calculator from them
+19:19:51 <siraben> It's a small ISA, all the Z80 instructions fit in a couple of printed pages, unlike the 2000+ pages needed for x86-64
+19:21:40 <dmwit> monochrom: Is the "Oh darn" for "Oh darn, I don't want to switch from 6502 to Z80 if I'm going to lose my multiplication instruction."? Because if so, rest assured: you aren't losing a multiplication instruction.
+19:21:48 <shachaf> Yes. "low-level" means "close to the computer's level", so of course it's parameterized by the computer
+19:22:19 <monochrom> Do we have a catchy name for proof complexity? I.e., how long is the shortest proof is, as a function of the theorem being proved.
+19:22:50 <ski> siraben : neither does 6502
+19:22:52 <monochrom> Yeah do I lose multiplication with Z80?
+19:23:03 <monochrom> Err wait what?
+19:23:06 <dmwit> monochrom: Isn't that also "Kolmogorov complexity"?
+19:23:28 <dmwit> monochrom: No, you do not lose multiplication by switching from 6502 to Z80. No, Z80 does not have multiplication. You are a logician.
+19:23:45 <ski> dmwit : it's okay, 6502 doesn't have a multiplication instruction either
+19:23:51 <monochrom> I don't think Kolmogorov intended it for proofs.
+19:24:09 <monochrom> ski! You should say that to me! :)
+19:24:12 <dmwit> ski: I know. Indeed, it is the only possible explanation for my claims. =)
+19:24:21 <siraben> But you don't really need multiplication, because all you need is shift and add
+19:24:42 <ski> monochrom : i thought you were implying that you were familiar with 6502
+19:25:03 <monochrom> I was! But I make mistakes too!
+19:25:18 <ski> dmwit : oh, i misinterpreted then
+19:25:42 <dmwit> Hooray! Everybody is on the same page now.
+19:25:48 * dmwit passes some high fives around
+19:26:10 <monochrom> Page fault resolved.
+19:26:16 <shachaf> dmwit: Are we on the same page regarding Z/2^nZ?
+19:26:31 <dmwit> Yes, I was categorically wrong.
+19:26:38 <monochrom> That one is better as "are we in the same ring?" :)
+19:27:15 <monochrom> especially if you recall two kinds of rings, the Z/nZ kind, and the x86 kind. :)
+19:27:44 <ski> dmwit : does that differ from being classically wrong ?
+19:28:09 <monochrom> Yes, category > class
+19:28:20 <monochrom> class is like meh
+19:29:14 <dmwit> ski: I don't know the answer, but I do know it's either yes or no.
+19:29:19 <monochrom> public abstract category FunctorFactory { ...
+19:30:37 <siraben> dmwit:  law of the excluded middle strikes again
+19:30:58 <sarahzrf> }
+19:31:23 <siraben> oops not LEM but rather the principle of bivalence
+19:34:33 * ski . o O ( Ring 3,0,-1,-2 <https://lwn.net/Articles/738649/> )
+19:35:16 <ski> dmwit : how can you know it's either this or that, without knowing which alternative it is ?
+19:51:14 <dmwit> ski: The joke is classical logic is like that.
+19:57:22 * ski nods
+20:00:21 * hackage numhask-array 0.3.0.1 - n-dimensional arrays  https://hackage.haskell.org/package/numhask-array-0.3.0.1 (tonyday567)
+20:15:11 <iqubic> I know I said I was going away for only a little bit, but then I took a long nap.
+20:15:51 <bolverkr> could anyone explain why do we need (#.) sometimes instead of (.). There is a comment attempting to explain it at the end of http://hackage.haskell.org/package/base-4.12.0.0/docs/src/Data.Functor.Utils.html but I don't really understand it
+20:16:23 <bolverkr> what does _|_ mean in an expression
+20:16:27 <iqubic> When do we ever need (#.)?
+20:16:32 <iqubic> :t (#.)
+20:16:34 <lambdabot> error: parse error on input ‘)’
+20:17:13 <bolverkr> it is used in the implementation of foldMap
+20:17:30 <bolverkr> i mean foldr
+20:17:45 <bolverkr>  foldr f z t = appEndo (foldMap (Endo #. f) t) z
+20:17:49 <lyxia> _|_ is for undefined values
+20:18:04 <iqubic> bolverkr: treat ⊥ as undefined.
+20:18:17 <iqubic> bolverkr: I've never seen that before in my life.
+20:18:22 <lyxia> (#.) avoids a closure allocation in some situations
+20:18:29 <iqubic> Ah. I see.
+20:18:38 <MarcelineVQ> iirc the source for it details why it exists in a note
+20:19:50 <MarcelineVQ> doop, bolverkr mentions that hehe
+20:20:43 <lyxia> > (undefined :: a -> a) `seq` ()
+20:20:43 <iqubic> does ⊥ ~ Void?
+20:20:45 <lambdabot>  *Exception: Prelude.undefined
+20:20:49 <lyxia> > (id . undefined :: a -> a) `seq` ()
+20:20:51 <lambdabot>  ()
+20:20:57 <iqubic> What the heck??
+20:21:23 <lyxia> because of that GHC needs to create a new value for (id . undefined)
+20:21:28 <shachaf> whoa, (#.) is in base?
+20:22:01 <iqubic> I didn't know it was a thing until just now. Heh.
+20:22:46 <ski> iqubic : `Void' is a type
+20:23:13 <lyxia> it's used internally but not exported
+20:23:18 <iqubic> And ⊥ is a value?
+20:23:26 <iqubic> So you can't really unify them?
+20:23:40 <ski> iqubic : ⌜⊥⌝ is a symbol representing the "value" of a computation with no answer
+20:24:00 <iqubic> Heh. Yeah.
+20:26:27 <shachaf> You also can't unify the word "unify" with this confusing types and values thing.
+20:26:54 <shachaf> Man, I can't believe they put (#.) in base.
+20:28:18 * ski unifies "unifies" with "equals"
+20:29:00 <shachaf> Not that I've been keeping track, but I'm pretty skeptical that was the right thing to do. And I opened the bug originally.
+20:29:06 <shachaf> Maybe there was some motivation for it.
+20:32:31 <bolverkr> so basically if N is a newtype (b -> c) constructor and f is a function (a -> b). #. stops a closure to be allocated by ignoring N and just lifting f to the type c. I am not sure if i am understanding this correctly.
+20:33:00 <ski> coercing `f' from type `a -> b' to type `a -> c'
+20:33:49 <bolverkr> i see, that makes sense. Thanks!
+20:44:04 <unlockingself> Hi
+20:44:57 <iqubic> Hello.
+20:46:24 <unlockingself> Just joined IRC for the first time. 
+20:46:28 <suzu> welcome
+20:46:44 <unlockingself> Thanks ! 
+20:47:34 <ski> if you have any (Haskell-related) questions, feel free to ask
+20:47:44 <ski> you can also just lurk and watch, if you prefer
+20:47:57 <iqubic> I do 50/50 lurking and watching.
+20:48:08 <suzu> i do 99% lurking 1% speaking
+20:48:31 <iqubic> I've noticed.
+20:48:32 * ski . o O ( lurking cheese )
+20:48:47 <iqubic> I have to get food, I'll be back soon.
+20:49:23 <MarcelineVQ> iqubic: wait don't go
+20:50:12 <iqubic> Why not?
+20:50:46 <iqubic> Unlike earlier today when I said I was literally just rebooting my machine, and instead took a long nap, I won't be gone for long.
+20:51:07 <MarcelineVQ> I just feel like something incredibly important will happen if you're not around and you'll miss it.
+20:52:07 <iqubic> I'm also watching Game of Thrones right now, so I'm only like 40% here.
+20:52:46 <ski> well, if they stay, then they're not not around. so perhaps that something incredibly important won't happen in that case. or perhaps it will, anyway
+20:53:45 <iqubic> I'm not really around because most of my brain power is dedicated to watching Game Of Thrones.
+20:54:20 <MarcelineVQ> ski: What if something important can only happen if iqubic is here? The world might depend on it
+20:54:24 <iqubic> So I assume that the important thing will actually happen, and I'll most likely miss it because I'm doing other things?
+20:56:00 <ski> MarcelineVQ : the same important something ?
+20:56:11 <MarcelineVQ> All the important somethings
+20:56:54 <ski> if the world depends on it, it should probably pull it in and built it
+20:57:20 <MarcelineVQ> ski: the cpu might get a little warm
+20:57:45 * ski . o O ( "If a tree falls in a forest, and nobody is there to see it, will it get garbage-collected?" )
+21:01:02 <dmwit> What if something important can only happen if iqubic gets food?
+21:01:23 <MarcelineVQ> This is a real dillemma.
+21:01:32 <dmwit> It might be a multilemma.
+21:01:46 <MarcelineVQ> There may be an uncountable set of lemmas involved.
+21:01:54 <iqubic> Jokes on all of you. I've already gotten food, and come back.
+21:02:06 <dmwit> dilemma, monolemma, ... nilemma?
+21:02:22 <iqubic> I pulled some leftover chicken out of the fridge, and heated it up.
+21:02:29 <dmwit> Was it important?
+21:02:52 <iqubic> I'm just sitting at my machine and eating my chicken and watching Game of Thrones. Life is good.
+21:03:17 <shachaf> Maybe talk about that somewhere else.
+21:03:22 <dmwit> Lies! If you were just doing those things, we'd never have received that message!
+21:03:29 <dmwit> Okay. shachaf is right. Thanks.
+21:03:33 <iqubic> Also idly wondering if I should learn APL.
+21:03:42 <MarcelineVQ> You should
+21:03:47 <iqubic> Why?
+21:03:53 <MarcelineVQ> :>
+21:04:28 <shachaf> APL is a better topic than the thing you're eating, but it's still not a good topic here.
+21:04:53 <iqubic> I'm willing to talk about this elsewhere.
+21:05:08 <ski> what if the something important to happen is something really bad ?
+21:05:24 <iqubic> If someone wants to name the propery channel, I will gladly continue talking about off topic things.
+21:05:30 <shachaf> Go for it. The world is full of places to talk about things.
+21:09:15 <jle`> is there a free comonoid in haskell? is it Stream ?
+21:10:27 <jle`> maybe a *-kinded comonoid is boring since there is only one trivial instance
+21:10:39 <jle`> but Cofree is arguably a * -> * kinded free comonoid
+21:10:53 <shachaf> You should define what those words mean but the answer is probably no.
+21:11:06 <shachaf> Or maybe "it's trivial".
+21:11:15 <shachaf> If by Cofree you mean the cofree comonad, it's cofree, not free.
+21:11:40 <jle`> well, a *-kinded Comonoid abstraction would support `a -> ()`, and `a -> (a, a)`, with the associativity/identity rules
+21:12:08 <jle`> but since there is only one (a -> ()) for any a, it seems like we don't have too many interesting instances
+21:12:24 <shachaf> That's one way to do it. If so the laws force the implementation to be the obvious one.
+21:12:51 <iqubic> jle`: 'a -> ()' is just 'const ()'
+21:13:13 <jle`> yes, that's the single unique function of that type for any given type a
+21:15:05 <jle`> at the higher-kinded level, we can have some (* -> *) -> (* -> *) that would take a functor and produce something 'comonoidal' with it, but i'm not too sure how that would look in a general sense. i'll maybe think about it
+21:17:39 <shachaf> The coassociativity law forces comult : a -> (a, a) to be \x -> (x, x)
+21:24:07 <ski> comonoids in a kleisli category may be more interesting (than in `Hask')
+21:25:17 <ski> (cf. "Coalgebras" in the monoidal (using tensor) category `Vect_K', <https://en.wikipedia.org/wiki/Coalgebra>)
+21:27:44 <shachaf> Yes, they're more interesting in many categories.
+21:35:43 <iqubic> Let's say I have a list of elements [a, b, c, d] and a function f. How could I run the computation "f a (f b (f c d))" in haskell?
+21:36:12 <iqubic> So it's like a foldr/foldl, don't really know which, but with no initial value.
+21:36:33 <iqubic> (a -> a -> a) -> [a] -> a
+21:39:20 <ski> @let destroy :: Kleisli [] Natural (); destroy = Kleisli (\case 1 -> [()] ; _ -> [])
+21:39:21 <lambdabot>  Defined.
+21:39:24 <ski> @let duplicate :: Kleisli [] Natural (Natural,Natural); duplicate = Kleisli (\case 0 -> (0,0) : [(m,n) | n <- [1 ..],(m,n) <- [(0,n),(n,0)]]; n -> [(d,n `div` d) | d <- [1 .. n],0 <- [n `mod` d]])
+21:39:26 <lambdabot>  Defined.
+21:39:35 <ski> > runKleisli destroy `map` [0 .. 7]
+21:39:37 <lambdabot>  [[],[()],[],[],[],[],[],[]]
+21:39:41 <ski> > runKleisli duplicate `map` [1 .. 8]
+21:39:44 <lambdabot>  [[(1,1)],[(1,2),(2,1)],[(1,3),(3,1)],[(1,4),(2,2),(4,1)],[(1,5),(5,1)],[(1,6...
+21:39:57 <iqubic> What are you trying to do?
+21:40:09 <iqubic> :t runKleisli
+21:40:11 <lambdabot> Kleisli m a b -> a -> m b
+21:41:07 <iqubic> what is the point of dupicate and destroy?
+21:41:08 <ski> > 0 `divMod` 1 :: (Natural,Natural)  -- huh ?
+21:41:11 <lambdabot>  *Exception: Natural: (-)
+21:41:16 <iqubic> :t duplicate
+21:41:18 <lambdabot> Kleisli [] Natural (Natural, Natural)
+21:41:23 <ski> iqubic : comonoid in a kleisli category
+21:41:26 <iqubic> :t destroy
+21:41:27 <lambdabot> Kleisli [] Natural ()
+21:41:33 <shachaf> The types are written right up there.
+21:41:38 <iqubic> I'm not sure I see how that works.
+21:41:48 <iqubic> shachaf: I should learn to read.
+21:41:53 <ski> > foldr1 f [a,b,c,d]  -- iqubic ?
+21:41:55 <lambdabot>  f a (f b (f c d))
+21:42:13 <shachaf> I don't get what kind of answer you're expecting to your questions.
+21:42:14 <iqubic> Yeah, that.
+21:42:30 <iqubic> > foldl1 f [a, b, c, d]
+21:42:33 <lambdabot>  f (f (f a b) c) d
+21:42:46 <ski> > foldl1 f [a,b,c,d]
+21:42:48 <lambdabot>  f (f (f a b) c) d
+21:42:57 <ski> oh, you just said that
+21:43:16 <ski> > scanr1 f [a,b,c,d]
+21:43:18 <lambdabot>  [f a (f b (f c d)),f b (f c d),f c d,d]
+21:43:22 <ski> > scanl1 f [a,b,c,d]
+21:43:24 <lambdabot>  [a,f a b,f (f a b) c,f (f (f a b) c) d]
+21:43:36 <iqubic> I know what scanl and scanr do.
+21:43:46 <ski> i see
+21:43:59 <iqubic> I just realized that APL has an operator that is basically fix.
+21:45:29 <iqubic> That operator just calls the current lambda it's sitting in and using recursion.
+21:45:32 <iqubic> Fix is cool.
+21:45:51 <iqubic> The way I see it, it lets you call the current lambda from the inside.
+21:46:52 <iqubic> > let factorial = fix (\fac n -> if n == 1 then 1 else n * fac (n - 1)) in factorial 5
+21:46:55 <lambdabot>  120
+21:49:13 <iqubic> I know fix has other uses, but that's the one that comes to me.
+21:58:52 <Nevoic> :t fix
+21:58:54 <lambdabot> (a -> a) -> a
+21:59:05 <iqubic> @src fix
+21:59:05 <lambdabot> fix f = let x = f x in x
+21:59:41 <Nevoic> I don't understand the type, I would've assumed it would be something like (a -> a) -> a -> a
+22:00:00 <Nevoic> Or maybe rather ((a, a) -> a) -> a
+22:00:07 <Nevoic> The block it takes has two params.
+22:00:23 <jle`> Nevoic: the 'simpler' definition is `fix f = f (fix f)`
+22:00:51 <jle`> Nevoic: the definition you put also has only a single parameter, f
+22:01:01 <jle`> fix f = ....
+22:01:02 <iqubic> jle`: Now that they just said that, I have no idea how my factorial definition works.
+22:01:26 <jle`> iqubic: it's because you are fixing an ((a -> a) -> (a -> a))
+22:01:36 <iqubic> I see.
+22:01:59 <Nevoic> So fix doesn't terminate?
+22:02:20 <Nevoic> If that's the case I have no clue how `factorial 5` works.
+22:02:34 <Nevoic> I would've imagined `factorial !! 4` would've been needed.
+22:03:17 <ski> > fix (1 :)
+22:03:20 <lambdabot>  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1...
+22:03:26 <ski> Nevoic : can you understand that ^ ?
+22:03:39 <jle`> Nevoic: fix terminates in the case that the input ignores its input
+22:03:45 <jle`> > fix (\_ -> 10)
+22:03:47 <lambdabot>  10
+22:03:49 <iqubic> > fix (1: scanl (+))
+22:03:51 <lambdabot>  error:
+22:03:52 <lambdabot>      • Couldn't match expected type ‘a -> a’
+22:03:52 <lambdabot>                    with actual type ‘[Integer]’
+22:03:57 <iqubic> Damn it.
+22:03:59 <monochrom> "fix doesn't terminate?" is logical equivalent to "while loop doesn't terminate?"
+22:04:13 <jle`> Nevoic: so the point that a function ignores its input is where fix's evaluation putters out
+22:04:27 <monochrom> You can write a while loop that terminates, and another while loop that doesn't.
+22:04:34 <iqubic> >> fix (scanl (+) . (1:))
+22:04:40 <Nevoic> Ah alright.
+22:04:44 <jle`> Nevoic: in the factorial example above, the function ignores its input in the case that n == 1
+22:04:49 <iqubic> > fix (scanl (+) . (1:))
+22:04:52 <lambdabot>  error:
+22:04:53 <ski> > fix ((0 :) . scanl (+) 1)
+22:04:54 <lambdabot>      • Couldn't match type ‘[[a]] -> [[a]]’ with ‘[a]’
+22:04:55 <jle`> so if n == 1, it basically becomes fix (\_ -> 1)
+22:04:56 <lambdabot>        Expected type: ([[a]] -> [[a]]) -> [[a]] -> [[a]]
+22:04:58 <lambdabot>  [0,1,1,2,3,5,8,13,21,34,55,89,144,233,377,610,987,1597,2584,4181,6765,10946,...
+22:05:23 <iqubic> > fix (scanl (+) 1)
+22:05:27 <lambdabot>  [1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,2...
+22:05:31 <iqubic> There we go.
+22:06:14 <iqubic> And that is something I actually understand.
+22:06:58 <iqubic> And the crazy thing is this:
+22:07:40 <iqubic> > let powerOfTwo = fix (scanl (+) 1) !! n in powerOfTwo 11
+22:07:42 <lambdabot>  error:
+22:07:42 <lambdabot>      • Couldn't match expected type ‘Int’ with actual type ‘Expr’
+22:07:42 <lambdabot>      • In the second argument of ‘(!!)’, namely ‘n’
+22:08:05 <Nevoic> gottem
+22:08:23 <iqubic> > let powerOfTwo = (fix (scanl (+) 1)) !! n in          powerOfTwo 11
+22:08:25 <lambdabot>  error:
+22:08:25 <lambdabot>      • Couldn't match expected type ‘Int’ with actual type ‘Expr’
+22:08:25 <lambdabot>      • In the second argument of ‘(!!)’, namely ‘n’
+22:08:33 <Nevoic> Where is n defined?
+22:08:40 <iqubic> > let powerOfTwo n = (fix (scanl (+) 1)) !! n in          powerOfTwo 11
+22:08:42 <lambdabot>  2048
+22:08:42 <iqubic> Fixed.
+22:08:49 <jle`> simple-reflect
+22:09:12 <iqubic> But even though fix never terminates there, the powerOfTwo function does.
+22:09:27 <jle`> it basically exists to have a 'Show' instance that's useful for teaching/demonstration
+22:09:31 <iqubic> Laziness is kreally cool.
+22:09:44 <iqubic> Like this:
+22:10:15 <iqubic> > scanl f a [b, c, d, e]
+22:10:17 <lambdabot>  [a,f a b,f (f a b) c,f (f (f a b) c) d,f (f (f (f a b) c) d) e]
+22:10:32 <iqubic> That's a nice show instance.
+22:10:49 <Nevoic> Yaat, laziness has its advantages, but strict evaluation can too. I like Idris's method personally, but it falls to the same problems that Haskell faces in practical usage just more so (lack of libraries). Idris is also incomplete in a lot of areas, but at a fundamental level I like the language more.
+22:11:03 <jle`> Nevoic: no need to use 'but' there
+22:11:10 <jle`> lazy is useful in some situations, strict evaluation is useful in others
+22:11:17 <Nevoic> I'm too tired, my sentence structure was garbo.
+22:11:35 <jle`> right, i mean to say that it isn't an antagonistic relationship
+22:11:49 <jle`> it's like how we have both Int and Double in the same language
+22:12:16 <jle`> "Int is useful, but so is Double"
+22:12:16 <Nevoic> I also meant to imply "by default", because yeah obviously languages can have both. Idris has both List and Stream etc.
+22:12:49 <Nevoic> And I'm just Haskell has strict Lists as well.
+22:12:59 <Nevoic> I'm sure * jesus christ I need sleep apparently.
+22:13:07 <Nevoic> My brain is failing me.
+22:13:09 <iqubic> Nevoic: Haskell has both List and Stream too.
+22:13:18 <jle`> no worries :)
+22:13:18 <Nevoic> I thought List was already lazy?
+22:13:26 <iqubic> It is.
+22:13:34 <Nevoic> Stream is __extra__ lazy
+22:13:38 <iqubic> Stream is just an infinite list.
+22:13:44 <Nevoic> easi
+22:13:46 <iqubic> @src Stream
+22:13:46 <lambdabot> Source not found. :(
+22:13:47 <jle`> just saying that lazy and strict co-exist as both legitimate tools that are useful in different situations
+22:14:01 <Nevoic> agreed
+22:14:47 <iqubic> data Stream a = Stream (Stream a) a (Stream a)
+22:15:20 <iqubic> Actually, that's closer to an infinite list zipper.
+22:18:08 <ski> that's an infinite binary tree
+22:19:01 <iqubic> Oh, I suppose it is.
+22:19:31 <iqubic> data Stream a = Cons a (Stream a)
+22:19:57 <iqubic> data ListZipper a = (Stream a) a (Stream a)
+22:20:01 <iqubic> There we go.
+22:20:09 <iqubic> Infinite List Zipper.
+22:25:16 <iqubic> Also, that ListZipper can be made into a comonad fairly easily.
+22:32:43 * ski nods and smiles
+22:33:27 <iqubic> Also, that second version of Stream, is an infinite list, and then I just glue two of them back to back with a viewpoint in the center to create a list zipper.
+22:34:30 <iqubic> If you a two dimensional ListZipper comonad, you can easily create a game of life simulation. That was how I fully came to appreciate comonads.
+22:36:23 * ski computes the elasticity of demand of iqubic's zipper
+22:38:01 <iqubic> What do you mean?
+22:41:42 <ski> <https://en.wikipedia.org/wiki/Elasticity_of_demand>
+22:44:40 <iqubic> How does this relate to Haskell datatypes?
+22:51:07 <ski> derivatives ?
+22:51:25 <ski> @google McBride derivative type
+22:51:27 <lambdabot> http://strictlypositive.org/diff.pdf
+22:51:27 <lambdabot> Title: The Derivative of a Regular Type is its Type of One-Hole Contexts
+22:52:50 <iqubic> I know we have Sum types and Product types, but subtraction and division make little sense in types.
+22:53:18 <iqubic> And yes, I know the term Algebraic Data Type comes from the fact that there are sums and products.
+23:00:58 <maerwald> I can never remember what are sums and what are product types. I constantly mix them up lol
+23:02:48 <ski> well, if there's a unique `q' (up to iso) such that `q*d = n', then you could say that `q = n/d'
+23:03:38 <ski> btw, "Algebraic" in "Algebraic Data Type" could also be interpreted to refer to `F'-algebras
+23:04:23 <ski> maerwald : the sum of two finite types, with `m' and `n' inhabitants, is a type with `m + n' inhabitants
+23:04:29 <ski> maerwald : the product of two finite types, with `m' and `n' inhabitants, is a type with `m * n' inhabitants
+23:05:17 <ski> if we write the number of inhabitants of `T' as `|T|', then `|T| = m' and `|U| = n' implies |T + U| = m + n'
+23:05:31 <ski> or `|T + U| = |T| + |U|', for short
+23:05:39 <ski> so `T + U' is `Either T U', in haskell
+23:06:06 <ski> similarly, `|T * U| = |T| * |U|'. `T * U' is `(T,U)' in Haskell
+23:06:27 <iqubic> So Either a b could either be Left a, which has a inhabitants, or Right b which has b inhabitants. Put them together and you get Either a b with a + b inhabitants.
+23:06:35 <ski> there's also `|U ^ T| = |U| ^ |T|'. `U ^ T' is `T -> U', in Haskell
+23:07:10 <ski> and the type `1' is `()' in Haskell, while the type `0' is `Void'
+23:07:37 <ski> `2', being `1 + 1', is `Either () ()', but one can think of `Bool' instead. for `3', one can e.g. think of `Ordering'
+23:07:58 <iqubic> And currying/uncurring is just proof that (x^n)^m = x^(n * m)
+23:09:23 <ski> `[T]' in Haskell (only considering finite lists) corresponds to `1 / (1 - T)', whose expansion is ⌜1 + T + T² + T³ + T⁴ + ⋯⌝. a (finite) list either has zero `T' elements, or one, or two, or ...
+23:10:18 <ski> aka ⌜∃ n : ℕ. Tⁿ⌝
+23:10:53 <iqubic> Sure.
+23:11:02 <iqubic> makes perfect sense.
+23:11:36 <iqubic> You have to use a Taylor Expansion, but I suppose that makes sense.
+23:12:20 <edwardk> dumb question: Why is Foreign.Storable marked Trustworthy? It seems the very opposite of that claim
+23:13:05 <iqubic> edwardk: it doesn't seem Trustworthy at all.
+23:13:06 <edwardk> i was going through Foreign code trying to get my own stuff set up right, and i saw Foreign.ForeignPtr was trustworthy and i was like 'hrmm, i guess that makes sense'
+23:13:18 <edwardk> because it never actually does anything to those things itself
+23:13:24 <edwardk> mutatis mutandis Foreign.Ptr
+23:13:38 <edwardk> but Foreign.Storable seems to be where all the awful stuff can happen
+23:13:48 <edwardk> and I call bullshit on that API being valid safe haskell
+23:15:33 <shachaf> Does SafeHaskell have safety requirements of IO things?
+23:16:44 <edwardk> is that the boundary?
+23:17:19 <shachaf> I don't know, it's been years since I looked at it.
+23:17:33 <shachaf> But sizeOf and alignment are the only non-IO things in that module, and they seem fine.
+23:17:48 <edwardk> it looks like that is the distinction
+23:18:00 <edwardk> i found http://docplayer.net/61454409-Safe-haskell-controlling-language-safety-violations-david-terei-simon-marlow-simon-peyton-jones-david-mazieres.html and it explicitly disavows IO
+23:18:08 <edwardk> ok
+23:18:27 <edwardk> well, that means almost my whole const package is actually Safe
+23:19:06 <edwardk> er rather i guess it is merely Trustworthy
+23:19:27 <edwardk> why? because i design to use Data.Coerce which is somehow less safe than the thing that can segfault me ;)
+23:19:35 <edwardk> er deign
+23:20:41 <ski> `Tree T', where `data Tree a = Tip | Node a (Tree a) (Tree a)' gives `Tree T = 1 + T * Tree T ^ 2', or `T * Tree ^ 2 - Tree T + 1 = 0', solving for `Tree T' gives ⌜Tree T = ± √ (1 - 4⋅T) ∕ (2 ⋅ T)⌝, giving ⌜1 + T + 2⋅T² + 5⋅T³ + 14⋅T⁴ + ⋯⌝, or ⌜∑ n : ℕ. Cₙ⋅Tⁿ⌝ (Catalan numbers for coefficients)
+23:21:23 <iqubic> What the actual heck is this magic?
+23:22:17 <iqubic> I assume calculating the number of inhabitants of a Data Type isn't usually needed to construct a useful progam.
+23:23:06 <ski> not really, no
+23:24:01 <ski> the catalan numbers count the number of binary trees with a given number of elements
+23:25:06 <edwardk> iqubic: it can be useful to you when you are trying to figure out if two types are isomorphic
+23:25:24 <ski> or, sometimes, if you're refactoring types
+23:25:40 <edwardk> iqubic: http://comonad.com/reader/2008/generatingfunctorology/ <- an old post of mine on the topic
+23:26:38 <edwardk> e.g. spotting that (a,a) is effectively a*a which is isomorphic to a^2 which is effectively Bool -> a -- can be useful
+23:26:49 <ski> (er, that should be ⌜Tree T = (1 ± √ (1 - 4⋅T)) ∕ (2 ⋅ T)⌝)
+23:26:50 <edwardk> my `linear` library is built entirely out of a sequence of these observations
+23:27:31 <edwardk> as the monad instances in there are all reader instances for whatever 'basis' the vector space type should have
+23:35:30 <f-a> Hello, I am writing a QuickCheck spec (via hspec) titled "does not crash while constructing `Foo`"
+23:35:48 <f-a> I am working around laziness writing `\e -> let a = testGame gv e in a == a`
+23:36:01 <f-a> but what is it the appropriate way of doing this?
+23:46:57 <c_wraith> probably by creating an RNF instance for Game
+23:50:06 <f-a> c_wraith: I assume that's 'NFData', am I correct?
+23:50:23 <iqubic> No. I don't htink to.
+23:50:32 <iqubic> *think so
+23:51:09 <f-a> hoogle returns Control.DeepSeq rnf :: NFData a => a -> ()
+23:51:19 <f-a> for "RNF", which class is that then?
+23:52:51 <iqubic> c_wraith: You want ot take this one?
+23:54:20 <cocreature> f-a: the class is called NFData not RNF
+23:54:32 <cocreature> the function is called rnf
+23:55:54 <f-a> cocreaturc: thanks, seems exactly what I was searching for 
+23:55:59 <f-a> * cocreature 
+23:56:11 <iqubic> What does NFData do?
+23:56:28 <f-a> "A class of types that can be fully evaluated."
+23:56:45 <f-a> https://hackage.haskell.org/package/deepseq-1.4.4.0/docs/Control-DeepSeq.html#t:NFData

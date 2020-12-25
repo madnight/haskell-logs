@@ -1,0 +1,1124 @@
+02:10:00 <xelxebar> So I have something like `foo = bar >>= baz >>= return . take 10` inside some function. The 10 here feels like a magic constant, so the C programming in me want's to put it in a #define. What are some idiomatic ways of handling this?
+02:10:39 <xelxebar> Defining some config datatype and having a global config blob?
+02:10:58 <phadej> configTake :: Int; configTake = 10
+02:13:53 <xelxebar> Is that common? Feels awkward to my C-self, since we're sort of mixing concepts at the top level. I.e. though ghc probably erases the object at compile time, in the code it looks like we have some runtime constant floating around.
+02:17:48 <merijn> xelxebar: I think phadej's "just name it" is the simplest step in this case
+02:18:12 <merijn> xelxebar: Other options would be, generalising foo to "foo n = bar >>= baz >>= return . take n" or something like that
+02:18:28 <merijn> xelxebar: A config datatype works in more complex scenarios, but seems like overkill here
+02:19:21 <merijn> xelxebar: Remember that, since everything's immutable, just binding 10 to a variable, then using said variable is identical to the C #define approach
+02:20:13 <xelxebar> Yeah, I'm probably overthinking this, but I'm doing this mostly as a pedagogical exercise anyway. My inkling is that I probably want to push the config into a more natural location somehowe.
+02:20:27 <xelxebar> via the moral equivalent of generalizing foo
+02:21:09 <xelxebar> Yeah, I figure this is trivial for ghc to just inline the constants if I go that rout
+02:23:13 <anohigisavay> dumping core proves that the constant is inlined
+02:23:42 <anohigisavay> `print ten` becomes `print @ Int GHC.Show.$fShowInt (GHC.Types.I# 10#)`
+02:25:39 <anohigisavay> but turns out defining ten = 3 + 7 will not dump into `GHC.Types.I# 10#` automatically. instead it yields `(+ @ Int GHC.Num.$fNumInt (GHC.Types.I# 3#) (GHC.Types.I# 7#))`
+02:26:11 <merijn> anohigisavay: That might still get peephole optimised in the Cmm or LLVM stages
+02:27:34 <anohigisavay> i see
+02:28:19 <xelxebar> How does one dump core?
+02:28:35 <anohigisavay> i did a quick search and found -ddump-simpl
+02:29:02 <phadej> anohigisavay: ten = 3 + 7 :: Int will be for sure optimised to 10
+02:30:04 <xelxebar> Oh nice. That Just Worked TM. Thanks anohigisavay 
+02:31:51 <anohigisavay> phadej: maybe that's in some following stage or can happen with -O2?
+02:32:10 <anohigisavay> sorry i don't know a lot about compiler and optimization
+02:37:32 <phadej> anohigisavay: at least in https://gist.github.com/phadej/a7c75b3707014e10f31bf7de8f3a77d4, it's optimised to " case GHC.Show.$wshowSignedInt 0# 10# (GHC.Types.[] @ Char) of"
+02:37:47 <phadej> anohigisavay: GHCi doesn't optimise
+02:46:46 <cocreature> Unless you use -fobject-code :)
+03:36:08 <ocharles> Does anyone have any advice on finding which code is holding on to some PINNED memory?
+03:36:23 <ocharles> I have some huge ByteStrings and *something* is keeping them alive, but I don't know what
+03:46:54 <merijn> ocharles: Are you slicing/extracting things from them?
+03:47:28 <ocharles> Not really. It's a streaming program - I load some files, yielding each file, and then upload to S3 basically
+03:47:52 <ocharles> I do have some deduplication logic which has some look back so that *could* be holding on to things (I hash the files) but afaik I should only be retaining hashes, not the original bytes
+03:48:23 <ocharles> I can probably do this with some laborious static analysis, but was hoping I could run with `-hSOMETHING` and just have the RTS tell me
+03:48:40 <merijn> ocharles: Try to check the hashes are in normal form (so not thunks holding on to the bytestrings)
+03:48:50 <ocharles> Yea, I have
+03:48:55 <ocharles> That was my only real lead
+03:49:38 <merijn> hmm, weird
+03:50:34 <ocharles> There's obviously more moving parts so it must be somewhere, I have the knowledge to fix that, I just was hoping GHC could help me
+03:53:15 <phadej> ocharles: the problem persist when you run profiled program?
+03:54:08 <anohigisavay> phadej: i see. so the difference is i didn't give the -O flag
+03:54:09 <phadej> ocharles: https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/profiling.html#retainer-profiling -- disclaimer, i don't remember using that
+03:54:09 <ocharles> Actually haven't ran OOM yet, hoping to get a heap profile with OOM later today
+03:55:05 <ocharles> I tried -hr and it weridly doesn't show me anywhere near the memory usage of PINNED with -hc
+03:55:08 <anohigisavay> phadej: sorry i was away for a meeting. was talking about the optimization of 3 + 7
+03:55:13 <ocharles> So I'm not sure PINNED memory shows up in -hr
+03:57:50 <phadej> ocharles: but some pinned?
+03:58:04 <ocharles> One thing I do see with `-hr` is that it just tells me the top-most symbol name: `fromFiles`, but not the module that symbol comes from which is a bit annoying
+03:58:10 <ocharles> phadej: some pinned?
+03:58:33 <phadej> ocharles: i.e. there is some pinned memory in -hr profile, it's not completely absent?
+03:59:08 <ocharles> Well, I don't know, because `-hr` just shows me the retainer, not what it's retaining
+03:59:20 <ocharles> But the axis goes up to 600k and I'm allocated about 1.2GB so I doubt it's showing up
+04:02:54 <phadej> i wonder if malloced (i.e. contents of bytestrings) doesn't show in -hr :( but I don't really know, so no good ideas.
+04:03:03 <phadej> i'd try with removing dedup logic and see what happens :)
+04:08:35 <ocharles> Yea, that's what I'm gonna have to roll with
+04:09:31 <talqu> hi, postgresql-simple docs example snippets dont close the connection after executing a query. After few requests without explicitly using close on conn in my example the query `SELECT * FROM pg_stat_activity;` gives at most 1 connection. How does this work? Does simple-postgresql disconnect automatically behind the scenes? How is there a function close then?
+04:10:56 <merijn> talqu: Why does the number of executed queries matter?
+04:11:13 <merijn> talqu: If you open one connection and use it to execute queries, why would there be more than 1 connection?
+04:17:42 <talqu> merijn: the number of executed queries does not matter, i explained myself wrong then. Every endpoint opens a connection with connect from simple-postgresql. I don't close them manually after each handler finishes. My doubt is: if quering postgres connections i see no connection, means that they were automatically closed?
+04:17:42 <ocharles> Oh good, my program just seg faults in profiling mode
+04:17:59 <merijn> ocharles: \o/
+04:19:31 <merijn> talqu: After your program exits?
+04:19:45 <zincy_> Is there a better way than defining type synonyms for Nats? https://pastebin.com/ix2pFaxd
+04:20:32 <zincy_> I am thinking TH could help here
+04:21:31 <zincy_> oh and it is wrong
+04:21:42 <zincy_> forgot Zero :D
+04:21:49 <zincy_> which should be 'Z
+04:21:55 <talqu> merijn: no, the program does not exits
+04:22:00 <talqu> *exit
+04:23:22 <ocharles> merijn: it gets better, of course
+04:23:30 <ocharles> (gdb) bt
+04:23:30 <ocharles> #0  0x09d0ac9d in ?? ()
+04:23:40 <merijn> talqu: It doesn't look like it GCs connections
+04:24:01 <merijn> ocharles: Well, of course, it probably 1) segfaulted in Haskell code, so no stack, and 2) you probably didn't compile with DWARF symbols
+04:24:14 <ocharles> no idea about DWARF stuff
+04:24:33 <talqu> merijn: https://pastebin.com/q7m3SWSB I make requests to similar enpoints and never get to see an active connection. However as you see i dont close them in code
+04:25:16 <merijn> ocharles: If you're on a recent GHC it should support generating DWARF symbols, which (hopefully) would result in something less useless :)
+04:25:31 <ocharles> I'll try with `enableDWARFDebugging`
+04:30:20 <gentauro> is there something in `Prelude` that handles `int2double :: Int -> Double`?
+04:30:36 <opqdonut> :t floor
+04:30:37 <lambdabot> (Integral b, RealFrac a) => a -> b
+04:30:38 <merijn> gentauro: fromIntegral?
+04:30:46 <opqdonut> oh misread it, yeah, fromIntegral
+04:30:49 <merijn> > fromIntegral (1 :: Int) :: Double
+04:30:52 <lambdabot>  1.0
+04:30:57 <gentauro> hmmm
+04:31:01 <merijn> @quote monochrom fromIntegral
+04:31:01 <lambdabot> monochrom says: You've got an Int / But you want Double / Who do you call? / "fromIntegral!"
+04:31:31 <merijn> gentauro: And for all (well, 99.99%...) other cases there is:
+04:31:34 <merijn> :t realToFrac
+04:31:36 <lambdabot> (Fractional b, Real a) => a -> b
+04:31:50 <gentauro> merijn: that worked :)
+05:21:44 <dminuoso> zincy_: GHC.TypeLits
+05:21:56 <zincy_> dminuoso: thanks
+05:26:18 <zincy_> Struggling to find the actual data constructor names for Nats for the package
+05:33:32 <zincy_> well because there arent any I meant type constructors :P
+05:35:52 <dminuoso> % :set -XDataKinds
+05:35:52 <dminuoso> % :k 5
+05:35:54 <yahb> dminuoso: 
+05:35:54 <yahb> dminuoso: 5 :: GHC.Types.Nat
+05:36:38 <dminuoso> zincy_: So this gives you numeric literals lifted to to types, as well as some baggage of basic utilities to work with them.
+05:36:47 <dminuoso> zincy_: So once you have punched through "I understand how they work in principle", TypeLits might be easier to use. :
+05:38:53 <dminuoso> % :k (5 + 10)
+05:38:53 <yahb> dminuoso: ; <interactive>:1:4: error: Not in scope: type constructor or class `+'
+05:46:15 <Solonarv> % import GHC.TypeLits
+05:46:16 <yahb> Solonarv: 
+05:46:24 <Solonarv> % :kind! 5 + 10
+05:46:25 <yahb> Solonarv: 5 + 10 :: Nat; = 15
+05:46:49 <dminuoso> Solonarv: Oh heh. I was staring at this and couldn't figure it out :)
+05:47:07 <gentauro> is there an "easy" way to do somthing like this: `[ (0,1) ] `intersect` [ (0,3) ] == []` (works) `[ (0,1) ] `fst . intersect` [ (0,3) ] == [ (0,1), (0,3) ]` (doesn't work). Perhaps with Control.Arrows?
+05:47:10 <popo[m]> hi always wanted to learn haskell
+05:47:39 <Solonarv> gentauro: perhaps there's an intersectBy or intersectOn somewhere?
+05:47:48 <dminuoso> Hi popo[m], you have come to the right place then.
+05:48:07 <popo[m]> nice
+05:48:19 <gentauro> Solonarv: yeah, got it
+05:52:36 <popo[m]> haskell seems pretty fun
+06:06:21 <recurse> @popo[m] Is there anything you particularly want to learn to do with Haskell? Or anything you are wanting to learn by learning Haskell?
+06:06:21 <lambdabot> Unknown command, try @list
+06:11:25 <popo[m]> Learning Haskell by learning Haskell
+06:21:24 <recurse> You have come to a good place to ask questions. If you are looking for a book to get started, http://learnyouahaskell.com/chapters is free; and, http://haskellbook.com/ comes highly recommended, although I haven't read it myself.
+06:57:38 <mouse008[m]> My issue with the Haskellbook.com is that the exercises often do not match the section/chapter they're presented in and there's not a single answer for them. Leaves you on your own trying to figure what the correct way was, or even how the heck to do that. Plus, it has a ton of material, not all of which is relevant, and most could benefit from becoming more concise.
+07:05:28 <dmwit> > M.intersectWith (++) (M.fromList [(0,[1])]) (M.fromList [(0,[3])]) -- gentauro
+07:05:32 <lambdabot>  error:
+07:05:32 <lambdabot>      Not in scope: ‘M.intersectWith’
+07:05:32 <lambdabot>      Perhaps you meant one of these:
+07:05:47 <dmwit> > M.intersectionWith (++) (M.fromList [(0,[1])]) (M.fromList [(0,[3])]) -- gentauro
+07:05:50 <lambdabot>  fromList [(0,[1,3])]
+07:07:23 <dmwit> > let f = M.intersectionWith (++); g xs = M.fromListWith (++) [(k, [v]) | (k,v) <- xs] in g [(0,1)] `f` g [(0,3)]
+07:07:26 <lambdabot>  fromList [(0,[1,3])]
+07:12:03 <gentauro> dmwit: `intersectBy` works perfectly. By looking into the source code, I was able to write my own `complementBy` which easily simplifies a lot of my code
+07:12:13 <gentauro> I mean, refactoring in Haskell is such a pleasure
+07:12:45 <gentauro> you start by writing a lot of code, then you begin to recognize patterns and duplicates and you begin to shrink
+07:12:53 <gentauro> and shrink
+07:13:13 <gentauro> and finally you end up with something pretty minimalistic but still readable. Short and concise.
+07:13:24 <gentauro> Haskell is a god damn nice tool
+07:14:35 <c_wraith> Just beware spending 8 hours making two pages of code pretty.  :)
+07:15:05 <gentauro> c_wraith: it's an investment
+07:15:18 <gentauro> in 3 months when I have to read it again, I wouldn't remember anything at all
+07:15:29 <c_wraith> Not when it's one-off code, like I did for the advent of code. :)
+07:15:49 <c_wraith> Got something working in 15 minutes.  Then spent 8 hours making it nice.
+07:15:55 <gentauro> c_wraith: :D
+07:16:04 <Taneb> c_wraith: if it's code you're writing for fun, then you should have fun writing it
+07:16:31 <Taneb> If that means spending 8 hours making it perfect, so be it
+07:16:58 <c_wraith> also, that was like 7 hours learning a corner of lens I previously hadn't.
+07:17:22 <Taneb> Which corner, ooi?
+07:17:39 <merijn> c_wraith: Those 8 hours will carry over to any future code :p
+07:17:41 <gentauro> corner = curve
+07:17:53 <c_wraith> writing weird custom Folds
+07:18:07 <Taneb> Ah :) A corner I haven't explored myself
+07:19:11 <gentauro> c_wraith: I'm going to have the pleasure to meet Mr. Kmett at next months Monadic Party in Posdan (Poland) :)
+07:20:07 <gentauro> s/Posdan/Poznan/
+07:21:27 <bahamas> anyone familiar with the gogol libraries know how to load data from google cloud storage to bigquery?
+07:21:32 <c_wraith> Folds having almost no laws means you can do weird things with them if it fits the use case.  Which, in this case, meant visiting targets in a weird order, skipping things, and duplicating things.  All legal for a Fold!
+07:22:36 <merijn> I just had an epiphany about understanding Divisible \o/
+07:22:59 <gentauro> > :i Divisible
+07:23:02 <lambdabot>  <hint>:1:1: error: parse error on input ‘:’
+07:23:08 <gentauro> % :i Divisible
+07:23:10 <yahb> gentauro: ; <interactive>:1:1: error: Not in scope: `Divisible'
+07:23:15 <Taneb> gentauro: http://hackage.haskell.org/package/contravariant-1.5.1/docs/Data-Functor-Contravariant-Divisible.html
+07:23:16 <merijn> gentauro: It's not in base
+07:24:23 <Taneb> merijn: what's your epiphany?
+07:25:18 <merijn> Taneb: It's just fusing two consumers into a single consumer
+07:25:45 <dmwit> > intersectBy fst [(0,1)] [(0,3)]
+07:25:47 <lambdabot>  error:
+07:25:47 <lambdabot>      • Occurs check: cannot construct the infinite type:
+07:25:47 <lambdabot>          a ~ (a, b) -> Bool
+07:25:56 <dmwit> > intersectBy ((==) `on` fst) [(0,1)] [(0,3)]
+07:25:59 <lambdabot>  [(0,1)]
+07:26:05 <dmwit> gentauro: Doesn't match the spec, tho?
+07:26:09 <Taneb> merijn: yeah :)
+07:26:28 <Taneb> Hmm, I'm unhappy with the Divisible (Backwards f) instance
+07:26:59 <Taneb> I think it should reverse the "effect", similar to the Applicative instance
+07:37:32 <gentauro> dmwit: Jep
+07:37:47 <gentauro> dmwit: and I can even use it with records, which is pretty nice :) 
+07:48:29 <aveltras> is there a standalone web routing library which has URL -> Route and Route -> Url and does not assume it's used server side only ? i'm looking for something to share the router between server and client side without bringing too many dependencies
+08:09:49 <gentauro> > :i M
+08:09:52 <lambdabot>  <hint>:1:1: error: parse error on input ‘:’
+08:29:43 <bahamas> I need to encode the contents of a file into the multipart format (represented as HashMap Text Text) by the gogol-storage library. anyone know what I can use for that?
+08:53:52 * dmwit is puzzled
+08:54:19 <dmwit> "It doesn't match the spec" and "[it] is pretty nice" seem mildly contradictory.
+09:00:09 <Younder> dmwit, not at all dimmy, pretty nice reefers to the code and usability. The spec is just the spec and who really cared aout it anywaysas it was a hassle as far as interoperabillity was concerned
+09:30:39 <fizbin> When an exception is raised, it's raised in only one thread, yes?
+09:31:15 <fizbin> I'm trying to figure out what it means that +RTS -xc seems to print the same exception out multiple times.
+09:31:29 <fizbin> Rather, the same stack trace out multiple times.
+09:32:44 <fizbin> Is it saying "three threads with identical stacks happened to all hit an exception at once, simultaneously"? Or is it saying "there was an exception, I'm giving you all the stack traces because I want tracing down which thread actually had the exception to be a challenge"?
+09:33:12 <fizbin> Or perhaps "I'm printing the exception trace from a single thread many times because why not?"
+09:39:05 <orion> fizbin: Is it possible that you have multiple exception handlers installed that re-throw?
+09:39:59 <fizbin> Wouldn't those have different stack traces? Say, traces that pointed to the exception handler?
+09:41:03 <orion> fizbin: Good point. Not sure.
+09:41:30 <MarcelineVQ> dunno about that stuff but the description reminds me of https://hackage.haskell.org/package/web-routes-boomerang
+09:41:33 <monochrom> Yes raising an exception sends it to one thread only.
+09:41:51 <MarcelineVQ> oops, lost in my owns scrollback, meant that for you aveltras
+09:43:09 <monochrom> would be nice to see a reproduction.
+09:43:24 <aveltras> MarcelineVQ: thanks
+09:46:51 <monochrom> Oh hey it seems I can reproduce it (or close) with a simple readFile
+11:00:48 <devalot> Using lens, I want to create a `Review Text IOException'  but I can't seem to figure it out.  I thought it would be: _IOException . unto (pack . show).  What am I missing?
+11:06:06 <Philonous> What's the simples way to display an SVG on screen and register mouse clicks on certain shapes? 
+11:09:39 <saml> use browser?
+11:09:52 <saml> like Edge
+11:11:07 <Philonous> Yes, well, maybe I should have been more specific. Certainly I can just write the svg to a temp file and start a new browser window, directing it to the file. But then I wouldn't have the ability to catch mouse cliks
+11:11:20 <cocreature> devalot: 1. what do you expect "unto (pack . pack)" to do? That will give you a "Show a => Review Text a" but there is no Show a in your target type
+11:11:34 <cocreature> devalot: 2. you are missing something that goes from Text to IOException
+11:11:37 <Philonous> I can come up with more sophisticated ways - write a web server, register onclick events, make AJAX calls etc. But that's far beyond simple
+11:12:40 <cocreature> Text is not an instance of AsIOException
+11:13:22 <devalot> cocreature: Okay, that makes sense.  It sounds like I don't understand something.  I want a Review that I can use to go from IOException -> Text.
+11:14:09 <dmwit> Philonous: Gtk includes a webkit widget that could presumably do it. Probably other GUI frameworks have something similar.
+11:15:06 <devalot> I wrote this function and I want to give it a review that ends up creating a text: https://lpaste.com/sB8oD0NZAB
+11:15:15 <cocreature> devalot: unto (T.pack . show)
+11:15:25 <cocreature> or unto (T.pack . displayException)
+11:16:12 <cocreature> but lens doesn’t buy you anything here. You might as well call "T.pack . show" directly
+11:17:50 <devalot> cocreature: My end goal is to catch a particular exception and turn around and throw it into MonadError using lens' throwing.  That's the reason for the gymnastics.
+11:18:24 <devalot> It sounds like I need to rewrite the `io' function that I pasted.
+11:21:31 <tty1> is there any bag/multiset in haskell?
+11:27:57 <lyxia> tty1: https://hackage.haskell.org/package/multiset
+11:28:45 <tty1> lyxia: i saw that but the documentation seemed limited as various questions seem unclear
+11:30:05 <tty1> ill try to play with it though, thanks
+11:30:24 <jle`> tty1: usually you can just get away with 'Map a Int' from containers
+11:30:37 <monochrom> Eww
+11:31:55 <tty1> jle`: That would result in two things which are equal accorind to == to have one of them discarded, which is different than how a bag usually behaves
+11:32:14 <jle`> yeah, all of the instances would be pretty much broken
+11:32:35 <jle`> but i'm saying that usually you can get away with 'Map a Int' :)
+11:32:43 <jle`> and in some situations you can't.
+11:33:18 <lyxia> What questions seem unclear to you
+11:33:24 <tty1> jle`: fair, maybe im better off with wrapping a new type around a list instead...
+11:33:44 <monochrom> Lists are annoying to use for sets and multisets.
+11:33:52 <jle`> the multiset package is a good abstraction for actual multisets
+11:34:07 <tty1> lyxia: if it retains two distinct elements that claim to be the same via == but in fact are internally different
+11:34:31 <monochrom> Err, I guess just sets.
+11:34:33 <jle`> that sounds like a broken Eq instance
+11:34:42 <lyxia> it's implemented with Map a Int, so there's no way
+11:34:52 <jle`> and you probably will run into other problems with that kind of Eq instance ...
+11:35:23 <jle`> there is pretty much no sound/useful abstraction that can handle that sort of behavior
+11:35:38 <monochrom> Oh, list for multiset is annoying when you have to code up equality...
+11:36:34 <tty1> i mean what i really want is a list that has no sense of order to it
+11:36:43 <monochrom> Yeah.
+11:36:58 <jle`> then why involve (==) at all?
+11:37:07 <jle`> oh ah, i see
+11:37:14 <jle`> your thing might not have a valid (==) instance
+11:37:30 <jle`> er, your type doesn't have a valid Eq instance, so it can't be used with Map or Set
+11:37:44 <jle`> hm. a list is probably your best bet then
+11:37:45 <lyxia> some say a valid (==) only needs to be an equivalence relation
+11:37:53 <tty1> yea im not even the one who will control the == of the instances really, they may have an == may not
+11:38:11 <jle`> my intention was to reduce the situation to a "known" problem
+11:38:20 <jle`> the problem of containers where the values don't have valid Eq/Ord instances
+11:38:24 <lyxia> though a lot of structures won't give you any guarantees about what elements they keep
+11:38:24 <jle`> so Map/Set aren't useful
+11:38:41 <jle`> like, say, how `Set (Complex Double)` is useless
+11:38:49 <monochrom> I say (==) needs to be both an equivalence relation and furthermore Leibniz, i.e., x==y implies (forall f. f x == f y)
+11:39:15 <monochrom> The contention though is about which f's you want to include in that "forall".
+11:39:35 <jle`> yeah, if your thing has no Eq instance, the best you could probably do is keep a list
+11:40:12 <jle`> tty1: alternatively you could define a newtype wrapper with equality defined as some internal projection, instead of the normal Eq instance
+11:40:22 <monochrom> Oh this reminds me of my perpetual gripe.
+11:40:29 <jle`> tty1: for example, how would you be able to "count" items, if you have no Eq instance?
+11:40:44 <jle`> tty1: even if you had [MyItem], how would you be able to query it for a count of how many 'x's are in the list?
+11:41:08 <jle`> you wouldn't use ==, would you?
+11:41:16 <monochrom> People say simply "I need a set" and just assume that everyone is on the same page about which operations are to be supported.
+11:41:29 <jle`> `length . filter (== x)` wouldn't work because it would over-count
+11:41:38 <monochrom> The fact is people actually have different, even opposite assumptions.
+11:41:49 <tty1> jle`: im not sure i need to ever count distinct items, just total items and iterate
+11:42:01 <jle`> tty1: does the order of iteration matter?
+11:42:04 <tty1> jle`: like i said i need a list with no sense of order
+11:42:10 <tty1> jle`: nope
+11:42:15 <jle`> so, you could just use list :)
+11:42:50 <monochrom> For example I would consider "elements don't have Eq" to be in blatant contradiction with "I want a set/multiset", because just to ask "is x an element?" already needs Eq.
+11:42:50 <jle`> it lets you count the total items, and also iterate in (arbitrary) order
+11:43:33 <monochrom> But who knows? Maybe the asker has only "can insert, can print" in mind.
+11:44:23 <tty1> jle`: yes except i would need to implement my own == on the lists themselves. I need it so that if two lists have the same content but a different order then they are in fact the same
+11:44:53 <jle`> tty1: oh okay, you didn't say you needed to compare different lists, so that does make things complicated
+11:44:57 <jle`> in fact it might be impossible
+11:45:08 <jle`> because you already said that (==) is not well-defined
+11:45:38 <tty1> jle`: i leave == for the conumer to define so it means what they say it means
+11:45:47 <tty1> for the elements
+11:45:54 <tty1> for the list itself i define it
+11:46:11 <jle`> are you assuming that the user will provide a meaningful Eq instance?
+11:47:29 <tty1> jle`: i can make that assumption yea
+11:47:42 <monochrom> There is pretty much no other choice.
+11:47:46 <jle`> what about a meaningful Ord instance?
+11:49:08 <jle`> if yes, you can use multiset.  if not, then yeah, you'd have to implement some O(n^2) equality comparison funcction
+11:49:42 <jle`> unless you your items are also hashable, in which case you might be able to make it more efficient
+11:51:49 <jle`> if your user's Eq instances are meaningful, then they would want x == y = True to combine x and y and be able to drop y from memory
+11:52:19 <jle`> there is no situation where a user's Eq instance would be meaningful, but they would also want x == y = True to keep both x and y
+11:53:08 <jle`> so your anticipation for a desire to have x == y = True but keep both x and y in the structure can already be relieved because of your assumptions of sound Eq :)
+11:54:24 <tty1> jle`: no they wont have an ord method on them, there would be no need
+11:56:18 * dmwit points jle` at Arg
+11:56:32 <monochrom> What is Arg?
+11:56:52 <dmwit> `data Arg a b = Arg a b` and `instance Ord a => Ord (Arg a b)` should tell you all you need to know.
+11:57:28 <monochrom> Why is it not called Argh? :)
+11:57:45 <dmwit> So named because of how cute `Arg (Min a) b` is as a name.
+11:58:32 <dmwit> Anyway my point is that "there is no situation where a user's Eq instance would be meaningful, but they would also want x == y = True to keep both x and y" is probably too strong.
+12:00:55 <hpyCdr> why is the binary in the stackwork dist folder about twice as big as in the stackwork install folder? (16 vs 33Mb)?
+12:01:01 <monochrom> I think I don't get how is `Arg (Min a) b` cute.
+12:01:40 <dmwit> argmin is a popular function name in mathematics.
+12:01:50 <dmwit> It computes the argument to a function which minimizes that function.
+12:01:58 <monochrom> Oh! That one.
+12:02:22 <dmwit> The monoid instance on Arg (Min a) b can be used (with foldMap) to do a similar computation.
+12:02:40 <monochrom> I never saw it in 4 years of a math degree.  15 years later, I saw it in an intro machine learning course.
+12:02:53 <dmwit> (Maybe foldMap1, I can't recall the details of whether Min is the Monoid or the Semigroup one.)
+12:03:09 <monochrom> Semigroup, I just checked.
+12:03:45 <dmwit> hpyCdr: Perhaps one is `strip`d (this would make it smaller) or compiled with optimizations (my guess is this would make it bigger).
+12:04:30 <hpyCdr> by stripped you mean debugging information removed?
+12:04:45 <dmwit> Mmmm. I think yes, and maybe also some dead code elimination applied.
+12:06:28 <hpyCdr> alright, thanks
+12:06:41 <dmwit> Okay. man strip says all symbols (so yes debugging info, but also other non-debugging symbols), but it sounds like no dead code elimination.
+12:07:52 <dmwit> monochrom: I think we talked about it some in an analysis course, as a precursor to learning the subtleties of sup/inf.
+12:09:48 <dmwit> Okay. I don't know what my goal was with telling you that.
+12:10:22 <monochrom> :)
+12:10:27 <dmwit> tty1: For what it's worth, I think it is quite unusual to have an Eq instance but no Ord instance.
+12:11:04 <monochrom> Yeah 4 years of math degree ought to run you into "an x that minimizes f(x)" but still it turns out to be rare to give it a name.
+12:11:14 <dmwit> tty1: So if I were you, I'd use a `Map a [a]`. The keys are an arbitrary choice for each equivalence class; the values are the members of that class that are in the multiset.
+12:12:07 <dmwit> For iteration fold twice. For equality compare lengths at each key. Optionally store the lengths at each key as in `Map a (Int, [a])` to make this slightly more efficient.
+12:12:12 <tty1> dmwit: it seems odd to me you'd be able to order something just because they can equate them?
+12:12:34 <dmwit> It's certainly not the case theoretically.
+12:12:44 <dmwit> I am making an empirical observation about the kinds of data types people actually write in practice.
+12:15:21 <dmwit> The only examples I can think of are Complex (I have a separate rant about this) and I could imagine implementing an alpha- or alpha-beta-equality on some DSL's terms that would be hard to make compatible with an Ord instance.
+12:16:06 <dmwit> (But I think the latter one is quite rare, both because DSL terms are rarish to begin with and because among that set, implementing Eq as anything other than the derived instance is even more rare.)
+12:21:28 <__monty__> dmwit: How about for things like card colors for example? Ord doesn't really make sense there. There's lots of things you cloud represent that aren't really Ordable.
+12:25:54 <monochrom> My angle is there are a lot of things that aren't hurt by getting Ord, even when the order is arbitrary, just so we can use binary search trees and move on.
+12:27:24 <monochrom> People even believe a stronger and more popular statement with s/Ord/Hashable/
+12:29:33 <dmwit> __monty__: Why doesn't Ord make sense?
+12:30:10 <monochrom> Oh actually I would like to hear your rant on Complex Ord too. :)
+12:31:18 <dmwit> Same as what you just said, basically: we can make a perfectly fine Ord instance for Complex, and should, because Map and other abstractions that rely on Ord are useful.
+12:31:41 <dmwit> Yes, I know: for Complex, there is no ordering which respects the quite sensible law "a <= b and c <= d implies a+c <= b+d".
+12:31:57 <dmwit> But that is not a law that Ord promises anyway, and even Int8 violates it so who gives a care.
+12:32:11 <monochrom> Yeah I agree.
+12:32:43 <Solonarv> you can impose an arbitrary on any (but not only) finite datatype
+12:33:06 * ski . o O ( pullbacks of type classes )
+12:33:21 <monochrom> Well, my "hurt" is a bit subjective. A lot of mathematicians feel hurt when told (Num a, Ord a) holds for Complex.
+12:36:15 <dmwit> Also I would like you to consider the following `Ord` instance for tuples/Complex/etc.: `(a,b) <= (c,d) = a <= c && b <= d`. Why is this ordering interesting? Because it is the ordering for which checking that multidimensional array index i is in range (lo, hi) becomes `lo <= i && i <= hi`.
+12:36:15 <monochrom> Yeah pullbacks are great. Everything is not a straightforward sum or product.
+12:36:26 <__monty__> dmwit: Because "Is ♦ smaller than ♣?" doesn't make any sense. Maybe there should be an ArbitraryOrd class?
+12:36:35 <dmwit> __monty__: Why doesn't it make sense?
+12:38:04 <monochrom> Ord is not set up for partial orders unfortunately. But yeah partial orders from lattices are extremely important.
+12:38:19 <__monty__> dmwit: Because card suits don't have an inherent "size" property.
+12:38:32 <dmwit> __monty__: So what? Neither do booleans.
+12:38:50 <monochrom> I don't think "size" of any sense is required.
+12:39:10 <monochrom> Perhaps time to debate over cardinals vs ordinals?
+12:39:19 <dmwit> Perhaps not. =)
+12:40:04 <__monty__> dmwit: I never admitted it makes any sense for booleans.
+12:40:07 <dmwit> Anyway I don't see why asserting "1 <= 2" or "'a' <= 'b'" makes any more "sense" than asserting "♦ <= ♣".
+12:40:44 <monochrom> 1<=2 can be defended.
+12:41:07 <monochrom> But I'm feeling that __monty__ will next denounce string comparisons and alphabetical order. >:)
+12:41:36 <ski> i think it's more common to have `False =< True', rather than `True =< False', ?
+12:41:52 <Solonarv> yes, of course
+12:41:57 <__monty__> Nah, the alphabet has a pretty set order. Universally agreed on across most of the latin-script-using world afaik?
+12:42:20 <dmwit> __monty__: (Do you believe we should eliminate the Ord instance for Bool? Ordering? What other types? What is the criteria you are using? Don't give me "make sense" because I don't know what that means to you.)
+12:42:21 <[exa]> 'ch' < 'h'!!
+12:42:51 <Solonarv> syntax error
+12:43:01 <Solonarv> > 'ch' < 'h'
+12:43:03 <dmwit> __monty__: If you believe that, you should have a Google for "collation order". It is indeed not universally agreed on.
+12:43:04 <lambdabot>  error:
+12:43:04 <lambdabot>      • Syntax error on 'ch'
+12:43:04 <lambdabot>        Perhaps you intended to use TemplateHaskell or TemplateHaskellQuotes
+12:43:10 * [exa] was too hasty
+12:43:20 <ski> also, if two subsets `S' and `T' are considered as predicates yielding booleans, then subset inclusion `S =< T', iow `forall x. S x =< T x' amounts to pointwise ordering `forall x. S x => T x', (because with the above ordering on booleans, `=>' is the same as `=<')
+12:43:29 <monochrom> In fact I recently ran into string order when I was giving out a unix exercise.  `sort` etc depends on locale settings.  'A'<'b' could be true or false depending on locale.
+12:43:34 <[exa]> in fact in cs_CZ.UTF8 this should hold "ch" > "h"
+12:43:58 <dmwit> https://en.wikipedia.org/wiki/Alphabetical_order#Language-specific_conventions should disabuse you of that belief.
+12:44:06 <[exa]> and several other unicode wonders, including "au"<"ab"
+12:44:28 <[exa]> and "ě"<"f"
+12:44:48 <Clint> __monty__: suit order varies between card games
+12:45:16 <[exa]> but "c" < "čh" < "h" < "ch"
+12:45:17 <__monty__> Clint: Yes, exactly. And in many games there isn't an order at all or a partial one.
+12:45:58 <dmwit> Okay, so you can't use the chosen Ord instance for all functions needing ordering comparisons in all games. Big deal.
+12:46:07 <dmwit> There is no expectation that Ord is the *only* interface your Suit type has.
+12:46:16 <dmwit> In fact it would be wildly unusual for that to be so.
+12:46:44 <monochrom> My hunch is that every card game program written in Haskell rolls their own suite type rather than "where can I download suites from hackage?" so there is no harm putting its application-specific order into Ord in their private code.
+12:48:24 <Solonarv> but if all you want to do use your Ord instance for is speeding up lookups, it actually does not need to have any particularly nice semantics
+12:48:35 <dmwit> ^
+12:48:40 <lyxia> "there isn't an inherent order" (whatever that means) doesn't imply "there shouldn't be an Ord instance"
+12:48:40 <Solonarv> it simply needs to satisfy the usual ordering laws
+12:48:43 <lyxia> Solonarv++
+12:49:26 <__monty__> My point is simply that it's too bad Ord has to be recycled for this. It'd be nicer if Ord was reserved for things that have an inherent total order.
+12:50:11 <dmwit> What does "inherent" mean?
+12:50:13 <monochrom> Every finite type of n values has n! inherent total orders.
+12:50:40 <monochrom> n! >= 1 therefore every finite type of n values has an inherent total order. >:)
+12:51:08 <monochrom> "Heart attack by integer order!"
+12:51:18 <dmwit> (This is the core of the point I'm trying to make: you keep making value judgments based on some internal criteria that you have not yet made crisp and understandable to the outside world. I suspect once you do, you will find you are not confident you agree with them any more!)
+12:51:47 <lyxia> __monty__: why would it be nicer? log-time Map lookups is a very concrete nice thing to have.
+12:52:13 <__monty__> I don't know how to put it more precisely. Things that have a sensible order that follows from their definitions. Like natural numbers "0 is the smallest natural number. When you make any natural number larger by 1 you get another natural number."
+12:52:28 <martin__> How is the haskell functor ("monoid with fmap") connected to the math functor ("morphism between categories")?
+12:52:46 * ski idly ponders `n!' for `0 < n < 1'
+12:52:54 <monochrom> I don't think that Haskell's functor is monoid with fmap.
+12:53:22 <__monty__> lyxia: Those don't *need* to reuse Ord though. They could very well have a BinarySearch constraint. Which could even be defaulted to using an Ord instance when available.
+12:54:21 <monochrom> But Haskell's Functor class is implicitly an endofunctor because both "a->b" and "f a -> f b" live in the same category.
+12:54:25 <Solonarv> martin__: the Haskell functor is roughly an endofunctor in 'Hask', the category of Haskell types with functions as the morphisms
+12:54:36 <ski> martin__ : each type function `f', being an instance of `Functor', is supposed to be an endofunctor on the category of Haskell (concrete) types, and (computable) functions between them
+12:54:48 <Solonarv> (it isn't really a category, but you can sort of squint and gloss over some backdoors and it's close enough)
+12:56:11 <Solonarv> oh, it's somewhat analogous to Set if that helps
+12:58:18 <monochrom> Next debate topic:  data Void deriving (Eq, Ord, Enum, Num, Show)
+12:58:53 <monochrom> err I think I forgot Bounded too.
+12:59:05 <monochrom> Actually Enum may be a bad idea.
+12:59:20 <monochrom> OK Bounded is also a bad idea.
+12:59:55 <monochrom> Yikes I don't know how to do Num's fromInteger either.
+13:00:11 * Solonarv grumbles about Num
+13:00:50 <martin__> thanks people
+13:04:19 <zeta_wolf> is acid-state or acid-world a good alternative to postgresql for web development with yesod web framework?
+13:04:33 <dmwit> __monty__: By that definition, would *anything* other than the naturals have an Ord instance?
+13:05:01 <tabaqui> monochrom: I think that Void satisfy any constraint, so all derivables are fine
+13:05:02 <Dd> Hello
+13:05:02 <__monty__> dmwit: Sure, integers follow simply, as do real numbers.
+13:05:10 <tabaqui> and Generic of course
+13:05:11 <dmwit> Do they?
+13:05:30 <dmwit> 0 is not the smallest integer, for example.
+13:05:38 <Dd> What are you talking about ?
+13:05:52 <ski> Dd : the programming language Haskell
+13:06:03 <monochrom> tabaqui: It's not that easy.  I don't know how to do "maxBound :: Void" for example.  Generally any method that puts Void on the codomain (positive) side.
+13:06:03 <__monty__> dmwit: True, but they do have +1 is larger, -1 is smaller.
+13:06:18 <tabaqui> maxBound = _|_
+13:06:26 <ski> (s/on the codomain/only on the codomain/)
+13:06:33 <Solonarv> ah, ninja'd
+13:06:49 <monochrom> Enum has "toEnum :: Int -> Void", so I had to retract that too.
+13:06:50 <dmwit> __monty__: Sure. And suits have "{heart -> diamond, diamond -> club, club -> spade} is larger".
+13:07:06 <tabaqui> toEnum _ = _|_
+13:07:11 <tabaqui> fromEnum _ = _|_
+13:07:13 <tabaqui> why not?
+13:07:15 <dmwit> (Or: why is +1 and -1 a natural choice of function?)
+13:07:25 <monochrom> I did not include Read, but now I guess "reads :: String -> [(Void, String)]" is pretty OK! >:)
+13:07:31 <tabaqui> _|_ is the only item in Void type
+13:07:43 <monochrom> I want to avoid bottom.
+13:07:50 <dmwit> > toEnum 123987598243 :: Char -- monochrom
+13:07:53 <lambdabot>  *Exception: Prelude.chr: bad argument: 123987598243
+13:08:08 <monochrom> Yeah but I set a high standard for myself.
+13:08:12 <dmwit> =)
+13:08:17 <Solonarv> tabaqui: if you're willing to make all the methods bottom, you can make anything an instance of any class!
+13:08:32 <monochrom> But hey if you want to do "data Void deriving (Storable)" and bottom out every peek, fine!
+13:08:33 <tabaqui> Solonarv: of course, but it makes sense only for the Void
+13:08:44 <__monty__> dmwit: Doesn't have to be +*1* specifically. But when you *add* to something it becomes larger, when you take away it becomes smaller.
+13:08:56 <Solonarv> it really doesn't, IMO
+13:09:10 <dmwit> __monty__: Now I really don't know what that means.
+13:09:20 <tabaqui> monochrom: I think that all Void occurences dissapear after compilation
+13:09:31 <dmwit> __monty__: "add" and "take away" are not atomic concepts. They are defined. And you can define them for Suit, too.
+13:09:40 <Solonarv> tabaqui: then you are incorrect
+13:09:41 * dmwit . o O ( type Suit = Word2 )
+13:10:14 <tabaqui> really, so how nullable types are implemented in GHC?
+13:10:46 <Solonarv> % catchPureErr x = ("<worked>" <$ evaluate ) `catch` (print @SomeException)
+13:10:49 <yahb> Solonarv: ; <interactive>:101:33: error:; * Couldn't match expected type `IO b0' with actual type `a0 -> IO a0'; * Probable cause: `evaluate' is applied to too few arguments; In the second argument of `(<$)', namely `evaluate'; In the first argument of `catch', namely `("<worked>" <$ evaluate)'; In the expression: ("<worked>" <$ evaluate) `catch` (print @SomeException); <interactive>:101
+13:10:55 <Solonarv> % catchPureErr x = ("<worked>" <$ evaluate ) `catch` (pure . show @SomeException)
+13:10:55 <yahb> Solonarv: ; <interactive>:102:33: error:; * Couldn't match expected type `IO b0' with actual type `a0 -> IO a0'; * Probable cause: `evaluate' is applied to too few arguments; In the second argument of `(<$)', namely `evaluate'; In the first argument of `catch', namely `("<worked>" <$ evaluate)'; In the expression: ("<worked>" <$ evaluate) `catch` (pure . show @SomeException)
+13:11:02 <Solonarv> % catchPureErr x = ("<worked>" <$ evaluate x) `catch` (pure . show @SomeException)
+13:11:04 <monochrom> Oh actually, I can be a punk and say: Void is a type, so yeah Void disappear after compilation, but that's because e.g. Int is too.
+13:11:04 <yahb> Solonarv: 
+13:11:05 <tabaqui> ex falso quodlibet
+13:11:24 <Solonarv> % catchPureErr (error "foo" :: Void)
+13:11:25 <yahb> Solonarv: "foo\nCallStack (from HasCallStack):\n error, called at <interactive>:104:15 in interactive:Ghci31"
+13:11:34 <Solonarv> % catchPureErr (error "bar" :: Void)
+13:11:35 <yahb> Solonarv: "bar\nCallStack (from HasCallStack):\n error, called at <interactive>:106:15 in interactive:Ghci33"
+13:11:59 <monochrom> But bottom values don't disappear.
+13:12:02 <Solonarv> tabaqui: clearly there are still "values" of type Void being passed around somehow, else how could we recover the error string?
+13:12:06 <zeta_wolf> hello guys, is acid-state or acid-world a good alternative to postgresql for web development with yesod web framework?
+13:12:56 <tabaqui> yeah, I get it
+13:12:58 <tabaqui> right
+13:13:03 <dmj`> zeta_wolf: depends on how large your data is
+13:13:17 <__monty__> dmwit: Well, numbers are based on counting. And +/-/>/< are what counting is for. I'm not sure what you mean by "atomic concepts" but I don't think there's anything but numbers where the specific order you use is more logical/not up for debate. Maybe time?
+13:13:35 <tabaqui> % undefined <> undefined :: Void
+13:13:35 <yahb> tabaqui: *** Exception: Prelude.undefined; CallStack (from HasCallStack):; error, called at libraries/base/GHC/Err.hs:78:14 in base:GHC.Err; undefined, called at <interactive>:107:1 in interactive:Ghci34
+13:13:38 <dmj`> zeta_wolf: if small, I'd say yes.
+13:13:51 <zeta_wolf> dmj`: i am getting into freelancing so i am not sure?
+13:13:58 <tabaqui> % error "foo" <> error "bar" :: Void
+13:13:59 <yahb> tabaqui: *** Exception: foo; CallStack (from HasCallStack):; error, called at <interactive>:108:1 in interactive:Ghci34
+13:14:01 <dmj`> zeta_wolf: then use postgreSQL
+13:14:32 <zeta_wolf> dmj`: why?
+13:14:33 <dmj`> zeta_wolf: if you're gonna do the whole show up and throw up, they'll probably want to be able to query their database after you build the application for them
+13:15:09 <dmj`> zeta_wolf: acid-state has no psql alternative, you'd have to build it, it lacks arbitrary querability, you're relegated to what you defined in the update functions
+13:15:25 <tabaqui> oh, hey, I don't think it is good:
+13:15:33 <tabaqui> % rangeSize (undefined :: Void, undefined)
+13:15:33 <yahb> tabaqui: 0
+13:16:16 <dmwit> __monty__: Check this out.
+13:16:20 <dmwit> > Club + 1
+13:16:22 <lambdabot>  error: Data constructor not in scope: Club
+13:16:26 <dmwit> % Club + 1
+13:16:26 <yahb> dmwit: Diamond
+13:16:28 <dmwit> % Club + 2
+13:16:29 <yahb> dmwit: Spade
+13:17:02 <tabaqui> % :i Club
+13:17:02 <yahb> tabaqui: data Suit = Club | ... -- Defined at <interactive>:105:13
+13:17:04 <zeta_wolf> dmj`: ok that makes sense, i have never tried acid-state or acid-world, so i was just checking, thanks, that's good to know
+13:17:08 <tabaqui> % :i Suit
+13:17:10 <yahb> tabaqui: data Suit = Club | Diamond | Spade | Heart -- Defined at <interactive>:105:1; instance [safe] Num Suit -- Defined at <interactive>:112:10; instance [safe] Show Suit -- Defined at <interactive>:105:69; instance [safe] Read Suit -- Defined at <interactive>:105:63; instance [safe] Ord Suit -- Defined at <interactive>:105:58; instance [safe] Eq Suit -- Defined at <interactive>:105:54
+13:17:40 <__monty__> dmwit: But that's *arbitrary* is the point.
+13:17:49 <dmwit> So are natural numbers!
+13:18:02 <dmwit> So are bitvectors!
+13:18:12 <__monty__> They may be in theory but they're not in practice.
+13:18:13 <dmwit> They just happen to be things we use a lot, so they "feel" natural.
+13:18:45 <dmj`> zeta_wolf: acid-state is very fast, but you can't exceed the limits of RAM. Might have more luck with sqlite, but then that isn't good for concurrent use. Best to just use postgreSQL. There's an impedance mismatch between the db layer and application layer. I'd use GHC.Generics heavily to solve this.
+13:19:17 <dmwit> __monty__: And it's not completely arbitrary: for example, I wrote an instance that satisfies the usual ring laws like a*(b+c) == a*b+a*c.
+13:20:11 <dmwit> __monty__: Indeed, I've even gone so far as fromInteger m+fromInteger n == fromInteger(m+n) and likewise for (*).
+13:20:27 <dmwit> So in some senses, the Num instance is *very* natural.
+13:25:23 <__monty__> dmwit: It's arbitrary in the sense that there's 4! orders you could've chosen that all that applies to.
+13:26:11 <dmwit> Do you believe that if we had a 4-element set {0,1,2,3}, it would be sensible to use the ordering 0<1<2<3?
+13:27:18 <__monty__> I say natural numbers have an "inherent" order because I believe a sufficiently advanced culture that has not had contact with modern society would still have natural numbers and use the same ordering we do. They may use different symbols but that's not pertinent.
+13:27:35 <nshepperd> the ordering 'Club < Diamond < Spade < Heart' disturbs my psyche
+13:27:45 <dmwit> What if they used the symbols "Club", "Diamond", "Spade", "Heart"?
+13:28:14 <__monty__> dmwit: Then they no longer align with the concept of card suits.
+13:29:30 <dmwit> (My original line of questions was going to go {0,1,2,3} -> {zero,one,two,three} -> {cero, uno, dos, tres} -> {zorblaax, sanguon, blizark, reeknon} because some aliens we find use that -> {zorblaax, sanguon, blizark, reeknon} even though no aliens use that -> {club, diamond, spade, heart}. Where *exactly* do you draw the line?)
+13:29:35 <dmwit> (And why?)
+13:30:20 <dmwit> __monty__: But they *do* align. I have made an alignment. It is this one: your 0 is my Club. Your 1 is my Diamond. Your 2 is my Spade. Your 3 is my Heart.
+13:32:13 <__monty__> dmwit: There's the rub *an* alignment.
+13:32:44 <dmwit> So. In my proposed line of questions, where do you draw the line?
+13:33:06 <dmwit> There is *an* alignment between the words "zero", "one", "two", "three" and the symbols 0, 1, 2, 3. Do you object to that?
+13:33:20 <__monty__> dmwit: Before {0,1,2,3}. IF you consider those names you can choose an arbitrary order.
+13:33:39 <dmwit> So you even reject {0,1,2,3} + 0<1<2<3 ?
+13:34:56 <__monty__> Yes, unless you say "Set of the 4 smallest natural numbers." Then there's one sensible ordering.
+13:35:03 <nshepperd> the symbols don't really have anything to do with it
+13:35:16 <__monty__> Exactly.
+13:35:26 <nshepperd> the natural numbers are 0, S0, SS0, SSS0, SSSS0...
+13:35:31 <dmwit> See, I think nshepperd is agreeing with me, not you. =P
+13:35:49 <__monty__> That's not *my* problem ; )
+13:36:14 <dmwit> Suppose I say "I am going to use the set of the 4 smallest natural numbers, named Club, Diamond, Spade, Heart". Are you okay with this?
+13:36:52 <__monty__> dmwit: Only if you say specifically which symbol corresponds to which of the natural numbers.
+13:37:16 <dmwit> Okay. Let's back off all the way to the beginning of the list of options.
+13:37:17 <__monty__> But at that point the symbols *are not* card suits anymore. They just happen to use the same names.
+13:37:35 <dmwit> Suppose I say "I am going to use the set of the 4 smallest natural numbers, named 0, 1, 2, 3". Are you okay with this?
+13:37:53 <dmwit> (How do I meet the requirement to state the correspondence between these symbols and the natural numbers?)
+13:39:18 <__monty__> The correspondence is implied. Anyone would assume you're using 0 for what we'd normally call 0, etc.
+13:39:47 <dmwit> But the connection between the symbol 0 and the mathematical concept is completely arbitrary. You are okay with that?
+13:40:26 <nshepperd> only as arbitrary as a thousand year old convention?
+13:40:36 * dmwit nods agreeably
+13:40:59 <__monty__> I agree it's arbitrary. But it's just *less* arbitrary : )
+13:42:48 <dmwit> So. I therefore currently predict you would draw the line either between "{zorblaax, ...} because of aliens" and "{zorblaax, ...} even without aliens" (likely) or between "{cero, ...}" and "{zorblaax, ...} because aliens". That sound right to you?
+13:43:50 <nshepperd> neither imo
+13:44:11 <__monty__> Nope, like I said I draw the line before you {0,1,2,3}.
+13:44:47 <dmwit> No you don't; I asked if you would be okay if I said "I am going to use the set of the 4 smallest natural numbers, named 0, 1, 2, 3" and you said you were okay with this because the correspondence is implied.
+13:44:48 <nshepperd> imo the line is that adding arbitrary numerical interpretations to existing non-numeric symbols is inane and doesn't make sense
+13:44:53 <dmwit> So the line can't be before {0,1,2,3}.
+13:45:20 <nshepperd> whereas adding arbitrary Ord instances to data types in order to make Maps work is rightous and just
+13:45:36 * ski . o O ( "All orders are arbitrary, but some orders are less arbitrary than others" -- Will O'dealld )
+13:45:41 <dmwit> nshepperd: (In fact I don't care about the numerical representation. I only claim that it is sensible to make Suit an Ord instance. But I argue the stronger claim that implies this weaker one, too, actually.)
+13:46:43 <__monty__> And I'm fine with doing that for that reason. I'm just sad we don't have a cleaner seperation between "This type has an order, and yes it's the one you think it is." and "This type can be put in a Map."
+13:47:30 <nshepperd> as a separate matter, 'Club < Diamond < Spade < Heart' is bad because the obviously correct order is 'Spade < Club < Diamond < Heart'
+13:48:23 <zeta_wolf> hello guys, i am currently learning haskell and would like to join an open source project. i would like to contribute to the ghc compiler, where would i start?
+13:48:26 <dmwit> Alternating colors means that sorting a hand of cards makes the suit boundaries visually obvious. ;-)
+13:51:12 <ski> zeta_wolf : perhaps you could ask #ghc about that
+13:51:38 <ski> zeta_wolf : though .. i suspect it might be better to start with something simpler
+13:52:45 <zeta_wolf> ski: why?
+13:55:01 <ski> might be a bit too much, too big, to handle initially, when you're struggling with basics
+13:55:12 <ski> do you know any other functional programming language ?
+13:59:00 <zeta_wolf> ski: i did java for about 3 years, been on and off with haskell for about 1 year, i would like to get some real world experience in haskell, so the ghc seems like a good place to start?
+13:59:37 <ski> if you already have some Haskell experience, then perhaps so, if you feel like you'd want to try
+14:00:17 <ski> (i was getting the impression that you were, say, learning Haskell since less than a month ago or so)
+14:00:34 <ski> (the Java experience will probably not help that much, with Haskell, mind)
+14:02:13 <tty1> is there any sort of set where the elements dont need to be Ord?
+14:03:16 <tty1> It seems weird to me that that is even a requirement. It would be needed for a Binary Tree backed set but not a Hash backed set.. So seem weird its required
+14:03:20 <jle`> we have HashSet; but yeah, implementing a "only one of each item" kind of collection without Ord becomes really inefficient
+14:03:33 <jle`> https://hackage.haskell.org/package/unordered-containers-0.2.10.0/docs/Data-HashSet.html
+14:04:20 <jle`> tty1: right, that's because Data.Set is built on a BST, and HashSet is built on a hashmap :)
+14:04:55 <ski> tty1 : hmm .. sets implemented as bit-fields, perhaps ?
+14:04:58 <tty1> hmm shouldnt be. a hash based set that doesnt require ord would be more efficient than a binary tree based set (which would require ord).. At least in other languages the non ordered sets are faster
+14:05:28 <ski> (using `Ix' ?)
+14:05:30 <jle`> tty1: oh yeah, i worded that poorly.  i meant hat either Hashable or Ord or some other constraint is required
+14:05:36 <jle`> tty1: using no constraint other than Eq has to be inefficient
+14:05:44 <tty1> jle`: unless im reading thiswrtong a HashSet requires its elements to be Ord too
+14:06:01 <tty1> jle`: ohhh yes thats true
+14:06:03 <jle`> tty1: but, what you said really only also applies in the symptotic case; using Ord can be more efficient for a large range of sizes
+14:06:15 <tty1> but it looks like for HashSet it needs to be HAshable AND ord.. no?
+14:06:32 <jle`> tty1: hm, where are you seeing that from?
+14:06:46 <tty1> jle`: on this page: http://hackage.haskell.org/package/hashmap-1.3.3/docs/Data-HashSet.html
+14:07:03 <tty1> jle`: insert on that page has the following definition: insert :: (Hashable a, Ord a) => a -> Set a -> Set a
+14:07:04 <jle`> ah, that package is deprecated
+14:07:11 <tty1> ohh
+14:07:34 <tty1> oh yes the one you linked to does look better
+14:07:39 <tty1> thanks thats closer to what I wanted
+14:08:10 <tty1> But I guess no sort of multiset that is just eq and hashable i guess huh?
+14:08:20 <tty1> I guess ill have to implement my own varient of a bag...
+14:08:43 <Solonarv> 'HashMap a Int' - there is your eq+hashable multiset
+14:08:54 <dmwit> tty1: Whether you use hashing or ordering, I think my suggestion from earlier is basically still relevant.
+14:09:07 <dmwit> tty1: Namely use a HashMap a [a] or HashMap a (Int, [a]) or whatever.
+14:09:28 <dmwit> newtype wrap it so you can write your own instances.
+14:09:37 <tty1> Solonarv: yea id justneed to wrap it or something
+14:09:47 <tty1> right
+14:10:10 <tty1> im still not sure if hashmap will even work i need to think about what equals will mean in my situation
+14:10:33 <Solonarv> well, you'll need to think about that no matter which multiset implementation you end up using.
+14:10:45 <tty1> of course yea
+14:11:07 <tty1> but my gut tells me if two things are equal id still want to store them seperately in case they are internally different
+14:11:14 <tty1> but maybe not, again need to think this through
+14:11:20 <tty1> either way, thanks ill consider these options
+14:11:56 <jle`> tty1: if two things are equal you should be able to store only one of them
+14:12:03 <jle`> it's one of the advantages of using persistent/pure data structures
+14:12:08 <jle`> oh they left :'(
+14:12:33 <jle`> but this fear might be coming from the imperative mindset of mutable data structures/pointers instead of pure values
+14:12:52 <dmwit> Oh, interesting. Yeah, that's a possibility I hadn't considered.
+14:12:57 <jle`> if two objects are 'equal', they can still eventually diverge because you can mutate one and not the other
+14:13:09 <Solonarv> oh, I hadn't even thought of that!
+15:12:18 <tty1> Is there some reason all typeclasses dont subclass from a single universal type class and thus allow something like [1, "hi"].. seems awfully restrictive, surely there is a way around it?
+15:13:01 <monochrom> Single univeral type class still will not enable [1, "hi"].
+15:13:27 <lyxia> you're thinking of classes in an object-oriented sense, which is different from type classes.
+15:13:27 <tty1> monochrom: well is there anyway to get something like that?
+15:13:46 <tty1> not surprising
+15:13:58 <monochrom> Because with [1, "hi", True] (let's throw in more for the heck of it) the fundamental question is what is its type? You have to write [T] where T is a type, not a class.
+15:14:21 <monochrom> So T is not Int, not String, not Bool. What is it?
+15:14:48 <monochrom> It does not even matter that Int, String, Bool are all instances of one single mother class called "Show".
+15:14:56 <tty1> monochrom: then make all types derrive from some universal type insead?
+15:15:23 <monochrom> That would just be another way to say you want subtyping.
+15:15:26 <tty1> do data types even derrive
+15:15:32 <tty1> i guess
+15:15:50 <monochrom> Haskell chose against subtyping in favour of Hindley-Milner.
+15:16:01 <tty1> right now i just want a list that can hold mixed types, or the aboility to make my own I guess
+15:16:34 <tty1> is that impossible, no wpork around?
+15:16:35 <monochrom> Subtyping also turns out to be much more complicated and annoying than most people believe.
+15:16:48 <sarahzrf> monochrom: (Int -> Int) is a subtype of (forall a. a -> a) ;)
+15:17:37 <monochrom> Is it? See that's one thing people get wrong actually. One more data point that subtyping is more complicated and annoying than most people believe.
+15:17:56 <sarahzrf> it is in haskell
+15:17:57 <monochrom> In the case of this data point, look for "covariant" vs "contravariant".
+15:18:26 <monochrom> So show me working code that demonstrates your claim.
+15:18:31 <monochrom> s/So/OK/
+15:18:54 <sarahzrf> wait lmao i meant the other way around
+15:19:21 <pie_> that seems like a mistake most people would make at some point >_>
+15:19:32 <pie_> pretty sure i did.
+15:20:16 <sarahzrf> i dont see what my fuckup has to do with variance though
+15:20:36 <lyxia> also you cannot put (forall a. a -> a) in the same contexts where you can put (Int -> Int)
+15:20:46 <lyxia> [Int -> Int] is fine, [forall a. a -> a] is not
+15:21:11 <sarahzrf> cant u if u have rankntypes
+15:21:17 <sarahzrf> oh wait hm
+15:21:23 <sarahzrf> :k [forall a. a -> a]
+15:21:24 <lambdabot> *
+15:21:28 <sarahzrf> :]
+15:21:28 <lyxia> no this is a question beyond rankntypes
+15:21:59 <lyxia> wow
+15:22:03 <monochrom> OK that one is more subtle. You plug in a=Int to go from "forall a. a->a" to "Int->Int". This is parametricity rather than subtyping. The difference is subtle.
+15:22:58 <sarahzrf> it's subtyping
+15:23:13 <monochrom> I forgot how to best explain it, but for an analogy, I wouldn't say "3+4 is a sub-something of \x -> x+4".
+15:23:16 <glguy> You can't use a quantified type in the same places you an use an unquantified one
+15:23:32 <ski> if anything, saying "`forall a. a -> a' is a subtype of `Int -> Int'" (the opposite direction of what you said) at least would make slightly more sense ..
+15:23:36 <sarahzrf> in system F it is not subtyping but in haskell it is
+15:23:48 <sarahzrf> ski: yes thats what i meant by "wait lmao i meant the other way around"
+15:23:59 <sarahzrf> also isn't "parametricity" usually in reference to results about observational equivalence
+15:24:01 <tty1> so is there any sort of collection, like a ist, that i can somehow get to accept a mix of Int and string? is it impossible at all or some hacky way to do it?
+15:24:05 <sarahzrf> rather than the concept of parametric polymorphism
+15:24:16 <sarahzrf> tty1: [Either Int String]
+15:24:36 <glguy> lambdabot overapproximates the answer to :k [forall a. a -> a]. You can't do that in Haskell or GHC
+15:24:42 <monochrom> Both. Because the observational equivalence statement also proves free theorems.
+15:24:46 <sarahzrf> i thought lambdabot was backed by ghc
+15:24:48 <ski> sarahzrf : sorry, i missed that
+15:24:54 <tty1> sarahzrf: well i wanted it to be more general where it can contain a mixture of any types really
+15:24:56 <sarahzrf> % :k [forall a. a -> a]
+15:24:57 <yahb> sarahzrf: [forall a. a -> a] :: *
+15:25:02 <sarahzrf> tty1: how would you use it?
+15:25:04 * ski idly wonders why tty1 "want a list that can hold mixed types, or the aboility to make my own I guess"
+15:25:07 <tty1> but i guess nt really doable then
+15:25:24 <sarahzrf> there's not really anything you could do with it
+15:25:43 <sarahzrf> sure you could construct one, but what would you do with it once you had it? you can't use anything you take out of it since you don't know what type it is
+15:25:53 <tty1> sarahzrf: i want to write a graph theory library, so the consumer will define how they use it really
+15:26:13 <sarahzrf> make the type of graphs parameterized by the type of labels
+15:26:15 <ski> sarahzrf : "parametricity" is distinct from "parametric polymorphism"
+15:26:26 <sarahzrf> ski:yes, that's what i was saying @ monochrom
+15:26:37 <monochrom> ski: Yes you should say that to me.
+15:26:39 * ski is still lagging in conversation ..
+15:27:07 <monochrom> OK why is it subtyping in Haskell?
+15:28:05 <ski> % :k [forall a. a -> a]
+15:28:05 <yahb> ski: [forall a. a -> a] :: *
+15:28:12 <ski> % :t [] :: [forall a. a -> a]
+15:28:12 <yahb> ski: ; <interactive>:1:7: error:; * Illegal polymorphic type: forall a. a -> a; GHC doesn't yet support impredicative polymorphism; * In an expression type signature: [forall a. a -> a]; In the expression: [] :: [forall a. a -> a]
+15:28:22 <sarahzrf> awww =(
+15:28:36 <sarahzrf> monochrom: because you can use a term of type "forall a. a -> a" anywhere that you can use a term of type "Int -> Int", surely
+15:28:59 <monochrom> But why is it not subtyping in System F?
+15:29:20 <monochrom> Is it only because "not type inference, explict type application everywhere"?
+15:29:25 <monochrom> That would be pretty lame.
+15:29:27 <sarahzrf> yeah
+15:29:30 <sarahzrf> it's pretty lame ^_^
+15:30:11 <sarahzrf> but i fail to see how it's significantly different from "Float is not a subtype of Complex Float, since you need explicit addition and removal of a constructor"
+15:30:19 <monochrom> I would rather think in the case of Haskell it is still type application but you just can't write it that way.
+15:30:44 <martin__> monads don't compose. is this why we have monad transformers but not applicative transformers?
+15:30:49 <ski> @hackage dependent-map
+15:30:50 <lambdabot> http://hackage.haskell.org/package/dependent-map
+15:30:53 <ski> tty1 ^ ?
+15:31:15 <sarahzrf> martin__: perhaps, but also just because most of the applicative transformers we might use are also monad transformers, so we just call them that, i think
+15:31:27 <ski> tty1 : but i would really consider simpler things first, like letting the user pick the "mix of types" they want
+15:32:13 <tty1> ski: maybe... i intend to learn as i go, so may not be the best course...
+15:32:27 * Cale spent the better part of the day working on some improvements to dependent-sum-template
+15:32:46 <monochrom> In C I would not say (char*) to be a subtype of (void*) even when the conversion/coercian/cast/whatever is implicit.
+15:32:56 <sarahzrf> monochrom: but cant we generally think of subtyping as implicit coercions
+15:33:12 <monochrom> I can't.
+15:33:19 <sarahzrf> what would you like instaead?
+15:34:03 <monochrom> Subtyping as its own thing. I don't have a less-axiomatic answer than that.
+15:34:33 <sarahzrf> lol
+15:34:49 <ski> tty1 : in some circumstances, you could do something like `[exists a. Show a *> Tree a]' (though with `Show' there it's pretty useless)
+15:35:00 <monochrom> The same way I won't think of "set is list except..." or "list is set except...".  Set is set, not in terms of other things.  List is list, not in terms of other things.  They have their axioms, done.
+15:35:18 <dmwit> I have a complaint: this "subtyping" relation isn't transitive.
+15:35:26 <sarahzrf> i believe you will find that terms of type "forall a. a -> a" will also typecheck as having type "Int -> Int", which i believe is pretty good grounds for subtyping
+15:35:28 <sarahzrf> dmwit:yeah?
+15:35:37 * ski idly wonders whether LSP could be employed to indicate the difference
+15:35:52 <monochrom> More pointedly, 2-tuple as 2-tuple, not as a special set.
+15:36:20 <dmwit> Thinko. I retract my claim.
+15:36:29 <sarahzrf> lol
+15:38:22 <dmwit> Hm. Do you reject RankNTypes?
+15:43:36 <dmwit> I ask because if I have a `(forall a. a -> Int) -> b`, I cannot pass it an `forall a. a -> a`; and if I have a `(forall a. a -> a) -> b` I cannot pass it a `(forall a. a -> Int)`.
+15:43:47 <dmwit> So functions do not have the usual co-variant contra-variant behavior.
+15:45:43 <dmwit> Ugh. More thinkos. What am I doing.
+15:46:07 <dmwit> Simply `forall a. a -> a` and `forall a. a -> Int` are not related by subtyping.
+15:48:12 <monochrom> Does subtyping enjoy free theorems like parametric polymorphism does?
+15:49:03 <dmwit> monochrom: Depends a lot on the subtyping relation, I guess.
+15:49:32 <dmwit> e.g. trivially take subtyping to be alpha equality and you get back whatever underlying non-subtyping type system you had.
+15:50:06 * ski . o O ( is "parametric polymorphism" a subtype of "subtyping" ? )
+15:50:26 <dmwit> (...so System F enjoys free theorems, and System F + trivial subtyping also enjoys those same theorems.)
+15:50:57 <lyxia> The interesting question is what happens when you add interesting subtyping.
+15:51:48 * dmwit doesn't know the answer for any interesting subtyping system
+15:52:44 <dmwit> It certainly seems plausible that only adding, say, width subtyping would preserve all the free theorems.
+15:54:35 <dmwit> (Width subtyping: X is a subtype of Y if you get between them just by adding fields to a record, which fields get ignored by the thing acting on it.)
+15:54:45 <dmwit> (...plus all the usual congruence rules.)
+16:04:35 <flebron> Hi folks. What's a numeric datatype T, such that (-1 :: T), shifted right logically by 22, is 1023? This should be Int32, but its right shift is arithmetic, not logical (i.e. it pads with 1s when the input is negative). Word32 can't reopresent -1.
+16:07:42 <ClaudiusMaximus> > (fromInteger (-1) `shiftR` 22) :: Word32 -- words are modulo 2^bits, you can omit the fromInteger if you have a numeric literal (but you might get a warning)
+16:07:44 <lambdabot>  1023
+16:10:32 <flebron> Ah, the fromIntegral in Word32 does the magi "if negative then add 2^32" bit. Thanks :)
+16:10:39 <flebron> *magic
+17:13:48 <libertyprime> noob question, sorry. how would i remove the $ in this code http://ix.io/1JCr
+17:14:28 <oni-on-ion> forM_ ( tail [7..9] ) (\k -> do  print k) 
+17:14:40 <oni-on-ion> a $ b c == a (b c)
+17:14:46 <libertyprime> ahh. thanks.
+17:14:48 <oni-on-ion> np
+17:15:00 <libertyprime> this makes sense
+17:15:43 <oni-on-ion> great
+17:23:06 <dmwit> > (clearBit (-1 :: Int32) 31) `shiftR` 22
+17:23:08 <lambdabot>  511
+17:25:21 <dmwit> > let lshiftR v 0 = v; lshiftR v s = shiftR (clearBit (shiftR v 1) (finiteBitSize v - 1)) (s-1) in (-1 :: Int32) `shiftR` 22
+17:25:23 <lambdabot>  -1
+17:25:38 <dmwit> > let lshiftR v 0 = v; lshiftR v s = shiftR (clearBit (shiftR v 1) (finiteBitSize v - 1)) (s-1) in (-1 :: Int32) `lshiftR` 22
+17:25:40 <lambdabot>  1023
+17:25:42 <dmwit> yay
+17:25:45 <dmwit> Also yuck.
+17:26:56 <dmwit> libertyprime: You can remove a bunch of other stuff, too: `forM (tail [7..9]) print`.
+17:28:01 <dmwit> (The general rules at play here: `do e` = `e` when `e` is just a single statement, and `\k -> f k` = `f` when `k` doesn't appear in `f`.)
+17:30:28 <shachaf> (And f isn't undefined.)
+17:32:36 <dmwit> Yeah. There's some unfortunate niggles.
+17:33:24 <dmwit> ...that certainly don't matter until well past the point where you're confused about how to remove ($). ;-)
+17:34:00 <shachaf> True.
+18:00:26 <quazimodo> hi all
+18:00:31 <oni-on-ion> hi
+18:00:37 <quazimodo> been a while since i've haskelled
+18:01:11 <quazimodo> question, is it possible to make a type that represents all positive integers greater than 0 + 0.2, eg. 1.2, 2.2, 3.2 and so on?
+18:02:21 <oni-on-ion> aside from the disparity of types and contents/data, i believe there is more than one way
+18:03:41 <slack1256> You could just create a module a newtype say `GreaterThanPointTwo = GTPT Word  and ensure there is only one destructor `dest : GreateerThanPointTwo -> Double`  which is guarranteed to do the right thing
+18:03:56 <slack1256> also, do not export the newtype constructor
+18:05:10 <quazimodo> :/ typescript makes me sad
+18:54:17 <gravy> Noob here. `cabal new-install QuickCheck` installs it, but `ghc-pkg list QuickCheck --global` returns "(no packages)". What am I missing?
+19:30:34 <booghost123> gravy : the package might be hidden     https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/packages.html
+19:55:02 <mouse008[m]> booghost123: how to you "expose" a package installed by "cabal new-install ..."?
+20:29:29 <maerwald> is it possible to write a _nonempty prism? Can't figure it out. Seems it's not possible: _nonempty = prism (:|[]) (\x -> maybe (Left _) Right (NEL.nonEmpty x)) :: Prism [a] (NEL.NonEmpty b) a b
+20:29:32 <maerwald> something like that
+20:38:16 <jle`> maerwald: nonempty prism into what?
+20:38:21 <jle`> oh, i see
+20:38:51 <jle`> hm, i don't think the type of that prism is allowed as a type-changing lens
+20:39:07 <jle`> maerwald: actually i'm not sure what you mean, a nonempty prism into what?
+20:39:31 <c_wraith> Conceptually, there's nothing wrong with a prism between [] and NonEmpty
+20:45:29 <maerwald> c_wraith: yeah, upcaste is [] -> NonEmpty
+20:46:03 <maerwald> but what to use if it fails, types don't line up
+20:50:34 <c_wraith> If I'm reading this right, it should be a Prism [a] [b] (NonEmpty a) (NonEmpty b)
+20:55:26 <maerwald> _nonempty = prism NEL.toList (\x -> maybe (Left []) Right (NEL.nonEmpty x))
+20:55:30 <maerwald> this seems to compile...
+20:55:34 <maerwald> not sure if it does what I want lol
+20:55:40 <c_wraith> why not allow type changing?
+20:55:53 <c_wraith> prism toList (\case [] -> Left [] ; (x:xs) -> Right (x :| xs))
+20:56:09 <maerwald> type is _nonempty :: Prism [a] [b] (NonEmpty a) (NonEmpty b)
+21:00:17 <c_wraith> Anyway, that's the only direction a Prism can go between those types.  There's always list from a NonEmpty, but not necessarily the other way around
+21:00:32 <c_wraith> So if it isn't what you need...  a Prism isn't what you need. :)
+21:00:59 <dmwit> gravy: new-install installs to --user by default, not --global
+21:01:44 <maerwald> c_wraith: well, the funny thing will be that 'view' is mostly useless with this one, because NonEmpty cannot have a Monoid instance...
+21:01:46 <dmwit> gravy: The "hidden" stuff above isn't correct; ghc-pkg list also shows hidden packages (with a mark saying they are hidden).
+21:04:33 <maerwald> mh, sadly NonEmpty doesn't have a Const instance
+21:06:46 <c_wraith> err.  Oh.  Const (NonEmpty a) doesn't have an Applicative instance.  wow, that phrasing threw me for a loop.
+21:07:10 <maerwald> *Cons
+21:07:22 <c_wraith> Oh, totally different statement.
+21:07:29 <maerwald> yep, was hoping to use _head
+21:07:31 <c_wraith> Yeah, it can't have an instance of Cons.  the types don't work.
+21:08:16 <c_wraith> Well, they do if you're ok with weird edge case behavior, like not being able to destructure a singleton with it
+21:08:26 <c_wraith> but strangely, NonEmpty does have a Wrapped instance
+21:10:31 <c_wraith> (I say "strangely" because it's not a newtype)
+21:26:44 <mac10688> https://github.com/ChrisKuklewicz/regex-tdfa
+21:26:51 <mac10688> I'm trying to understand this statement
+21:27:06 <mac10688> -- monadic, uses 'fail' on lack of matchY
+21:27:08 <mac10688> y
+21:27:10 <mac10688> woops
+21:27:26 <mac10688> anyway, i don't understand the idea behind the  fail monad for matching on regex
+21:27:29 <mac10688> can I ignore that?
+21:29:49 <mac10688> :info Monad
+21:30:02 <mac10688> !info Monad
+21:30:11 <mac10688> i forgot how the bot works
+21:30:44 <jackdk> % :i Monad
+21:30:45 <yahb> jackdk: class Applicative m => Monad (m :: * -> *) where; (>>=) :: m a -> (a -> m b) -> m b; (>>) :: m a -> m b -> m b; return :: a -> m a; fail :: String -> m a; {-# MINIMAL (>>=) #-}; -- Defined in `GHC.Base'; instance [safe] Monad Q.Gen -- Defined in `Test.QuickCheck.Gen'; instance [safe] (Monoid w, Monad m) => Monad (WriterT w m) -- Defined in `Control.Monad.Trans.Writer.Lazy'; instance [safe] Mon
+21:31:13 <mac10688> yeah so fail is fail :: String -> m a
+21:31:52 <mac10688> is there a way I could chain that or something
+21:32:05 <mac10688> like if the regex fails one match, it'll just try the next parse and so forth
+21:32:23 <mac10688> I want to write something that can parse dates
+21:32:51 <jackdk> sounds like Alternative or possibly MonadPlus, depending on how the library you're working with is set up?
+21:33:54 <Axman6> you get to choose which monad m is, so you can choose one where fail would cause Alternative to do its thing
+21:35:06 <Axman6> haystack =~~ needle <> hatstack =~~ needle2 (though this is a.k.a haystack =~ (needle|needle2) -- however that might not be what you're after if orders can change)
+21:35:13 <Axman6> uh, <|>
+21:35:45 <mac10688> thanks! I think that's good for me to chew on
+21:35:58 <mac10688> takes me a while to get my head back into the flow of haskell but that is ringing bells
+21:36:36 <Axman6> hooray
+21:37:13 <mac10688> http://hackage.haskell.org/package/time-1.9.3/docs/Data-Time-Format.html#g:2
+21:37:34 <mac10688> it looks like this function has been built for me to use the alternative method because m needs to be a MonadFail
+21:38:06 <Axman6> yeah I was going to mention that time parsing already exists :)
+21:38:06 <jle`> is there a version of the 'freer' monad (Free + Coyoneda) anywhere out there on hackage
+21:38:20 <Axman6> the Thyme package also offers it, anong with some other advantages
+21:38:28 <c_wraith> jle`: several
+21:38:43 <Axman6> is that what freer-effects does?
+21:38:53 <Axman6> also, perhaps polysemy?
+21:38:59 <jle`> apparently, but it doesn't have an actual freer type
+21:39:08 * Axman6 is pretty excited about polysemy
+21:39:48 <mac10688> Thanks Axman6 . I'm checking out the thyme package. I skipped this in my initial search
+21:40:10 <jle`> c_wraith: why can't i find any? ;_;
+21:40:14 <jle`> any one you know off the top of your head?
+21:40:15 <Axman6> Liyang, who wrote it, is sometimes in here too
+21:40:18 <c_wraith> operational
+21:40:44 <jle`> ah, operational :D
+21:40:47 <jle`> oh you just said that
+21:40:53 <c_wraith> :)
+21:41:32 <jle`> oh huh the kind of it doesn't work
+21:41:52 <jle`> since it doesn't match the same kind as Free, except without a type synonym
+21:41:57 <jle`> i wonder why it's ordered that way
+21:42:03 <iqubic> So I have this data type. I'm trying to define the show instance for it. Is there a way to get a different output based on the type of a? http://dpaste.com/33Y2PGG
+21:42:06 <jle`> oh, so that it can have a MonadTrans instance
+21:42:13 <c_wraith> it's older than the observation that it's equivalent to Free + Coyoneda
+21:42:44 <jle`> iqubic: Typeable :) (or singletons for BagState)
+21:42:45 <iqubic> Basically, I want a way to pattern match on the type of BagState that I have.
+21:42:56 <jle`> this is essentially what singletons do for BagState
+21:42:58 <iqubic> How does Typeable work?
+21:43:05 <jle`> but you can get a singletons-lite version with Typeable
+21:43:21 <jle`> typeRep @a == typeRep @White
+21:43:29 <iqubic> I know how singletons work, but I don't know how typeable works.
+21:43:32 <jle`> but in this case you can't get exhaustiveness checking
+21:43:54 <jle`> if | typeRep @a = typeRep @White = ....
+21:44:04 <jle`>    | typeRep @a == typeRep @Blue = ...
+21:44:18 <jle`> alternatively you can just show the typeRep, which gives "White", "Blue", or "Red" iirc
+21:44:25 <iqubic> I see.
+21:44:43 <jle`> but yeah i don't think you can get exhaustiveness checking without a singletons-like method
+21:44:48 <jle`> or else faking it with pattern synonyms
+21:45:02 <jle`> the benefit of Typeable is that it's built into base
+21:46:31 <nshepperd> iqubic: approach 1: instance Show (Bag White) where ...; instance Show (Bag Blue) where ...
+21:46:44 <iqubic> Does that actually work?
+21:47:02 <nshepperd> it requires FlexibleInstances but yes
+21:47:07 <jle`> it should, with -XFlexibleInstances :)  but one problem is that you don't get a forall a. ??? => Show (Bag a) instance
+21:47:19 <jle`> which may or may not matter if you're using quantified constraints
+21:47:44 <nshepperd> iqubic: approach 2: instance MyTypeClass a => Show (Bag a) where ...
+21:48:00 <jle`> c_wraith: it looks like MonadPrompt has the right type
+21:48:02 <iqubic> What does MyTypeClass a mean?
+21:48:04 <jle`> *the right kind
+21:48:28 <jle`> c_wraith: but i wonder why 'free' doesn't have it
+21:48:53 <nshepperd> make a typeclass and give it instances for White, Blue, Red, and put whatever different behaviour your want in there
+21:50:11 <jle`> yeah, you could write class ShowBag a where ...
+21:50:17 <jle`> and do instance ShowBag a => Show (Bag a) where
+21:50:52 <jle`> alternatively you can write a generic typeclass that covers all different use cases besides just show; class HandleState a where handleState :: r -> r -> r -> r
+21:51:03 <jle`> instance HandleState 'White where handleState w _ _ = w
+21:51:14 <jle`> instance HandleState 'Blue where handleState _ b _ = b
+21:51:31 <jle`> etc., then write instance HandleState a => SHow (Bag a) where ...
+21:51:41 <jle`> but probably ShowBag is much simpler/direct :)
+21:51:45 <nshepperd> class ShowBag a where { opinion :: Bag a -> String }; instance ShowBag Blue where { opinion _ = "Blue bags are much cooler than white bags." }
+21:52:25 <nshepperd> instance ShowBag a => Show (Bag a) where { show bag = "This bag contains " ++ show (size bag) ++ " items. " ++ opinion bag }
+21:53:34 <iqubic> what would HandleState do?
+21:53:41 <iqubic> I'm a little confused here.
+21:54:43 <jle`> see if you understand the ShowBag example first
+21:56:27 <iqubic> I understand the ShowBag example.
+21:56:54 <iqubic> Thats just using flexible instances to chose one instance over another.
+21:59:14 <nshepperd> nnooo?
+21:59:33 <nshepperd> it's just delegating the BagState-specific behaviour to a typeclass on BagStates
+22:00:00 <jle`> iqubic: basically with handleState, you could define opinion in terms of HandleState
+22:00:22 <iqubic> I'm not sure I understand what's going on here anymore.
+22:00:47 <jle`> opinion :: HandleState a => Bag a -> String; opinion _ = handleState @a "White bag" "Blue bag" "Red bag"
+22:01:16 <iqubic> How does that work?
+22:01:25 <jle`> well, look at my instances for HandleState
+22:01:36 <jle`> instance HandleState White where handleState w _ _ = w
+22:01:43 <jle`> so if a is White, it returns the first item
+22:02:00 <jle`> if a is Blue, it returns the second item: instance HandleState Blue where handleState _ b _ = b
+22:02:09 <jle`> if a is Red, it returns the third item.
+22:02:28 <jle`> so when you do handleState @a "White bag" "Blue bag" "Red bag", if a is 'White, it'll be "White Bag", if a is 'Blue, it'll be "Blue bag", etc.
+22:02:41 <jle`> it's basically a church encoding of the singleton
+22:03:23 <iqubic> Oh. I see.
+22:03:30 <jle`> the advantage over ShowBag is that for ShowBag method, you need to define a whole new typeclass for every single operation you want to make on BagState
+22:03:38 <jle`> which isn't that bad, if all you do is show it
+22:03:53 <jle`> but if you do many different operations, then HandleState lets you combine ShowBag, ReadBag, etc.
+22:03:57 <iqubic> All, I need to do here is Show it.
+22:04:00 <jle`> or whatever other behavior you want to define on Bag
+22:04:03 <jle`> *BagSTate
+22:04:58 <iqubic> How did the ShowBag thing work?
+22:05:34 <jle`> calling opinion with 'White gives you the 'White instance
+22:05:40 <jle`> calling opinion on 'Blue gives you the 'Blue instance
+22:06:10 <iqubic> What was the type signature of opinion again?
+22:06:24 <iqubic> I really wish Haskell had better support for this type of thing.
+22:06:48 <jle`> scroll up, nshepperd mentions it
+22:07:11 <iqubic> instance ShowBag a => Show (Bag a) where { show bag = "This bag contains " ++ show (size bag) ++ " items. " ++ opinion bag }
+22:07:20 <jle`> the line right before
+22:07:25 <iqubic> class ShowBag a where { opinion :: Bag a -> String }; instance ShowBag Blue where { opinion _ = "Blue bags are much cooler than white bags." }
+22:07:29 <jle`> yes, that's the one :)
+22:08:20 <iqubic> I really wish Haskell had full dependent type support.
+22:08:32 <iqubic> This sort of stuff feels wrong and unatural.
+22:15:12 <nshepperd> iqubic: here's a different way: https://zlkj.in/tmp/paste/238p6KXR
+22:16:44 <nshepperd> KnownBag converts the BagState to the value level so you can pattern match on it normally
+22:17:00 <iqubic> How does that work nshepperd?
+22:17:20 <iqubic> Oh, so it's like KnownNat from the GHC.TypeNats?
+22:18:00 <nshepperd> yes, exactly
+22:18:03 <iqubic> What advantages, if any, does that have over the ShowBag type class?
+22:19:02 <jle`> it's the same advantages as HandleState; you can support multiple operations
+22:19:19 <jle`> note that handleState is just a church-encoded version of bagType
+22:19:25 <iqubic> I see.
+22:21:01 <edwardk> i just realized that my irc client had disconnected me from this channel in january. i thought it was pretty quiet around here =)
+22:21:04 <nshepperd> well, it's convenient if you really just want to pattern match on BagState and it's most readable like that
+22:21:47 <jle`> edwardk: actually, that was the first message in this channel since january
+22:22:09 <jle`> we were all just waiting for you to come back :)
+22:22:28 <iqubic> edwardk: How have you not noticed that earlier?
+22:22:33 <edwardk> jle`: makes sense. i can see why you'd all lose enthusiasm in the interim
+22:22:59 <nshepperd> *four months of silence* ... "it's quiet... too quiet"
+22:23:01 <edwardk> iqubic: i spend a lot of time on #haskell-lens, ##coda, #qpfl, etc.
+22:23:24 <iqubic> How is this the first time you have noticed that you weren't connected to this server?
+22:23:27 <edwardk> and this is one of the channels i turned off notifications on
+22:23:44 <edwardk> i was connected to the server, just not this channel on this server. i usually have like 40 channels open on freenode =)
+22:24:22 * edwardk comes to the conclusion that rendering fonts is a pain in the neck.
+22:24:39 <edwardk> i now have fontconfig bindings for haskell and machinery for building a font atlas though!
+22:25:15 <iqubic> How long did that take?
+22:25:21 <edwardk> an afternoon?
+22:25:48 <iqubic> Oh. I thought that it would be a lot harder. But I know nothing about Fontconfig, or Haskell's FFI.
+22:26:18 <iqubic> Is there a way to rewrite this with a type application? `λ> show (Money 4 :: Bag White)`
+22:26:31 <edwardk> https://github.com/ekmett/codex/tree/master/fontconfig
+22:26:58 <edwardk> i also have some freetype-gl bindings in there that in theory let me use that, but i'm probably going to try switching to glyphy and manually using harfbuzz
+22:26:58 <dmwit> edwardk: Well, to be fair, one of edwardk's afternoons might be quite a long time for the likes of you or me.
+22:27:26 <edwardk> the freetype-gl code is mostly yoinked from lamdu, just hacked up to run on 'gl' not 'OpenGL'
+22:27:36 <nshepperd> edwardk: I have a story you might find amusing. At first I didn't understand the `ersatz` package at all. Then one day I reinvented the main idea of the ersatz API myself. Then suddenly I realised it already exists, and understood how it worked.
+22:27:45 <edwardk> nshepperd: =)
+22:28:03 <dmwit> I think that's a great way to understand an API.
+22:28:14 <dmwit> I hope one day to invent ContT.
+22:28:38 <[exa]> edwardk: "font atlas" like finally a good application to select fonts?
+22:28:48 <edwardk> dmwit: i just did today!
+22:29:04 <iqubic> dmwit: The Cont monad confuses me too.
+22:29:07 <nshepperd> iqubic: Money @White 4
+22:29:16 <iqubic> nshepperd: I see.
+22:29:30 <edwardk> [exa]: the atlas is where i store the images i get when i render the font down for use in opengl. its basically a big texture that you can allocate rectangles on
+22:29:55 <[exa]> ooh so.
+22:30:01 <edwardk> [exa]: the fontconfig stuff is for selecting fonts. .e.g. find me anywhere in my system folder something that looks like Arial
+22:30:53 <edwardk> currently using freetype-gl, but exploring glyphy and stb_truetype as alternatives. glyphy is the approach nearest and dearest to my heart though, as it yields really crisp results suitable to the purposes i have
+22:31:22 <jle`> why do freer, freer-simple, freer-effects, etc. all not have an actual freer monad implementation
+22:31:22 <edwardk> both glyphy and stb_truetype will need a manual harfbuzz layer on top for laying out _where_ to draw the glyphs though
+22:31:42 <edwardk> jle`: irony, my logic programming framework has a freer monad implementation =)
+22:31:49 <edwardk> and i don't even _like_ freer
+22:32:20 <jle`> yeah, same predicament for me. definitely don't want to re-implement
+22:32:28 <jle`> :'(
+22:33:02 <iqubic> What is freer?
+22:33:16 <Axman6> it's more than free
+22:33:32 <nshepperd> mtl is the best extensible effects system
+22:33:36 <nshepperd> i will die on this kill
+22:33:43 <nshepperd> ...hill
+22:33:43 <edwardk> freer is like free but more expensive on average
+22:33:47 <edwardk> nshepperd++
+22:33:58 <jle`> yea i don't even want it for extensible effects, which is why it's unfortunate that it's all tied to extensible effects in these libs
+22:34:02 <Axman6> R.I.P In Peace nshepperd
+22:34:21 <edwardk> nshepperd: one of these days i'll give an 'mtl vs. the world' rant in a big public forum explaining the nuances of why i don't like any of the effect system work
+22:34:32 <edwardk> nshepperd: meanwhile i keep giving it to people in isolation when asked =)
+22:34:38 <nshepperd> heh
+22:35:02 <edwardk> jle`: https://github.com/ekmett/guanxi/blob/master/src/Aligned/Freer.hs
+22:35:02 <iqubic> So ersatz looks weird.
+22:35:04 <jle`> edwardk: are you going to be at ComposeConf this year?
+22:35:18 <iqubic> What is ersatz used for?
+22:36:01 <edwardk> iqubic: i need to add some more machinery to it. i can modify the unification behind bits to allow for unifying any variable you assert of the form x = y or x = not y. by tweaking the unification engine to track a boolean on each edge. this would shrink the sat problems i produce even more
+22:36:14 <edwardk> jle`: its an open question. i've booked the ticket, but stuff
+22:36:21 <iqubic> What is a SAT problem?
+22:36:25 <edwardk> iqubic: sometimes you just want to throw a SAT solver at your problems
+22:36:46 <edwardk> SAT answers questions about boolean formulas.
+22:37:08 <iqubic> I see. But that implies that I first know what a SAT problem is, and how to express one with your library's DSL.
+22:38:08 <edwardk> SAT is boolean satisfaction. you get to give me a formula made out of booleans and ands and ors and nots, and i'll feed it to a SAT solver and interpret the results when it says yes, or say no when there isn't a solution
+22:38:29 <dmwit> iqubic: The SAT question is "give me a logical formula like '(a && b) || (a && c)' and I will tell you if some assignment of variables exists like 'a = True, b = True, c = False' that makes the formula evaluate to True".
+22:38:45 <iqubic> I see.
+22:38:52 <iqubic> Is that all it does?
+22:38:59 <edwardk> with SAT you can ask things like 'does this boolean formula equal that one on all inputs'  which is used when designing circuits, with SAT you can do things like solve sudoku puzzles or anything in NP.
+22:39:06 <Axman6> this is quite a hard problem
+22:39:12 <dmwit> (Actually, technically the SAT question is just to say whether such an assignment exists. But most SAT solvers will also produce that assignment on request, because we don't know a better way of answering the problem than finding a solution.)
+22:39:20 <dmwit> Yes, that is all a SAT solver does.
+22:39:24 <iqubic> How does one use it to solve Sudoku?
+22:39:31 <dmwit> Google it.
+22:39:44 <edwardk> ersatz is a binding to SAT and QBF solvers, QBF lets you add 'foralls' and 'exists' to the front of the formulas
+22:39:47 <dmwit> It's been written up many times before, no need to reproduce the exposition here in IRC.
+22:40:32 <edwardk> with Sudoku we wind up figuring out boolean circuits for expressing the requirements that all the numbers (encoded as bit vectors) in a row are different, that all of them in a column are diffent, that all of them in a block are different
+22:40:52 <edwardk> then we feed it some initial constraints saying what the fixed values of the problem are, and it'll enumerate solutions
+22:40:55 <iqubic> What do SAT and QBF stand for?
+22:41:20 <edwardk> SAT is short for Boolean SATisfiability
+22:41:23 <dmwit> SAT -- satisfiability; QBF -- quantified boolean formula
+22:41:26 <edwardk> QBF = Quantified Boolean Formulas
+22:41:35 <nshepperd> iqubic: https://en.wikipedia.org/wiki/Boolean_satisfiability_problem
+22:42:20 <edwardk> SAT solvers are a component in SMT solvers, which typically extend the domain of things you can talk about beyond just bools to handle things like linear inequalities, array fetches/writes, arbitrary length bitvectors, whatever.
+22:42:37 <nshepperd> i've used ersatz for solving puzzle hunt problems mainly
+22:43:16 <edwardk> my current work on guanxi is aimed mostly at trying to get the performance of modern SMT solvers to apply to general logic programming (a la prolog)
+22:43:54 <edwardk> nshepperd: my favorite example of ersatz is the MIT regex crossword demo wee have
+22:43:56 <edwardk> er we
+22:44:15 <edwardk> https://github.com/ekmett/ersatz/blob/master/notes/grid.pdf
+22:44:30 <edwardk> and solver: https://github.com/ekmett/ersatz/tree/master/examples/regexp-grid
+22:44:51 <dmwit> These two adjacent sentences on that Wikipedia sound contradictory to me: "[MAX-SAT] has efficient approximation algorithms." and "[MAX-SAT] is APX-complete, meaning there is no polynomial-time approximation scheme... unless P=NP."
+22:46:13 <edwardk> i have a friend who has a little game where you can wire up stuff on a grid, add things that turn laser beams or player shuttles by using up resources, and he uses Sharp-SAT to check that there is a unique solution to the hard puzzles, and that there exist solutions to the normal ones, etc.
+22:46:37 <edwardk> dmwit: then P=NP, ship it =)
+22:46:48 <edwardk> now that we have that sorted on to AGI
+22:47:21 * dmwit . o O ( N=1 or P=0 )
+22:47:29 <nshepperd> encoding regex in SAT, how magical :)
+22:47:39 <edwardk> N can be anything you want really.
+22:48:45 <edwardk> If P = 0, N can be anything you want, if N = 1, P can be anything you want.
+22:48:51 <dmwit> Mathematicians thought they were very clever inventing variables like N or X that meant an indeterminate number because then they could tell their wives they had had X beers and so they weren't drunk. But they were in a lot of trouble when the Romans came along and discovered that X=10. -- Dave Barry
+22:52:13 <iqubic> How do you solve that with SAT?
+22:52:26 <iqubic> I don't even know how you encode the problem in SAT.
+22:53:52 <iqubic> I'm so gosh darn confused
+22:54:06 <iqubic> I literally don't understand how the problem is defined.
+23:00:57 <edwardk> iqubic: the sat one?
+23:01:23 <edwardk> first thing is encoding letters as bits. so we use 5 bit numbers to represent A-Z with some extra combinations left over
+23:01:49 <edwardk> then the grid has a fixed shape. so you're looking for a regex match that is exactly the right length, which makes this tractable
+23:02:02 <edwardk> then you just want to simultaneously satsify all the regexes
+23:02:54 <edwardk> https://github.com/ekmett/ersatz/blob/master/examples/regexp-grid/RegexpGrid/Types.hs#L19 gives the shape of the grid and the 5 bit type we use per glyph (i say we, but glguy did all the work)
+23:03:09 <iqubic> But how do you translate from Regex to "Only these patterns of bits are allowed?"
+23:03:12 <Axman6> I did a similar thing to make a sudoku solver once. Can't remember exactly what encoding I used
+23:03:20 <edwardk> 'Codec' is used to transcode things back and forth from haskell types to bits
+23:03:39 <edwardk> https://github.com/ekmett/ersatz/blob/master/examples/regexp-grid/RegexpGrid/Regexp.hs#L13 describes a regex as an ADT
+23:04:40 <iqubic> What really baffles me is Fish.hs
+23:04:53 <iqubic> It looks so simple, but I don't quite understand it.
+23:04:58 <edwardk> https://github.com/ekmett/ersatz/blob/master/examples/regexp-grid/RegexpGrid/Problem.hs#L126 "draws the rest of the fucking owl" as they say and compiles a regex applied to a sequence of felds.
+23:04:59 <edwardk> https://github.com/ekmett/ersatz/blob/master/examples/regexp-grid/RegexpGrid/Problem.hs#L126
+23:05:01 <iqubic> https://github.com/ekmett/ersatz/blob/master/examples/Fish.hs
+23:05:13 <iqubic> Fish.hs looks a lot simpler than the regex puzzle.
+23:05:35 <glguy> edwardk: I made a more advanced regular expression matcher for the cases that are actually regular expressions to speed things up https://github.com/glguy/5puzzle/tree/master/src/RegExp
+23:06:01 <iqubic> How does Fish.hs work?
+23:06:04 <glguy> Match more efficiently matches actual regex and then BackMatch handles the backreference cases
+23:06:59 <edwardk> glguy: nice!
+23:07:43 <iqubic> In fact, I barely understand how the Ersatz library works.
+23:07:53 <edwardk> iqubic: Boolean is a class that describes something you can and/or/check implication of, has a default True/False value, etc. so that whole module is written fairly generally in how you store the initial boolean config
+23:09:04 <edwardk> the only things that are SAT specific is the handling of 'defineVariables' which is quite pleasant, btw, glguy
+23:10:01 <iqubic> ersatz looks really useful, but also really hard to understand.
+23:10:26 <edwardk> iqubic: like most of my projects its sort of designed to be maximally useful to me, not so much for being easy to understand
+23:10:40 <iqubic> I see. That makes total sense.
+23:10:55 <iqubic> Why did you even upload it to Hackage?
+23:12:08 <nshepperd> because it's useful
+23:12:22 <iqubic> But only if you can understand it.
+23:12:32 <glguy> Obviously that's not the case
+23:12:43 <glguy> Do we need an ersatz release now for cryptominisat5?
+23:13:31 <edwardk> glguy: sounds like a plan
+23:13:42 <yushyin> is the german name on purpose or just coincidence?
+23:13:51 <edwardk> iqubic: its not _that_ hard to understand. heck, people use lens ;)
+23:13:52 <nshepperd> \o/
+23:14:03 <iqubic> I understand lenses.
+23:14:04 <edwardk> yushyin: ersatz is my ersatz sat solver library..
+23:14:22 <edwardk> its the best thing next to actually having a sat solver directly in haskell, hence the name as a reference to that idea
+23:14:33 <iqubic> But only because jle` made a wonderful blog post about it.
+23:14:47 <iqubic> https://blog.jle.im/entry/lenses-products-prisms-sums.html
+23:15:01 <MarcelineVQ> the examples are pretty good
+23:15:03 <edwardk> and it fit with the 'SATelite' etc whatever set of puns everyone likes to make when making a sat solver.
+23:15:04 <nshepperd> good punny package names are their own reward
+23:15:13 <edwardk> MarcelineVQ: glguy is 100% to thank for the examples
+23:15:41 <MarcelineVQ> I find that glguy is to thank for a lot of things, I think it's his thing
+23:15:49 <iqubic> Did glguy create the Fish.hs file?
+23:16:05 <edwardk> kind of like how nobody really "grokked" lens until niklas haas wrote the pong example that made folks happy.
+23:16:08 <edwardk> iqubic: pretty sure
+23:16:10 <MarcelineVQ> One time I opened my sock drawer and my socks were paired up already. I thought, "Thank you glguy", just in case.
+23:16:16 <edwardk> MarcelineVQ++
+23:16:18 <iqubic> Lol.
+23:16:21 <nshepperd> haha
+23:18:04 <iqubic> I actually had a Boolean SAT problem I was trying to solve the other day.
+23:18:37 <MarcelineVQ> Me too, but I figured I'd just use lists and then quickly forgot about it, maybe it's time for another try :>
+23:18:44 <nshepperd> that Fish.hs solution is interesting. I wouldn't have thought of representing it as a relation of all attribute pairs
+23:18:47 <MarcelineVQ> iqubic: What was your usecase?
+23:19:14 <iqubic> MarcelineVQ: It was part of a puzzle hunt I was a part of.
+23:19:39 <edwardk> nshepperd: another fun trick is to figure out how to encode it using the exact cover machinery in guanxi
+23:19:48 <edwardk> nshepperd: that can teach you at lot about NP problems
+23:19:53 <MarcelineVQ> the one nshepperd was doing?
+23:19:59 <edwardk> as exact cover is also np complete
+23:20:14 <edwardk> and Cover.DXZ can be reasonably efficient
+23:20:16 <iqubic> There were 26 equations, and 26 boolean variables, of the form "A = B && C" where I had to find some set of true and false that made every equation correct.
+23:20:29 <edwardk> iqubic: that is a perfect SAT example
+23:21:30 <iqubic> "A = B && C" basically boils down to "assert a is the same value as b && c" Where a is allowed to be false, but only if b && c evaluates to false.
+23:21:31 <edwardk> SAT solvers are pretty clever little workhorses. they get as much done as possible before making a guess at each step and when they make a wrong guess they 'learn how to stay out of that potion of the problem space' through something called conflict directed clause learning.
+23:22:18 <iqubic> I'm not sure how to translate my set of equations into something that a SAT solver would be able to handle.
+23:22:27 <edwardk> and then they do things like quickly change around the order in which they are trying variables to ADHD their way around the problem space as different orders make drastic difference in the run time
+23:22:42 <shachaf> Do you know how dancing links compares to converting to SAT and giving to a fancy SAT solver?
+23:23:05 <iqubic> I don't understand the ersatz library. I'll have to look into it later.
+23:23:19 <iqubic> What is dancing links?
+23:23:57 <freeside> sounds like something in Knuth.
+23:24:05 <shachaf> An algorithm for exact cover.
+23:24:07 <edwardk> iqubic: with ersatz you'd make a batch of variables for each variable name you're given, using  http://hackage.haskell.org/package/ersatz-0.4.5/docs/Ersatz-Variable.html#v:exists
+23:24:38 <edwardk> then you'd use assert (a === (b && c)) -- on those variables using === from ersatz and the (&&) from its boolean classes.
+23:24:53 <iqubic> I see. Makes sense.
+23:25:21 <edwardk> and then you'd return the variables as the result of your computation.      so you'd have something like m [Bit] -- as the result
+23:25:22 <iqubic> What's the difference between forall and exists?
+23:25:42 <iqubic> Also, how do I run my solution through a solver?
+23:25:53 <edwardk> then you'd run that with one of the extrernal solvers which would get you a 'Solution' and you can then decode each Bit with the Solution
+23:26:37 <edwardk> http://hackage.haskell.org/package/ersatz-0.4.5/docs/Ersatz-Solver-Minisat.html is an example binding to an external solver.
+23:26:42 <iqubic> decoding sounds difficult?
+23:26:47 <edwardk> http://hackage.haskell.org/package/ersatz-0.4.5/docs/Ersatz-Solver.html provides 'solveWith' which you'd pass that to
+23:27:01 <edwardk> so 'solvewith miniSat yourProblem'
+23:27:37 <edwardk> gives back a result which is either that it failed and there is no solution, that it took too long and the solver bailed because of how it is configured or here is a Solution, which you can use to decode all the bits
+23:27:46 <edwardk> er solveWith actually does the decoding
+23:28:00 <iqubic> How do I create a problem with the right type?
+23:28:28 <edwardk> so you'd just get out a [Bool] or whatever which is valid when the Result is "Satisfied"
+23:28:33 <iqubic> (Monad m, MonadPlus n, HasSAT s, Default s, Codec a) => Solver s m -> StateT s m a -> m (Result, n (Decoded a)) 
+23:28:48 <iqubic> So it's the StateT s m a that I don't know how to create.
+23:29:07 <edwardk> solveWith cryptoMinisat (do x <- exists; y <- exists; z <- exists; assert (x == y && z); pure [x,y,z])
+23:29:28 <iqubic> Ah. I see.
+23:29:46 <iqubic> But then I can just add more and more variables and equations, right?
+23:29:50 <edwardk> yep
+23:30:02 <glguy> http://hackage.haskell.org/package/ersatz-0.4.6
+23:30:04 <edwardk> and the 'n' full of Decoded can be used to get back a list or Maybe the first answer, etc.
+23:30:15 <iqubic> I see. Cool.
+23:30:33 <edwardk> glguy: sorry. just autocompleted =)
+23:30:58 <edwardk> iqubic: see, its not _that_ hard to use when you get used to the idea
+23:31:00 <dminuoso> edwardk: What's with the name "Ersatz" anyway? Is that a hint at something or someone?
+23:31:08 <nshepperd> glguy: \o/
+23:31:09 <glguy> edwardk: Not correcting you; announcing!
+23:31:12 <iqubic> But then how do turn Decoded a into something that I can actually understand?
+23:31:22 <edwardk> ersatz: made or used as a substitute, typically an inferior one, for something else. "ersatz coffee"
+23:31:36 <edwardk> dminuoso: it is a substitute for having an in-haskell sat solver
+23:31:42 <edwardk> glguy: woot
+23:32:06 <dminuoso> edwardk: Ah cool. Being German I've wondered what the connection was, so.. :)
+23:32:10 <dminuoso> Cheers
+23:32:43 <edwardk> dminuoso: its just the nice double pun of using SAT in a name, and the word was thematically appropriate given the lack of a sat solver in the actual package
+23:33:16 <edwardk> soon guanxi should be able to do SAT directly, which will make a nice in-haskell ersatz backend
+23:33:28 <edwardk> it _can_ solve it today, it just sucks at it
+23:34:54 <iqubic> But then how do turn the `Decoded a` into something that I can actually understand as being the solution to the puzzle?
+23:35:03 <iqubic> Will I have to parse it myself?
+23:35:13 <shachaf> It'll actually be solving in Haskell, or just calling out to C like the exact cover solver?
+23:35:16 <glguy> edwardk: Iavor was writing a toy SAT solver in Haskell and using Ersatz and my 5puzzle repository as a test suite. It's fun to see how bugs in the solver manifest as weird solutions
+23:35:39 <dminuoso> ericsagnes: Oh wow, I actually did not see `sat` being inside ersatz. :)
+23:36:03 <nshepperd> iqubic: Decoded is a type family. it'll be some appropriate haskell value already
+23:36:28 <iqubic> How though? How does it get put into the right Haskell value?
+23:36:34 <nshepperd> iqubic: eg. Decoded (Bit,Bit,Bit) is (Bool,Bool,Bool)
+23:36:45 <glguy> iqubic: Ed literally showed you example files demonstrating how solutions are encoded and decoded and passed to the solver
+23:36:48 <edwardk> glguy: hah, had that happen when using guanxi at first, which is what led to me figuring out that i had a bug in my reasoning about LogicT, etc.
+23:37:28 <MarcelineVQ> If I have a specific selection of real numbers that can be summed and maximum to stay under, can this be used to tell me the numbers to sum to maximize a total under the limit? Is there something better for that?
+23:38:42 <edwardk> MarcelineVQ: that is starting to look like a linear programming problem
+23:38:51 <MarcelineVQ> That's pretty roundabout. I should say, "I'd like to optimize an equipment loadout in a game where the equipment values are real numbers"
+23:39:24 <edwardk> MarcelineVQ: linear programming is the workhorse for this sort of thing. convex programming, etc. when that isn't enough
+23:39:36 <edwardk> there are dedicated solvers
+23:40:04 <glguy> Solving problems involving arithmetic only really works at small scales with SAT
+23:40:27 <MarcelineVQ> Oh neat, that's exaclty what I'm wanting by its definition. thanks for the lead
+23:44:17 <edwardk> the nice thing is . this area has been explored to death because it is used by basically every factory or production pipeline on the planet since the 1940s
+23:45:26 <tdammers> also military
+23:45:51 <tdammers> and of course finance, insurance, stock markets, etc
+23:45:59 <edwardk> yeah
+23:46:10 <tdammers> so basically everyone who has ungodly amounts of money needs this kind of thing
+23:46:22 <edwardk> heck i use it to compute better signed distance fields

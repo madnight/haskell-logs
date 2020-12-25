@@ -1,0 +1,1110 @@
+00:29:05 <solonarv> infinisil: whoa, that is a clean final solution for withFrozen ! should be quite nice to use too since you can just write the continuation in terms of generic array fnctions
+00:33:03 <Axman6> the only problem with it is that the passed in function can access the external mutable array still, by being a closure
+00:36:16 <solonarv> I don't think there is anything you can do about that though
+00:39:34 <solonarv> oh, that's not true: instead of taking a polymorphic array input, you could define a new array type like 'data LockedMArray a m e = LockedMArray (MVar ()) (a m e)'
+00:40:37 <solonarv> then you can wrap the methods in the MArray implementation in withMVar and get a simple locking scheme
+00:41:52 <solonarv> and you can write withFrozen (LockedMArray lock arr) cont = withMVar lock (cont =<< unsafeFreeze arr), module some liftIO / unliftIO noise
+00:43:31 <Axman6> if the continuation tries to access the array though, you will get deadlock =)
+00:44:03 <Axman6> since you'll have withMVar inside withMVar.
+00:44:09 <solonarv> that's arguably better than just going wrong silently
+00:44:23 <solonarv> and maybe you'll get a nice friendly BlockedIndefinitelyOnMVar instead
+00:45:00 <solonarv> I guess you could have an MVar Bool instead and manipulate/check the flag to make sure an error gets thrown
+00:46:07 <Axman6> this stuff can be avoided by using the ST trick for the whole ocmputation, you have somrthing like: withFrozen :: (MArray a i e, IArray b i e) => forall s. a i e -> (forall s'. IArray b i e => b i e -> m s' x) -> m s x, then I don't think the inner computation can work with the outer one's mutable array, but I may be wrong about that
+00:46:30 <cocreature> “friendly”, “blockedindefinitelyonmvar” pick one :)
+00:46:37 <solonarv> you are - you can just liftIO (<mutate outer array>)
+00:46:52 <solonarv> unless you don't have MonadIO on the monad but then the whole thing is rather useless
+00:47:03 <Axman6> the mutable array also needs the s parameter
+00:47:09 <solonarv> (well, I think so - I'm not infinisil )
+00:47:45 <solonarv> if you're working in IO you just have s ~ RealWorld#
+00:47:47 <solonarv> anyway brb
+00:48:14 * hackage unix-time 0.4.7 - Unix time parser/formatter and utilities  https://hackage.haskell.org/package/unix-time-0.4.7 (KazuYamamoto)
+00:48:47 <Axman6> but using the rank N type means you can specify a scope for operations and data can't escape that scope
+00:51:14 * hackage squeal-postgresql 0.5.0.0 - Squeal PostgreSQL Library  https://hackage.haskell.org/package/squeal-postgresql-0.5.0.0 (echatav)
+01:04:38 <solonarv> if the continuation's return type is 'n x', you need to somehow make it impossible to construct a 'n x' whose effects mutate the input array
+01:05:47 <solonarv> but of course the input type here should be the same array type we use in the rest of the program, not some special "protected" array type that we construct only for withFrozen
+01:06:29 <solonarv> and surely the rest of our program wants to be in something IO-ish and mutate the array using IO operations
+01:06:57 <solonarv> so our only avenue is making n not have MonadIO available, which is very restrictive
+01:08:02 <solonarv> the rank-N trick prevents data from escaping a scope, but that's not what we're trying to do - we're trying to stop data (the outer mutable array) from *entering* a scope, which is much harder! (impossible?)
+01:27:44 * hackage niv 0.1.0 - Easy dependency management for Nix projects  https://hackage.haskell.org/package/niv-0.1.0 (nmattia)
+01:30:44 * hackage niv 0.1.1 - Easy dependency management for Nix projects  https://hackage.haskell.org/package/niv-0.1.1 (nmattia)
+01:34:27 <hc> solonarv: fascinating
+02:21:56 <infinisil> solonarv: Axman6: Hmm.. yeah the mutating the outer array inside is kind of a problem
+02:26:10 <ubert> hello, i installed stack on nixos as prescribed in the docs: https://docs.haskellstack.org/en/stable/install_and_upgrade/#nixos
+02:26:23 <ubert> nix-env -f "<nixpkgs>" -iA stack
+02:26:59 <ubert> but running `stack build` i get error: attribute 'ghc865' missing, at (string)
+02:27:18 <ubert> is there anything else i need to take care of?
+02:28:15 <ubert> if i install ghc i get installing 'ghc-8.6.4' but the error with stack persists
+02:28:26 <jgt> ubert: did you run nix-channel --update ?
+02:28:35 <jgt> also, did you run stack with --nix?
+02:28:51 <jgt> also, make sure 865 is in nixpkgs
+02:29:09 <jgt> if nixpkgs wants to use 864, then I'd change the stack resolver to match that
+02:30:41 <solonarv> infinisil: unfortunately I don't see a solution short of making a new array type that tracks whether it's currently being used in a withFrozen, *and* making sure to use only that array type everywhere
+02:35:13 <ubert> jgt: top! nix-channel --update did the trick.
+02:35:32 <infinisil> solonarv: What might work is to restrict the effects inside to a limited subset
+02:36:15 <infinisil> solonarv: In my case I only need Randomness and Console IO, the latter I could express as such an effect, so it doesn't need IO for it
+02:36:50 <solonarv> yeah, that would work
+02:36:59 <solonarv> I was just under the impression that wasn't an option for you
+02:37:20 <infinisil> :)
+02:37:24 <infinisil> I'll give it a go
+02:38:40 <jusss> does haskell have type inheritance?
+02:38:55 <jusss> like type in OO
+02:39:25 <infinisil> solonarv: It does feel a bit too manual though, I'm just kind of listing the effects that I know can't do IO right now
+02:39:33 <infinisil> Or m rather
+02:40:25 <lortabac> jusss: no
+02:40:52 <jusss> lortabac: ok
+02:41:21 <solonarv> this should work: withFrozen :: forall effs a i e x r. (Member (Lift IO) r, Member effs r, MArray a e (Sem r)) => a i e -> (forall b r. (IArray b e, Member effs r') => b i e -> Sem r' x) -> Sem r x
+02:41:53 <lortabac> jusss: the class constraints can have a hierarchical relation, but it's not the same thing as inheritance in Java
+02:42:07 <solonarv> usage looks like: withFrozen @[Random, Console] mutArr \frozenArr -> ...
+02:42:58 <solonarv> s/Member effs/Members effs/g
+02:42:58 <jusss> lortabac: I wonder if every haskeller knows java?
+02:43:05 <solonarv> obviously not
+02:43:10 <lortabac> jusss: I don't
+02:43:32 <solonarv> however I'm sure a fairly large fraction have heard things about java
+02:43:41 <solonarv> infinisil: how's that look ?
+02:43:42 <lortabac> I mean, I know more or less what it looks like, but I have never used it
+02:44:07 <jusss> yeah, I don't know java either
+02:44:27 <jusss> but I'm learning kotlin now, 
+02:44:37 <infinisil> solonarv: Where does r' come from?
+02:44:42 <solonarv> you could even add a 'NotMember (Lift IO) effs' constraint but that seems like overkill, a losing battle, and will demolish type inference
+02:44:47 <jusss> those languages mixed type and class make me really confused
+02:45:03 <solonarv> infinisil: I typo'd, the continuation is supposed to be forall b r'. <blah>
+02:45:10 <solonarv> so that's where r' is from
+02:45:31 <infinisil> solonarv: How does this prevent anybody from passing in @[Lift IO]
+02:45:35 <solonarv> it doesn't
+02:45:54 <solonarv> but now you have to actually pass in @[Lift IO] explicitly
+02:45:57 <solonarv> which looks fishy
+02:46:03 <infinisil> Hm, I guess
+02:46:22 <solonarv> as I said you could also add a 'NotMember (Lift IO) effs' constraint, but see above for objections
+02:47:46 <solonarv> one option which would help is to write withFrozen as part of an application-specific prelude, and have said prelude not export Lift
+02:48:22 <infinisil> There's also the problem that there might be other effects *like* Lift IO, which can also run `m`'s
+02:48:29 <infinisil> Aka higher-order effects
+02:48:41 <solonarv> yes, that is where the "losing battle" objection is from
+02:49:05 <infinisil> solonarv: Ohh, have a look here: https://hackage.haskell.org/package/polysemy-0.4.0.0/docs/Polysemy.html#v:interpret
+02:49:22 <infinisil> The constraint there prevents higher-order effects
+02:49:28 <infinisil> Seemingly
+02:49:39 <solonarv> oh, nice!
+02:49:48 <solonarv> yeah, you could do that
+02:49:56 * infinisil thinks where this would have to go
+02:50:10 <infinisil> s/thinks/thinks about/
+02:50:59 <solonarv> I think you want something like 'All (Flip FirstOrder m0 "withFrozen") effs'
+02:51:41 <solonarv> oh, I'm a dummy - 'NotMember (Lift IO) effs' is also completely fine, since effs is fully-specified at use site anyway
+02:51:44 * hackage microlens 0.4.11 - A tiny lens library with no dependencies  https://hackage.haskell.org/package/microlens-0.4.11 (Artyom)
+02:51:54 <solonarv> so you can do both!
+02:52:10 <infinisil> solonarv: I'm not getting the Lift IO argument
+02:52:24 <solonarv> hm?
+02:52:38 <infinisil> I intend to have the function be safe however the use-site
+02:52:44 <solonarv> oh yes
+02:53:01 <solonarv> what I'm saying is that the NotMember constraint will not break type inference
+02:53:14 <solonarv> and so it is fine to have a NotMember constraint which disallows (Lift IO)
+02:53:43 <solonarv> traveling home, back in a few hours
+02:53:51 <infinisil> Hm I somewhat see
+02:54:00 <infinisil> I'll try the All thing, thanks solonarv :)
+02:54:14 * hackage microlens-ghc 0.4.11 - microlens + array, bytestring, containers, transformers  https://hackage.haskell.org/package/microlens-ghc-0.4.11 (Artyom)
+02:54:19 <cjay-> is there a way to put configure-options or other cabal file fields into cabal.project? I need that for a dependency.
+02:55:14 * hackage microlens-mtl 0.2.0 - microlens support for Reader/Writer/State from mtl  https://hackage.haskell.org/package/microlens-mtl-0.2.0 (Artyom)
+02:56:44 <infinisil> Although I'm not sure where to find a constraint-level All
+02:56:44 * hackage microlens-th 0.4.3 - Automatic generation of record lenses for microlens  https://hackage.haskell.org/package/microlens-th-0.4.3 (Artyom)
+02:57:33 <cocreature> cjay-: see https://cabal.readthedocs.io/en/latest/nix-local-build.html#package-configuration-options
+02:57:44 * hackage microlens-platform 0.4.0 - microlens + all batteries included (best for apps)  https://hackage.haskell.org/package/microlens-platform-0.4.0 (Artyom)
+02:57:47 <cocreature> not sure it works for configure-options but I don’t see any reason why it shouldn’t
+03:04:36 <cjay-> cocreature: thanks. I had tried configure-option (without s at the end) which works as a command line flag, but in the file it needs plural
+03:06:36 <z0> what's the idiomatic way of building an infinite list of pairs in this order: [(1,1),(1,2),(2,2),(1,3),(2,3),(3,3),(1,4)..] ?
+03:12:59 <int-e> > [(a,b) | b <- [1..], a <- [1..b]]
+03:13:01 <lambdabot>  [(1,1),(1,2),(2,2),(1,3),(2,3),(3,3),(1,4),(2,4),(3,4),(4,4),(1,5),(2,5),(3,...
+03:14:18 <int-e> @pl [1..] >>= \b -> (,b) <$> enumFrom 1 b
+03:14:19 <lambdabot> (line 1, column 19):
+03:14:19 <lambdabot> unexpected ','
+03:14:19 <lambdabot> expecting expression
+03:14:38 <int-e> @pl [1..] >>= \b -> (\a -> (a,b)) <$> enumFrom 1 b
+03:14:38 <lambdabot> ap ((<$>) . flip (,)) [1..] =<< [1..]
+03:14:54 <int-e> @pl [1..] >>= \b -> (\a -> (a,b)) <$> enumFromTo 1 b
+03:14:54 <lambdabot> ap ((<$>) . flip (,)) (enumFromTo 1) =<< [1..]
+03:15:03 <int-e> (not worth it)
+03:17:35 * ski assumes z0 means given any two lists, not necessarily containing numbers
+03:18:57 <z0> ski, you assume correctly
+03:19:13 <ski> > [(k,n-k) | n <- [0 ..],k <- [0 .. n]]  -- otherwise this is what i'd suggested
+03:19:16 <lambdabot>  [(0,0),(0,1),(1,0),(0,2),(1,1),(2,0),(0,3),(1,2),(2,1),(3,0),(0,4),(1,3),(2,...
+03:20:26 <ski> it's not that hard to write a `diag :: [[a]] -> [a]' manually
+03:20:46 <ski> (that probably exists in some package)
+03:21:14 * hackage graphql-w-persistent 0.4.0.0 - Haskell GraphQL query parser-interpreter-data processor.  https://hackage.haskell.org/package/graphql-w-persistent-0.4.0.0 (jasonsychau)
+03:21:43 <int-e> z0: so was the fact that in all your pairs, the first component was less than or equal to the second one intentional?
+03:22:17 <ski> oh, i misread. sorry
+03:26:58 <z0> int-e: not necessarily. what I'm really trying to do is to zip 2 infinite lists in that order
+03:28:41 <z0> I guess it doesn't really matter which element is the anchor but that's besides the point
+03:29:22 <Athas> Wow, Stack got noisy.
+03:29:29 <int-e> z0: let me put this differently; is the fact that (2,1) is not in the list intentional?
+03:33:01 <int-e> > [(a,b) | (b,i) <- zip [-1,-2..] [1..], a <- take i [1..]] -- can be done without "take" but that would prbably result in more garbage on the heap
+03:33:03 <lambdabot>  [(1,-1),(1,-2),(2,-2),(1,-3),(2,-3),(3,-3),(1,-4),(2,-4),(3,-4),(4,-4),(1,-5...
+03:33:42 <z0> int-e: yes. what i'm interested in is having the pair. im applying a commutative function to each pair, so (1,2) is equivalent to (2,1). what i'm avoiding is having both because it's redundant, but more importantly I'm avoiding pairing the first element infinetly. 
+03:35:41 <z0> thanks
+03:35:56 <int-e> > [(b,a) | bs@(a:_) <- scanl (flip (:)) [] [1..], b <- bs] -- slightly different order
+03:35:59 <lambdabot>  [(1,1),(2,2),(1,2),(3,3),(2,3),(1,3),(4,4),(3,4),(2,4),(1,4),(5,5),(4,5),(3,...
+03:36:28 <ski> hm, so do you have one infinite list, or two ?
+03:36:40 <int-e> one, apparently
+03:36:53 <z0> ski: i wasnt clear. it's the same list
+03:36:55 <ski> they said two earlier, which is why i'm wondering
+03:37:05 <ski> okay
+03:37:07 <z0> its one list
+03:37:15 <z0> zipping with itself
+03:38:41 <z0> this will do it, thanks
+03:39:11 <fr33domlover> o/ I often use (+ 1) :: Int->Int ; how would I do a similar (- 1)? It seems it parses as the number minus one
+03:39:29 <fr33domlover> Is there a convention for this among Haskellers? ^_^
+03:39:30 <Taneb> > map (subtract 1) [0..9]
+03:39:32 <lambdabot>  [-1,0,1,2,3,4,5,6,7,8]
+03:39:46 <Taneb> fr33domlover: the subtract function exists for this purpose
+03:40:41 <int-e> > scanl (flip (:)) [] [1..] -- I really like this function; it's the efficient sibling of "inits".
+03:40:43 <lambdabot>  [[],[1],[2,1],[3,2,1],[4,3,2,1],[5,4,3,2,1],[6,5,4,3,2,1],[7,6,5,4,3,2,1],[8...
+03:40:49 <fr33domlover> Thanks Taneb :)
+03:43:10 <ski> > concat ((zipWith (map . (,)) `ap` (tail . inits)) [0 ..])
+03:43:13 <lambdabot>  [(0,0),(1,0),(1,1),(2,0),(2,1),(2,2),(3,0),(3,1),(3,2),(3,3),(4,0),(4,1),(4,...
+03:55:48 <kuribas> :t (- 1)
+03:55:50 <lambdabot> Num a => a
+03:56:02 <kuribas> :t (-                                1)
+03:56:03 <lambdabot> Num a => a
+03:57:08 <z0> :t (-)1
+03:57:10 <lambdabot> Num a => a -> a
+03:57:29 <Rembane> :t subtract
+03:57:30 <lambdabot> Num a => a -> a -> a
+03:57:38 <Rembane> > subtract 5 7 
+03:57:40 <lambdabot>  2
+03:58:05 <z0> > (-) 5 7
+03:58:08 <lambdabot>  -2
+03:58:36 <fr33domlover> :t (- (1))
+03:58:37 <lambdabot> Num a => a
+03:58:38 <Ferdirand> the intent is that you can write (subtract x) instead of (- x) if you intended it to be a section
+03:59:28 <ski> @src subtract
+03:59:28 <lambdabot> subtract x y = y - x
+04:06:37 <z0> you can always use (-1+)
+04:06:51 <z0> map (-1+) [1,2,3]
+04:06:55 <z0> > map (-1+) [1,2,3]
+04:06:58 <lambdabot>  [0,1,2]
+04:07:14 * hackage BlastHTTP 1.4.0 - Libary to interface with the NCBI blast REST interface  https://hackage.haskell.org/package/BlastHTTP-1.4.0 (FlorianEggenhofer)
+04:07:49 <Jinna> For Servant I constructed so far a `newtype AppT m a = AppT { runApp :: ReaderT Config (ExceptT ServantErr m) a }`.  Now I need some mutable state on the server side, to hold sessions for example.
+04:07:58 <Jinna> I already have one ReaderT as you can see and I wonder what would be a good way to accomplish this. I could have this one single reader to make my config available and have a second reader that contains a TVar, i.e. https://www.fpcomplete.com/blog/2017/06/readert-design-pattern
+04:08:03 <Jinna> Or should there be just one reader with my own type that contains both, the Config and the TVar?
+04:08:18 <Athas> Has anyone here had trouble with caching on Travis after the new Stack came out?
+04:08:25 <Athas> It does not seem to pick up the cache correctly.
+04:11:54 <__monty__> Jinna: Sounds mosly like a question of preference. If they're always used together a type containing both makes more sense to me.
+04:23:59 <clever> is there an existing hackage library for dealing with named pipes, such as creating one and listening on it?
+04:27:09 <hpc> there's two or three - i looked them up for an init script thing but ended up going with the usual signal passing instead
+04:27:30 <hpc> i vaguely remember the most C-like one being the best, but it was a few months ago and i put it out of my mind
+04:27:36 <clever> hpc: windows doesnt really have signals either
+04:28:22 <clever> unix sockets look trivial, but named pipes isnt finding much on google
+04:28:44 <cocreature> clever: something like https://hackage.haskell.org/package/unix-2.7.2.2/docs/System-Posix-Files.html#v:createNamedPipe?
+04:29:45 <clever> cocreature: that looks like step 1, but then i need to somehow make a Socket around it, that can deal with accept
+04:30:21 <clever> http://hackage.haskell.org/package/warp-3.2.28/docs/Network-Wai-Handler-Warp.html#v:runSettingsSocket
+04:30:27 <clever> cocreature: i want to run this against a named pipe
+04:32:29 <hpc> i bet you could use https://hackage.haskell.org/package/network-3.1.0.0/docs/Network-Socket.html#v:socketPair
+04:32:36 <cocreature> clever: maybe openFd + mkSocket?
+04:32:42 <cocreature> no idea how that falls apart
+04:32:43 <hpc> and then a new thread that can translate?
+04:33:10 <clever> hpc: the client end will be electron, and ive already seen signs that electron can do http against named pipes
+04:33:30 <hpc> oh mkSocket is a good idea
+04:35:52 <infinisil> solonarv: Axman6: Well I think I have a fully safe version now, but the interface has become horrible.. https://gist.github.com/Infinisil/4ec01494e12b52ba88869f4ef89e63a3
+04:36:16 <infinisil> Essentially this pushes the ownership of the array into this function
+04:37:14 <cocreature> infinisil definitely seems like a customer for linear haskell ;)
+04:37:17 <infinisil> And it alternatively calls supplied functions that work on immutable or mutable arrays, which can return a value to indicate whether this alternation should continue or end
+04:37:32 <clever> cocreature: checking the source for mkSocket, i can see that a Socket just contains an ioref to the fd, and a duplicate copy of the fd
+04:37:54 <infinisil> cocreature: Hehe yeah that might be nice for this
+04:37:59 <infinisil> Oh hi clever 
+04:38:55 <cocreature> clever: that should be fine, right?
+04:38:59 <clever> cocreature: and accept will then just call c_accept_safe or c_acceptNewSock
+04:39:14 <clever> will need to compile some test stuff, and see what actually happens on windows
+04:39:20 <infinisil> I think I'll just roll with my original withFrozen function and make sure to indicate that you shouldn't modify the mutable array while inside the function
+04:39:32 <clever> it looks like the Socket type is too dumb to know what type of socket it contains
+04:39:37 <clever> which explains why mkSocket is so simple
+04:39:38 <cocreature> oh I missed the part where you need it to work on Windows
+04:41:25 <clever> cocreature: i do see signs of at least c_accept_safe being ffi'd still on windows...
+05:04:05 <solonarv> infinisil: oh yikes
+05:04:40 <solonarv> why do you make it handle a bunch of looping as well? I though you just wanted to use a mutable array in a read-only fashion
+05:04:53 <Phyx-> clever: createPipeFd + mkSocket would probably work.. GHC does the reverse for iserv, e.g. converts a socket to a pipe and that seems to work
+05:07:50 <clever> Phyx-: the tricky part, is that it will need to accept() multiple connections, since its an http server
+05:08:06 <infinisil> solonarv: I don't think there's any other way, if I wouldn't do the looping, I could only have access to the immutable version once or so
+05:08:32 <clever> i do have a working sample that does both tcp and unix sockets,so i just need to write the createPipeFd variant, and then look into cross-compiling
+05:08:32 <infinisil> solonarv: Being able to loop is somewhat equivalent to being able to call the original withFrozen function multiple times
+05:11:17 <solonarv> let me see if I can write down what I had in mind
+05:14:12 <Phyx-> clever: myeah.. that does seem like it's gonna be tricky. but try and see.. I'm not sure but I think named pipes on Windows only allow multiple instances with OVERLAPPED operations
+05:17:10 <clever> Phyx-: from a previous look at the nodejs source, it supports http over both unix sockets and named pipes, which would imply that it can have multiple clients
+05:17:19 <solonarv> bah, I have to go again!
+05:17:28 <infinisil> solonarv: Alternatively, I could write a mutable array effect, and use that to read/write arrays
+05:17:30 <solonarv> infinisil: expect another stab at it in a few hours I guess
+05:17:37 <infinisil> solonarv: Hehe alright
+05:17:43 <Phyx-> clever: nodejs uses accept on Windows?
+05:18:50 <Phyx-> I thought nodejs uses libuv, which should be using IOCP on Windows
+05:19:15 <clever> Phyx-: i traced the it down the entire callstack into libuv source
+05:19:30 <clever> Phyx-: let me re-find those notes...
+05:20:08 <clever> Phyx-: https://nodejs.org/api/http.html#http_http_request_url_options_callback when doing a request, you can set a socketPath instead of a hostname, and it will connect to the given socket
+05:21:09 <kuribas> :t (+-1)
+05:21:11 <lambdabot> error:
+05:21:11 <lambdabot>     • Variable not in scope: (+-) :: t -> Integer -> t1
+05:21:11 <lambdabot>     • Perhaps you meant one of these:
+05:21:13 <kuribas> :t (+ -1)
+05:21:15 <lambdabot> error:
+05:21:15 <lambdabot>     The operator ‘+’ [infixl 6] of a section
+05:21:15 <lambdabot>         must have lower precedence than that of the operand,
+05:21:40 <clever> Phyx-: and then deep in the implementation of http.request, https://github.com/nodejs/node/blob/574985cec8d96ee33be957f247941ad2c9e522bf/lib/_http_agent.js#L204-L234
+05:21:52 <clever> Phyx-: it renames it from socketPath to just path, and hands it off to createConnection
+05:22:01 <geekosaur> need an extension to avoid the extra parens around the -1
+05:22:04 <clever> Phyx-: which came from the net module
+05:22:31 <clever> Phyx-: so behind the scenes, http is calling this to connect to the unix sockets: https://nodejs.org/api/net.html#net_net_createconnection
+05:23:03 <clever> https://nodejs.org/api/net.html#net_socket_connect_options_connectlistener
+05:23:21 <clever> Phyx-: `The net module supports IPC with named pipes on Windows, and UNIX domain sockets on other operating systems`
+05:23:28 <clever> `On Windows, the local domain is implemented using a named pipe. The path must refer to an entry in \\?\pipe\ or \\.\pipe\.`
+05:23:53 <clever> Phyx-: so, you just make an http connection, and set socketPath = "\\?\pipe\path\to\pipe"; i believe...
+05:24:04 <Phyx-> yes. but I don't see any calls there to the posix accept function
+05:24:21 <clever> now to dive into the implementation of net.connect!
+05:24:23 <Phyx-> both https://github.com/libuv/libuv/blob/v1.x/src/win/pipe.c and https://github.com/libuv/libuv/blob/v1.x/src/win/winsock.c use overlapped structures
+05:25:43 <clever> https://github.com/nodejs/node/blob/574985cec8d96ee33be957f247941ad2c9e522bf/lib/net.js#L869-L874
+05:26:00 <clever> https://github.com/nodejs/node/blob/574985cec8d96ee33be957f247941ad2c9e522bf/lib/net.js#L53-L57
+05:26:11 <clever> Phyx-: so it will be refering to the Pipe object from the nodejs ffi
+05:27:59 <clever> https://github.com/nodejs/node/blob/574985cec8d96ee33be957f247941ad2c9e522bf/src/pipe_wrap.cc#L51
+05:28:02 <clever> Phyx-: and the c++ backing that Pipe type
+05:28:44 <clever> Phyx-: and yeah, it now goes into uv_pipe_connect where you where
+05:29:14 <clever> https://github.com/libuv/libuv/blob/v1.x/src/win/pipe.c#L629
+05:29:22 <clever>   pipeHandle = open_named_pipe(handle->name, &duplex_flags);
+05:29:52 <Phyx-> yes and open_named_pipe is https://github.com/libuv/libuv/blob/v1.x/src/win/pipe.c#L135
+05:30:04 <Phyx-> which opens the handle with FILE_FLAG_OVERLAPPED
+05:30:12 <Phyx-> so it's using completion ports
+05:30:35 * clever reads https://docs.microsoft.com/en-us/windows/desktop/api/fileapi/nf-fileapi-createfilea
+05:32:47 <clever> Phyx-: and i'm assuming libuv/nodejs can also create a compatible server, so i'm checking that codepath now...
+05:33:59 <clever> https://github.com/nodejs/node/blob/574985cec8d96ee33be957f247941ad2c9e522bf/lib/net.js#L1143-L1151
+05:36:06 <ozgura> hi, wondering if there are any stack gurus around? I started getting a new error recently (base-4.9.1.0 from stack configuration does not match (>=2 && <6) && <0) and I cannot understand why...
+05:36:15 <Phyx-> I'm not really sure what that line is telling me, it just looks like some additional book keeping 
+05:36:17 <ozgura> notice the "<0" bit which is suspect
+05:36:42 <Phyx-> clever: ultimately, you can emulate it using multiple threads or fibers and then use accept, but each call is blocking then https://docs.microsoft.com/en-us/windows/desktop/ipc/named-pipe-instances, this doesn't scale very well but would work.
+05:37:38 <geekosaur> ozgura, I'd suspect it's saying something does not work with your selected resolver's ghc version (which determines the base package version), so it's inserting a nonsense version dependency to prevent it
+05:37:59 <clever> Phyx-: i think that document just assumes you dont understand event driven IO and are stuck in the dark ages of blocking IO, lol
+05:38:25 <ozgura> geekosaur: sounds plausible - though the same stack.yaml file worked a few days ago
+05:38:55 <geekosaur> did you upgrade stack recently? a new version just came out and it changed how package versions work iirc
+05:39:32 <ozgura> ohhhh that may be it. this is on CI and it just downloads the latest stack
+05:39:45 <ozgura> any pointers to the change?
+05:40:26 <ozgura> there is a changelog here that I am reading https://github.com/commercialhaskell/stack/releases
+05:45:23 <Phyx-> clever: but that is the thing, Windows does not have an event driven I/O interface. Windows doesn't have epoll, or kqueue etc. Windows's Asynchronous non-blocking I/O system is Completion Port based
+05:45:47 <Phyx-> and it's a completely different model than epoll, which is why nodejs has this abstraction on top of it
+05:46:15 <Phyx-> "accept" on Windows is just a thin attempt at providing a posix compliant accept implementation based on blocking I/O.
+05:46:17 <clever> https://github.com/libuv/libuv/blob/v1.x/src/win/pipe.c#L826-L836
+05:46:21 <clever> Phyx-: this is interesting code...
+05:46:30 <clever> Phyx-: i think its making a new named pipe, every time it accepts a client?
+05:47:19 <clever> to ensure that there is always a fresh un-connected pipe, waiting to accept another peer?
+05:47:20 <Phyx-> clever: it creates an instance of the pipe yes
+05:47:31 <clever> Phyx-: but note the name of the function its within
+05:47:46 <clever> Phyx-: that is called by uv_pipe_accept
+05:47:55 <Phyx-> yes
+05:48:14 <clever> so its less that named pipes support multiple clients
+05:48:16 <Phyx-> the API creates an instance every time a client connects and instructs the OS they're going to do asynchronous reads
+05:48:25 <clever> and more that libuv is making a new named pipe, every time it accepts 1 client
+05:48:31 <clever> yeah
+05:48:32 <Phyx-> it only works *because* they're doing asynchronous reads
+05:48:59 <clever> so, i cant just create a dumb Socket and throw it at `runSettingsSocket :: Settings -> Socket -> Application -> IO ()`
+05:49:11 <clever> i have to re-implement that mess, and then pass client sockets into warp somewhere...
+05:49:50 <Phyx-> yes, at least until https://gitlab.haskell.org/ghc/ghc/merge_requests/1224 is finished
+05:51:35 <clever> Phyx-: dont clearly see how that would help
+05:52:04 <Phyx-> because then network wouldn't use accept on Windows and it would work
+05:52:10 <clever> Phyx-: ah
+05:52:19 <clever> https://github.com/yesodweb/wai/blob/1481ffb5ed9f6d288519576113601643bbcee510/warp/Network/Wai/Handler/Warp/Run.hs#L114-L133
+05:52:44 <clever> Phyx-: tearing into the warp code, i can see that it uses getConn to accept clients, and then runSettingsConnection to serve each client
+05:53:06 <clever> Phyx-: so if i redo the libuv named pipe server stuff in haskell, i can then call runSettingsConnection on each client `Connection`
+05:53:51 <Phyx-> I'd do the libuv stuff in C, it'll be easier :)
+05:53:56 <geekosaur> ozgura, the pantry change is the one I was thinking of
+05:54:07 <clever> Phyx-: probably, could even just link into libuv, lol
+05:54:18 <clever> Phyx-: or ffi into libuv!
+05:54:26 <geekosaur> pantry manages that stuff now and does so in possibly different ways
+05:54:57 <Phyx-> clever: yes, but bare in mind that that takes the event loop away from the RTS into libuv
+05:55:05 <clever> Phyx-: yeah
+05:55:20 <Phyx-> which means the RTS has no idea what's going on. It can't multiplex haskell threads when your network code blocks
+05:55:31 <clever> Phyx-: and ive already run into bugs where nodejs is using libuv to embed a libuv event loop into a libuv event loop (adding an epoll fd to an epoll fd)!
+05:55:51 <clever> Phyx-: and somewhere along the way, a race condition can cause it to not get the msg, causing it to deadlock forever
+05:56:27 <clever> Phyx-: how would the RTS multiplex things when the FFI into cbits blocks then?
+05:56:40 <clever> in both libuv or just raw createNamedPipe cases
+05:56:49 <ozgura> geekosaur: wow, I just updated my local stack too. it is *much* more chatty
+05:57:59 <Phyx-> clever: windows Async calls never block. That merge request I linked to you for instance is designed to never block on an FFI call during the execution of your haskell code. it blocks *inside* the haskell runtime waiting for a callback using something like an MVar
+05:58:10 <Phyx-> which means the RTS is free to steal the capability and move it somewhere else
+05:58:37 <clever> Phyx-: ah
+05:58:43 <Phyx-> once the I/O manager finishes the call, it releases the lock and the scheduler will reschedule the haskell thread
+05:59:31 <clever> Phyx-: semi-related, ive run into linux ffi problems before, because the RTS was sending sigalarm to the thread constantly, and the library i ffi'd into treated EINTR as a fatal error
+05:59:33 <Phyx-> this is why it's asynchronous even on the non-threaded rts
+05:59:59 <clever> Phyx-: i had to tell the RTS to mask its own signals every time i did ffi, or it would randomly break things
+06:00:18 <Phyx-> yeah, we often mask signals when making certain foreign calls
+06:01:13 <clever> Phyx-: ah, here it is, https://github.com/taktoa/hsdm/blob/master/haskell/src/System/HSDM/PAM.hs#L128-L133
+06:01:27 <clever> dang, 3 year old code now!
+06:01:45 <clever> how do i remember bugs from code i havent touched in 3 years? lol
+06:02:25 <yushyin> because you are clever
+06:02:26 <dmwit> You probably put quite a lot of emotional energy into discovering what the bug was and how to fix it. =)
+06:06:17 * geekosaur has hit that one a few times as well
+06:06:31 <geekosaur> and not just with ghc's runtime
+06:09:04 <Phyx-> clever: curious if uninterruptibleMask wouldn't have worked there too
+06:09:26 <clever> Phyx-: possibly, at the cost of ctrl+c being masked too
+06:38:55 <infinisil> solonarv: I think this is the way to go: https://gist.github.com/Infinisil/b3d82adf89b5a94c7efe1b60a78b6ae5
+06:40:54 <infinisil> Some way to have multiple arrays of the same type would be nice though..
+06:57:47 <infinisil> Works, albeit a bit cumbersome to use, with Symbol's: https://gist.github.com/Infinisil/b3d82adf89b5a94c7efe1b60a78b6ae5
+06:57:53 <infinisil> (same gist, I updated it)
+06:58:40 <infinisil> polysemy-plugin (which I'm using for this) breaks down for multiTest, which is why all the type applications are needed there
+07:12:34 <infinisil> And it's cool that with such an effect, you can implement it in terms of both arrays or vectors
+07:12:39 <infinisil> Or lists as I did here
+07:12:52 <infinisil> Or probably any MonoTraversable too
+07:15:38 <infinisil> And it works over both mutable and immutable versions of arrays and vectors which is neat too
+07:24:53 <Athas> Does anyone have a nice example of a Haskell project that uses Azure Pipelines to upload releases to GitHub?
+07:27:54 <_d0t> hi! Which library should I use for accessing mongodb?
+07:28:02 <_d0t> persistent-mongodb seems abandoned.
+07:28:37 <_d0t> mongoDB seems ok, but too low level.
+07:28:54 <dminuoso> _d0t: Is not using mongo an option?
+07:29:18 <_d0t> dminuoso: probably, but then I'd need alternatives.
+07:29:23 <dminuoso> _d0t: sqlite?
+07:29:30 <_d0t> no
+07:29:57 <_d0t> sqlite doesn't make it in this case for a great number of reasons
+07:34:42 <dminuoso> _d0t: What do you need?
+07:35:41 <_d0t> from a library? Or from a database?
+07:35:48 <dminuoso> _d0t: Yes.
+07:36:02 <_d0t> typical!
+07:36:18 <_d0t> Aeson support and some kind of DSL would be nice.
+07:36:35 <dminuoso> _d0t: Aeson support I consider bad for a variety of reasons.
+07:36:49 <_d0t> Regarding database, I need it to be scalable, possibly with clustering support.
+07:37:00 <dminuoso> It's better design to decouple data into database representation, internal representation and external representation.
+07:37:08 <dminuoso> _d0t: What does "clustering" mean to you exactly?
+07:37:28 <dminuoso> In the world of databases its a handwaving term that means different things for different people.
+07:37:35 <_d0t> Serving a database across multiple shards.
+07:38:02 <dminuoso> _d0t: In what sense? Do you want multi-master replication?
+07:38:02 <dminuoso> Hot standby?
+07:38:11 <dminuoso> Streaming replicatoin?
+07:38:18 <dminuoso> What kind of "multiple databases" do you want?
+07:38:20 <_d0t> Multi-master isn't a requirement, hot standby would be nice.
+07:38:37 <dminuoso> _d0t: Anything wrong with PostgreSQL?
+07:38:48 <_d0t> Ability to read data from any node, while using one for writing is what I'm looking for.
+07:39:16 <ziman> you might want to put an sql proxy in front of your db in such cases
+07:39:26 <_d0t> Nothing wrong with PostgreSQL in general, but my case doesn't seem to work nicely with strictly set schemas.
+07:39:30 <ziman> helps with switchovers, too
+07:39:44 <dminuoso> MongoDB is basically the Python of databases. It's what happens when you toss away decades of well principled and well founded database ideas into an unstructured mess to "speed up prototyping"
+07:39:55 <dminuoso> And call it revolutionary.
+07:40:12 <alx741> ^ that
+07:40:15 <_d0t> Yup, I've heard that.
+07:41:52 <dminuoso> _d0t: At any rate. PostgreSQL is probably a fine pick if you want streaming replication + hot standby. You get a large set of very stable libraries to interact with the database
+07:42:11 <_d0t> I know that. I have some experience with pgsql.
+07:42:22 <_d0t> I also know that SQL isn't what I need in this case.
+07:42:38 <dminuoso> _d0t: PostgreSQL can do documents as well if you insist.
+07:42:52 <_d0t> Sure, but then why bother with pgsql at all?
+07:43:16 <dminuoso> Because it's a highly mature, fast and stable product with a track of decades of quality software?
+07:43:20 <dminuoso> With widespread support?
+07:43:43 <alx741> couchdb seems less terrible: https://hackage.haskell.org/package/CouchDB-1.2.2/docs/Database-CouchDB.html (?)
+07:44:31 <_d0t> alx741: thank you
+07:44:55 <dminuoso> _d0t: It seems to be that you try to avoid using PostgreSQL for unnamed reasons. Until I understand those reasons I cant help you.
+07:46:02 <_d0t> i'm not sure i want you to persuade me to use pgsql here :)
+07:47:01 <dminuoso> _d0t: You do know hstore is a thing right? :)
+07:47:30 <dminuoso> _d0t: Or JSON inside pg?
+07:47:35 <_d0t> Yeah.
+07:47:58 <_d0t> It doesn't replace tables though.
+07:48:38 <dminuoso> _d0t: I personally believe that the notion of "schemas are not worth the troubles" come from the same mindset that tells people "types are not worth the troubles"
+07:48:54 <dminuoso> In the end they think just as much about schema/types, but suddenly no longer have the toolset to actually tell them if they screw up.
+07:49:08 <_d0t> dminuoso: I didn't say "schemas aren't worth the trouble".
+07:49:26 <dminuoso> _d0t: well I was assmuing that to be driving mindset behind mongo
+07:50:07 <_d0t> dminuoso: it could be, but it's not what I have in mind.
+07:50:20 <dminuoso> _d0t: What do you have in mind?
+07:50:55 <_d0t> At the moment I have a huge pile of JSON data that I need to work with and to make sense of.
+07:51:01 <_d0t> MongoDB seems pretty ideal in this case to me.
+07:51:39 <_d0t> The data has some structure, but not strict enough to put it into relational tables unless I want to look at blobs or text.
+07:52:34 <dminuoso> _d0t: well you can have partially unstructured schemas if you have some JSON columns in which you'd store the unstructured portions.
+07:52:45 <dminuoso> Sounds to me like storing JSON data inside a JSON column isn't wrong..
+07:52:58 <_d0t> dminuoso: again, too much hassle
+07:53:05 * dminuoso shrugs
+07:53:12 <barrucadu> At work we have a large postgres table called "mongodb" with two columns called "collection" and "document", the latter of which is JSONB.  Apparently it works well
+07:53:39 <_d0t> barrucadu: I'm gonna save this as a quote if you don't mind :)
+07:54:08 <barrucadu> Sure
+07:54:10 <dminuoso> _d0t: So here's a real story.
+07:54:40 <dminuoso> _d0t: A few weeks ago I upgraded my entire network. I bought into an SDN solution that requires use of a single controller on my network. It's a quality vendor, at least so I was told.
+07:55:00 <dminuoso> When I rebooted the pi running my controller the entire configuration had disappeared.
+07:55:21 <dminuoso> Turns out the mongodb running behind it had no consistenty/duration properties to speak of.
+07:55:45 <dminuoso> A day later I restarted the pi again, this time the mongodb was corrupted, I had to delete and recreate it.
+07:56:15 <dminuoso> Then doing some research I learned that the 32 bit build of mongo only supports up to 2GiB of data. It's a bit silly if you think about it.
+07:56:35 <dminuoso> Not for "why are you using 32 bit", but for "speaks a lot about the developers"
+07:56:58 <dminuoso> (Which means every few months I have to delete data in order to avoid crashing the SDN controller, just to avoid mongo corruption)
+07:57:03 <alx741> monumentally silly
+07:57:52 <_d0t> That explains your eagerness.
+07:58:09 <__monty__> dminuoso: Data deletion to avoid data loss?
+07:58:18 <dminuoso> __monty__: Amusing, isnt it? :)
+07:59:01 <dminuoso> _d0t: Doing further research I found out that mongodb was principled on "getting things done". Writing scalable and stable portion was not part of the design.
+07:59:23 <dminuoso> They've had ACID properties only for a year or so.
+08:01:24 <asymptotically> mongodb: snapchat for databases
+08:21:25 <davean> dminuoso: Stability is core to getting anything done for me :-p
+09:11:30 <solonarv> infinisil: here is what I wanted to type up: 
+09:11:40 <solonarv> https://gist.github.com/Solonarv/8f3b0b8bafd86811c90ab0373ccbd205
+09:12:19 <solonarv> used unicode symbols for Member/NotMember/All to make things more readable
+09:13:00 <infinisil> solonarv: You're clearly using a different effect library hehe, because polysemy doesn't support NotMember
+09:13:05 <infinisil> As far as I can see at least
+09:14:34 <infinisil> But yeah I'd say this is a solution in whatever effects library that supports NotMember (and there's some way to express All)
+09:15:58 <solonarv-w> infinisil: whoops, bouncer died
+09:16:21 <solonarv-w> NotMember doesn't have actual evidence in it
+09:16:35 <solonarv-w> so you can just trivially write it yourself, I'll add it to the gist
+09:18:44 <solonarv-w> updated: https://gist.github.com/Solonarv/8f3b0b8bafd86811c90ab0373ccbd205
+09:19:27 <solonarv-w> ∉ doesn't  actually do anything - it doesn't interact with polysemy's machinery at all, it just exists to say "nope that's not allowed"
+09:19:31 <solonarv-w> easy to bolt on
+09:20:01 <infinisil> I see
+09:21:04 <infinisil> Hmm but, this is like a black-list now, preventing Lift IO
+09:21:08 <solonarv> yup
+09:21:26 <infinisil> But the user of this function could just define Lift' IO and use that
+09:21:44 <solonarv> yes, they could
+09:22:12 <solonarv> frankly I don't see that as a problem - if they want to shoot themselves in the foot that bad they can just call unsafeFreeze directly!
+09:23:02 <infinisil> Well the point of withFrozen was to provide a safe interface to an unsafe function, but yeah
+09:24:01 <infinisil> If I have to mention to the user "don't mutate the array inside", then I'd rather just write that in the docs than to complicate the types just catch a tiny amount of unsafety
+09:24:31 <infinisil> Oh and also, preventing IO in the function will also prevent all other IO related things
+09:24:52 <solonarv> that is true
+09:25:25 <infinisil> solonarv: Have you seen the gist with the Indexed effect I made earlier?
+09:25:33 <solonarv> yep
+09:25:46 <solonarv> obviously does more than my one-function approach :P
+09:25:50 <infinisil> Yeah :P
+09:26:17 <infinisil> I won't go with that Indexed effect for now, but it's a very nice abstraction that might be worth adding to polysemy(-zoo) at some point
+09:26:25 <solonarv> could be!
+09:26:35 <infinisil> Not sure about the Symbol part though
+09:26:56 <solonarv> since that's just a tag anyway it could be polykinded even
+09:27:14 <infinisil> polykinded?
+09:27:43 <solonarv> sure: instead of specifying (l :: Symbol) in the definition, just write (l :: k)
+09:28:24 <infinisil> And what can I do then?
+09:28:44 <infinisil> Ah, no dependency on Symbol I guess?
+09:28:52 <infinisil> Because any kind works?
+09:28:53 <solonarv> you can index it with things like Maybe, or Int, or 'True/'False...
+09:28:55 <solonarv> yup
+09:29:04 <richardcq> hi guys, pardon the crappy code, but I'm trying to figure out why this instance of partial application doesn't work, and I don't really understand the error --  https://gist.github.com/richardcq/cc45d026596148e0f5d4901672ab3ac3
+09:29:20 <solonarv> so you could define: data TheArraysIWantToUse = Foo | Bar | Baz
+09:29:22 <infinisil> solonarv: Got it
+09:29:26 <infinisil> Ah neat
+09:29:30 <solonarv> and then the indexes can be 'Foo, 'Bar, 'Baz
+09:29:42 <infinisil> Yeah that looks pretty good
+09:30:17 <infinisil> solonarv: I kinda wish these effect libraries would use labels for all effects
+09:30:40 <infinisil> So you always have to name them like variables
+09:31:55 <infinisil> Then problems from effects with the same type shouldn't happen
+09:32:14 <infinisil> Or at least not as much
+09:33:15 <c_wraith> richardcq, the problem is the precedence of <$>
+09:33:48 <c_wraith> richardcq, operators always have lower precedence than function application.
+09:33:59 <richardcq> ah, that makes sense
+09:34:50 <richardcq> c_wraith: so I would have to rewrite it as fmap (== ...) (fmap (tag ...)) ?
+09:35:39 <c_wraith> richardcq, you could use the non-operator version...\x -> fmap (...) (... x) becomes fmap (...) . (...) 
+09:35:53 <ski> function application is a left-associative infix operator with precedence `10'
+09:36:55 <richardcq> oh, I see
+09:37:12 <richardcq> okay, that actually makes a lot of sense now
+09:37:19 <ski> also, `fmap f . fmap g = fmap (f . g)'
+09:45:05 <richardcq> is there a typeclass or way of representing a box of something traversable? I want to tag e.g. [b] with some a as in (a, [b]), but the way I'm doing it now I get something like (a, [b]) -> (a,b) when I really only care about the a and b in separate contexts
+09:50:07 <jle`> richardcq: it's not clear what you mean here i think
+09:50:14 <jle`> what is the way you are doing it now?
+09:50:31 <jle`> (a,[b]) is a perfectly reasonable way of tagging [b] with some a
+09:51:01 <jle`> what are you doing to get (a,[b]) -> (a,b)? `second head` ?
+09:52:56 <richardcq> that ResourceContainerM in the gist I pasted is an bounded by NodeM m, which has a `nodeSelf :: m NodeT` function
+09:53:18 <int-e> jle`: heh my auto-correction read that as (a,[b]) -> [(a,b)]
+09:54:23 <jle`> richardcq: sorry, i'm not sure what you mean. what do NodeM and nodeSelf have to do with (a,[b]) -> (a,b) ?
+09:55:50 <richardcq> sorry, I'm not quite sure how to word it
+09:56:08 <richardcq> (a, [b]) is a simplification of ResourceContainerM
+09:56:49 <richardcq> where a is a NodeT (instance of NodeM), and b is an instance of Resource
+09:58:06 <richardcq> nodeSelf (a,[b]) should = a in this case, but if I want Traversable on ResourceContainerM the only way I could figure out how to do it is a traversal from (a,[b]) -> (a,b)
+09:58:19 <richardcq> so I think traversable is not what I want
+09:58:34 <jle`> what is a traversal from (a,[b]) to (a,b) ?
+09:59:35 <richardcq> sorry, I deleted my test code so I don't have an example of an issue of what problem I was happening, but I think I can maybe simplify it
+10:00:34 <jle`> i'm just wondering what you mean by "a traversal from (a,[b]) to (a,b)". do you mean "a function (a,[b]) -> (a,b) that could be interpreted as a traversal"?
+10:00:56 <richardcq> sorry, something like fmap over the ResourceContainerM
+10:02:02 <jle`> what do you mean by 'fmap over the resourceContainerM'?  lifting a function ([b] -> [c]) to be (a,[b]) -> (a,[c]) ?
+10:02:19 <richardcq> more like (a, [b]) -> [c]
+10:02:38 <jle`> lifting a function ([b] -> [c]) to be (a,[b]) -> (a,[c]) ?
+10:02:41 <jle`> er sorry
+10:02:44 <jle`> lifting a function ([b] -> [c]) to be (a,[b]) -> [c] ?
+10:02:48 <richardcq> yes, correct
+10:02:53 <jle`> so something like `f . snd` ?
+10:03:16 <richardcq> yeah, actually I guess that would work
+10:03:40 <jle`> are you maybe looking for a "generic snd" that would work as a 'snd' for many different types of containers?
+10:04:20 <richardcq> my issue is that I'm modelling (a, [b]) as an example instance of ResourceContainerM, so I kind of want to 'lift' the fmap into the inner container, while still being able to access the tag (a in `(a,[b])`)
+10:04:43 <jle`> lifting a function while still having access to the a...sounds like just writing a function, heh
+10:05:11 <jle`> you're saying that you want to write a function on (a,[b]), while having access to both 'a' and '[b]'
+10:06:04 <jle`> that sounds like you just want to write a normal unlifted function?
+10:06:21 <richardcq> I'm using (a,[b]) as an example instance of ResourceContainerM, and this problem is basically because I first tried applying the Traversable m constraint
+10:07:11 <jle`> is there any way to "get" the fst item?
+10:08:00 <richardcq> ResourceContainerM has the NodeM constraint, so the fst equivalent would be `nodeSelf :: m NodeT`
+10:08:23 <richardcq> i.e. literally nodeSelf = fst on (a, [b])
+10:08:29 <jle`> and does it have a snd ?
+10:09:09 <richardcq> not explicitly, I've been treating the snd part via fmap
+10:10:32 <richardcq> the obvious solution is something like (Traversable t, Resource b) => m a -> t b I think?
+10:10:42 <jle`> what is your instance of ResourceContainerM ?
+10:10:47 <jle`> (a,[b]) is not a valid instance
+10:10:53 <jle`> it has the wrong kind
+10:11:34 <richardcq> https://gist.github.com/richardcq/43936a0d22b469b5626cdf1e99cc6418
+10:11:46 <jle`> yes, that is what i am looking at
+10:12:02 <richardcq> oh sorry
+10:12:05 <jle`> ResourceContainerM requires something of kind * -> *
+10:12:08 <jle`> but (a,[b]) has kind *
+10:12:34 <jle`> i guess what i am asking is what is the type parameter in that situation
+10:12:38 <richardcq> yeah, I ran into that when trying to create the instance, and I'm not quite sure what it means
+10:12:46 <jle`> because the choice of type parameter will determine what 'fmap' does
+10:13:00 <jle`> because without that, it is unclear what you mean by 'fmap'
+10:13:25 <jle`> richardcq: so Monad, Traversable, Foldable, Functor, etc. are 'indexed' or 'parameterized' types
+10:13:32 <jle`> for example, `Maybe` is a Functor
+10:13:38 <jle`> because if you look at the type of fmap:
+10:13:46 <jle`> fmap :: Functor f => (a -> b) -> f a -> f b
+10:13:56 <jle`> you can plug in Maybe for f, and get:
+10:14:04 <jle`> fmap :: (a -> b) -> Maybe a -> Maybe b
+10:14:17 <jle`> so it has to "take in" a type, and "return" a type
+10:14:29 <jle`> Maybe takes a type like Int, and returns `Maybe Int`, a new *-kinded type
+10:15:04 <jle`> if you look at the definition of Maybe, the role of that final type parameter plays an important part in how fmap works
+10:15:07 <jle`> data Maybe a = Nothing | Just a
+10:15:13 <richardcq> and *-kinded is the equivalent to a value at the type level, correct?
+10:15:39 <jle`> well, Maybe is itself a 'value' at the type level
+10:15:49 <jle`> but Maybe Int is special in that you can have values of type Maybe Int
+10:16:02 <jle`> but you can't have values of type Maybe
+10:16:58 <richardcq> well, would that not make Maybe of kind * -> *?
+10:17:07 <jle`> yes, Maybe has kind * -> *
+10:17:17 <richardcq> okay, I'm glad I understand that much then
+10:17:19 <jle`> its kind suggests that it is a 'type-level function'
+10:17:23 <jle`> but remember that functions are also values
+10:17:28 <jle`> so 'type-level functions' are also 'type-level values'
+10:17:37 <jle`> just like how term-level functions are also term-level values
+10:17:45 <richardcq> so, is the equivilent to data on the type level a constraint?
+10:18:07 <jle`> data as in, the 'data' keyword to define a new data type?
+10:18:24 <richardcq> data as in, for e.g., 42 :: Int
+10:18:28 <richardcq> bad wording, sorry
+10:18:33 <jle`> as in, a non-function value?
+10:18:37 <richardcq> yes
+10:19:28 <jle`> in standard haskell we can talk about a few non-arrow kinds, like *
+10:19:41 <jle`> so we have `Int :: *`, `Maybe Int :: *`, etc.
+10:20:42 <jle`> in this situation it becomes relevant because all Functors take a *type parameter input*, and what it 'does' with that input determines what 'fmap' must do
+10:20:43 <richardcq> oh, right, that makes sense
+10:20:50 <jle`> for example, you can consider the data type:
+10:21:04 <jle`> data Foo a = (X, [a])
+10:21:17 <jle`> in that case we have roughly fmap :: (a -> b) -> (X,[a]) -> (X,[b])
+10:21:24 <jle`> but, we can also have type:
+10:21:28 <jle`> data Bar a = (X, a)
+10:21:41 <jle`> in which case we have fmap :: ([a] -> [b]) -> (X,[a]) -> (X,[b])
+10:21:57 <jle`> er, those data declarations should also have data constructors, sorry
+10:22:16 <richardcq> no problem, I'm following
+10:22:27 <jle`> so i'm saying, does fmap lift ([a] -> [b]) to (X,[a]) -> (X,[b]) ?
+10:22:34 <jle`> or does it lift (a -> b) to (X,[a]) -> (X,[b]) ?
+10:23:18 <richardcq> well, they're both type (x  -> y), so I guess neither?
+10:23:43 <jle`> ah, i mean to ask about your situation
+10:23:46 <jle`> with ResourceContainerM
+10:23:52 <richardcq> oh
+10:24:09 <richardcq> okay, that makes the question a lot less philosophical then
+10:24:22 <jle`> would an 'instance' of ResourceContainerM be data Foo a = Foo (NodeT, [a]) ? or data Bar a = Bar (NodeT, a)
+10:24:40 <richardcq> the Foo one
+10:26:43 <jle`> then it sounds like you can indeed traverse over it, while also using nodeSelf in the process
+10:26:57 <higherorder> Hi! I've a question: is it possible to constrain the return type of a type family? e.g. `Typeable`
+10:27:09 <higherorder> the return value, I should say
+10:27:44 <jle`> traverseUsingNodeSelf :: (Applicative f, ResourceContainerM m) => (NodeT -> a -> f b) -> m a -> f (m b)
+10:28:13 <dmj`> higherorder: yes
+10:28:38 <higherorder> dmj`: how?
+10:29:02 <jle`> oh hm, actually you might need a Monad constraint for that type signature. that's unfortunate
+10:29:32 <jle`> traverseUsingNodeSelf f x = nodeSelf >>= \y -> traverse (f y) x
+10:29:46 <richardcq> well, the only way to get the NodeT is via (NodeM m,...) => ResourceContainerM m
+10:29:53 <jle`> oh wait, i got that backwards
+10:30:12 <dmj`> something like ( Typeable (SomeTypeFamily a) ) => a -> SomeTypeFamily a
+10:30:15 <dmj`> higherorder: ^
+10:30:32 <dmj`> higherorder: you have to apply it, then constrain it
+10:30:33 <jle`> richardcq: one thing here is that NodeM/NodeT doesn't really match with 'Foo'
+10:30:52 <jle`> hm, maybe you can provide an actual instance, so we can see what we can do with it?
+10:31:07 <higherorder> dmj`: ah, but you can't specify that in the type family, right? Because this exact code is giving me  `Could not deduce (Typeable (SomeTypeFamily a))`
+10:31:34 <dmj`> higherorder: type families can produce constraints, and constraints can be combined too
+10:32:14 <richardcq> oh right
+10:32:28 <richardcq> should NodeM m actually be NodeM m a?
+10:32:41 <richardcq> because of the kind?
+10:32:41 <jle`> i'm not sure where NodeM is coming from
+10:32:57 <jle`> it also depends on what 'm' should be, because it's not quite clear
+10:33:13 <jle`> is 'm' the ResourceContainerM thing you are traversing, or is it the context in which you traverse into?
+10:34:06 <jle`> i actually do have to go now, but if you provide a concrete instance of ResourceContainerM, without traversal part written, someone here could probably help you with that part :)  the key is to have actual data types you want to work with. the journey to making those types also usually clears up a lot of questions
+10:34:22 <richardcq> yeah, I need to think about that more
+10:34:25 <richardcq> thank you though
+10:34:39 <jle`> also note that you provided a class with a single method with a default method
+10:34:43 <jle`> *default implementation
+10:34:49 <dmj`> higherorder: https://gist.github.com/e5e8aa99dacc4fda138de3d44b33f7c1
+10:34:57 <jle`> this is sorta unusual
+10:35:15 <jle`> this implies that the typeclass is useless except as an optimization over something that could already be done without the typeclass
+10:35:34 <dmj`> higherorder: works for me, how did you define SomeTypeFamily
+10:35:51 <richardcq> the default method was mostly just to test the implementation I had in mind, since I couldn't cooerce an instance out of what I had
+10:35:55 <jle`> richardcq: the usual 'point' of a typeclass is to define an interface, and the type has to implement that interface in order to be considered a typeclass
+10:36:01 <jle`> *in order to be considered an instance
+10:36:17 <jle`> but if you can already implement the interface without the instance, then the typeclass is 'useless' in that it doesn't provide any functionality
+10:36:31 <jle`> ah, i see
+10:36:42 <jle`> *doesn't provide any functionality that the type didn't already have
+10:37:07 <richardcq> right, because right now I could start with the datatype and then just write regular functions
+10:37:41 <jle`> yeah, or just write `hasResource a b = fmap (== (a,b)) . fmap (tag &&& scope)` as a standalone function
+10:41:04 <richardcq> yeah, I think what I'm going to try is something like (NodeM a, Traversable t) => ResourceContainer a t and see if I can ensorcel meaning out of that
+10:43:29 <portnov> @hoogle [a -> b] -> a -> [b]
+10:43:29 <lambdabot> Prelude map :: (a -> b) -> [a] -> [b]
+10:43:29 <lambdabot> Data.List map :: (a -> b) -> [a] -> [b]
+10:43:29 <lambdabot> GHC.List map :: (a -> b) -> [a] -> [b]
+10:45:24 <portnov> :t ap
+10:45:26 <lambdabot> Monad m => m (a -> b) -> m a -> m b
+10:46:35 <geekosaur> :t \bs a -> map ($ a) bs
+10:46:37 <lambdabot> [a -> b] -> a -> [b]
+10:49:42 <solonarv> this is sequence
+10:49:53 <solonarv> % :t sequence @[] @((->) _)
+10:49:53 <yahb> solonarv: [w -> a] -> w -> [a]
+10:50:59 <solonarv> portnov: ^
+10:51:22 <portnov> wow
+10:51:23 <portnov>  :)
+10:52:10 <dmwit> jle`: This seems like an especially good time for the pointful version. hasResource a b = fmap (\x -> (tag x, scope x) == (a,b))
+10:54:03 <portnov> list monad is always something brain-exploding
+10:54:15 <dmwit> no list monad here
+10:54:37 <dmwit> list traversable yes; function monad yes; list monad no
+10:55:15 <solonarv> although the pedant in me says: I could've written sequenceA, then you would have to talk about the function Applicative instance instead!
+10:55:24 <dmwit> yes! =D
+10:55:40 <Rembane> Does function have a monad instance? 
+10:55:46 <dmwit> yep
+10:56:25 <Rembane> Cool! 
+10:56:42 <dmwit> > return 3 True
+10:56:45 <lambdabot>  3
+10:56:46 <dmwit> > return 3 False
+10:56:48 <lambdabot>  3
+10:56:51 <solonarv> characterised by join :: (e -> e -> a) -> (e -> a)
+10:57:03 <solonarv> I think it's pretty obvious how that might work ;)
+10:57:22 <solonarv> oh: it is also known as "the Reader monad"
+10:57:30 <Rembane> Nice! 
+10:57:40 <Rembane> So, function application with a context?
+10:57:58 <dmwit> No more context than is already available from function application.
+10:58:13 <dmwit> ?src (->) return
+10:58:13 <lambdabot> return = const
+10:58:17 <dmwit> ?src (->) (>>=)
+10:58:18 <lambdabot> f >>= k = \ r -> k (f r) r
+10:59:08 <solonarv> it is useful for threading around some environment/configuration that you want to share
+10:59:20 <solonarv> oh! and for code golfing of course :P
+10:59:38 <dmwit> > ((==) >>= reverse) "amanaplanacanalpanama"
+10:59:40 <lambdabot>  error:
+10:59:40 <lambdabot>      • Couldn't match expected type ‘[Char] -> t’
+10:59:40 <lambdabot>                    with actual type ‘[b0]’
+10:59:53 <dmwit> oh, got it backwards
+11:00:02 <dmwit> > (reverse >>= (==)) "amanaplanacanalpanama"
+11:00:04 <lambdabot>  True
+11:00:27 <Rembane> Beautiful! 
+11:01:02 <solonarv> although I prefer ((==) <*> reverse), tbh
+11:01:14 * hackage primitive-addr 0.1.0.1 - Addresses to unmanaged memory  https://hackage.haskell.org/package/primitive-addr-0.1.0.1 (andrewthad)
+11:01:25 <solonarv> but: f <*> g = flip f =<< g
+11:01:42 <solonarv> (this is apparent from the types, even ;) )
+11:01:50 <Rembane> The definition of bind looks very much like function composition from left to right.
+11:02:29 <solonarv> it is a lot like function composition!
+11:02:37 <solonarv> % :t (>>=) @((->) _)
+11:02:37 <yahb> solonarv: (w -> a) -> (a -> w -> b) -> w -> b
+11:03:02 <dmwit> (>>=) is more like function application for me.
+11:03:04 <dmwit> :t (&)
+11:03:05 <lambdabot> a -> (a -> b) -> b
+13:14:36 --- topic: 'https://www.haskell.org | https://wiki.haskell.org/IRC_channel | Paste code/errors: https://gist.github.com/ | Logs: http://tunes.org/~nef/logs/haskell/?C=M;O=D | https://www.reddit.com/r/haskell | Admin: #haskell-ops | Offtopic: #haskell-offtopic | https://downloads.haskell.org'
+13:14:36 --- topic: set by glguy on [Sat Jan 05 07:21:52 2019]
+13:14:36 --- names: list (clog adino kostas cybai agander_ mac10688 nineonine rblaze jwgarber bo o1lo01ol1o ralejs Tesseraction tms_ ilmu asymptotically Miroboru fendor initiumdoeslinux bachibuzuk pera AWizzArd pavonia oo_miguel Jesin adziahel[m] TimWolla sQVe conal ClaudiusMaximus machinedgod Tops2 khisanth_ freeside alp johanna knupfer Sonderblade SCHAPiE fphilipe_ codesoup Neuromancer poljar1 hyperisco jgt1 armyriad freeman42x Vq acidjnk fizbin rvenyze Gurkenglas pfurla_ dogui)
+13:14:36 --- names: list (yyy- replay shkesar Lord_of_Life swalladge piyush-kurur Guest4937 moldybits pepegar rfold Deide xkapastel mcoffin cschne___ jao polman polmaan Unhammer carlomagno daissgr5 zachk Majiir magthe hellozee kuko MonkeyNOS__ gxt dedgrant_ nshepperd subttle d1mur4tdj[m] jackhill ystael cchalmers jathan texasmynsted sagax linarcx tomboy64 JendaHadrava[m] troydm epicallan lyxia zerotech1 JoelMcCracken ggVGc dale lastmanstanding zariuq cr3 kuttifunk odd13[m] gspia)
+13:14:36 --- names: list (Synthetica bodisiw srid63908 Lears acarrico nitrix zaquest spew lucasb jb55 dddddd kungp wonko7 mkoenig Snircle YellowOnion ThePacketBender jeltsch xff0x justanotheruser revprez_anzio revprez_ody rruizt wildlander petersen paraseba anry megaTherion ericsagnes natmac[m] darjeeling_ tombusby meck tsaka__ Saulzar themsay m1dnight_ uptime catsup gehmehgeh boblehest notzmv John_Ivan t7 tsrt^ __monty__ grumble thc202 henriksod danvet_ nolanv DrAwesomeClaws)
+13:14:36 --- names: list (libertyprime lprd_ zxrf cgfbee Foritus nfd graingert mikeplus64 hexo terrorjack__ dongcarl xstill joel135 metalrain adius tazjin datapup_ rslima__ defanor v0d1ch slomo takuan m0rphism gilbertw1 xelxebar moei day matrixyz[m] otto_s vk3wtf RampantLion[m] tessier_ tristanC drbean pi__ lagothrix Anthaas_ ne MindlessDrone niklasl Sgeo Stanley00 revprez bitemyapp sz0 @ChanServ dustinm- alx741 eof ereu Franciman s00pcan NightA hardcore_yonath[ xorander phreedom)
+13:14:36 --- names: list (lemonpie Fairy mulk cantstanya m4lvin hiptobecubic asjo kapilp PoliticsII benl23 gienah zzz solrize dbmikus monochrom goodegg[m] thunderrd dmiles riatre typedrat vjoki saml_ Akii tabaqui ixian revprez_atlanta avn Jinna sw1nn taiite DTZUZO dcoutts survove FlyingChicken[m] stux|RC Fabian jluttine Guest40074 cynick CSP-SOFTWARE mikolaj mearch urdh alyptik korzq uzuki bydo atk Cale wuxianhuiyi[m] zie kipras Blkt grt4299[m] stormchaser3000[ EuAndreh[m])
+13:14:36 --- names: list (echoreply JappleAck sppdqd[m] ddrone nurupo d34df00d gandi[m] dolio Kaivo vzdraz Cthalupa ski tumdedum kini scinawa MatrixBot3 Rudd0^ Rudd0 abhixec Ranhir tnez Arahael danso valdyn daGrevis ldlework verite erikd raid PyroLagus oats corin[m] Folkol Dabo ricekrispie devurandom atraii bsima spoonm abaitam[m] dmwit Ckat r2k[m] jophish phaul Heffalump ahihi mccoyc Nik05 xintron datajerk Natch NinjaTrappeur trebuh marble_visions jrm optmzr spinda underikar_)
+13:14:36 --- names: list (krystianbajno Xal Axman6 DTZUZU dxml[m] abbe[m] io_r_us[m] krhubert[m] el_tejon[m] etjet[m] exarkun1 pimienta[m] puranjaymohan[m] jerrytgarcia[m] l8star bertschneider_ tpsinnem restrictedchoice mrus FliiFe Ferdirand sadwqwqe[m] raatiniemi aldum DigitalKiwi michaelsdunn1 Forkk tomku sergiotarxz[m] lkurusa joehillen nek0 Enigmagic leafiest[m] chindy intergalacticgot eviltwin_b[m] bo-lero[m] tsh-- aramiscd cheater Zialus drewr m00n[m] soncodi jchia1)
+13:14:36 --- names: list (intellection3to3 albel727 thallada PierreM_ drewbarbs bspar Moyst stass crtschin mp___664 noCheese myme milli theorbtwo lpvb Ekho[m] domenkozar[m] humanwire[m] lierdakil[m] rizary stan[m] roninkaizen[m] int-index illandan[m] vladimirp1[m] Tom[10 eckt[m] pqwy[m] Adam[m]7 Daquilla[m] cbg[m] jrozanski interruptinuse sud0 hegge_ Ivysaur[m] alephu5[m] M0ddba11[m] steamedbun[m] qxjit[m] thekyriarchy RecursiveG trevortknguyen[m xaltonon[m] freu[m] opqdonut)
+13:14:36 --- names: list (lukasubo[m] lordcirth_ kuznero[m] kahnpro[m] cjwelborn sdx23 haasn miklcct leothrix mnrmnaughmnrgle giraffe dmoerner nicoulaj ion verement jdt thaumavorio rembo10 chivay Skathi klntsky pyrtsa jwynn6 powerbit travv0 gareth_____[m] sicklorkin lachenmayer iphy mnrmnaugh sdrodge dminuoso dequbed simon zfnmxt irdr phlym Frobozz wagle geronimogarcia StoneToad bandali anohigisavay loc_ tinwood elcaro andreas303 stefan-__ wrunt winny guygma[m] otulp gabiruh)
+13:14:36 --- names: list (king[m] bananagram masse[m] akhegai[m] coeus_ statusfailed vukonen[m] vsbogd mith[m] nyuszika7h bobfett andyo cpup eiGHttt sis7 nahra perrier-jouet Godel[m] koz_ shaney[m] nefple[m] wamaral[m] sigmundv- seanparsons Maxdamantus mimi_vx juri_ clever bgamari_ benwr cybj pong Seich ryzokuken lantti bradparker dukedave jackdk eightball[m] Madars luke-clifton[m] ircer[m] Artifth[m]1 Artifth[m] twk- petermw_ astompydan[m] JCGrant[m] Jaxan averell alan[m] APic)
+13:14:36 --- names: list (benzoid[m] PLPD-Bot derangednerd[m] kirillratkin[m] fryguybob tarigo[m] nikivi hc Paks M|GNUisnotLinux[ nesqi nullifidian leah2 yahb caa51h nckx GGMethos kwantam boj johnstein n3t fr33domlover dashkal madnight yrid heath andromeda-galaxy pacak yaroot2 croutons delYsid`` duncan jesusvega[m] Lowl3v3l cods mstruebing kark TommyC auri_ aurieeeh zhangkaizhao[m] Batholith sarahzrf sukbeom9 dibblego Sose ekleog corinrose[m] noan Hanma[m] esph earldouglas)
+13:14:36 --- names: list (jchia_1 mniip chin-tastic Athas habbah divVerent wrengr AMlivinfree[m] recj johnjay NextHendrix akr bod_ michaelpj_ stvc arianvp dstolfa aweinstock chaseroycroft[m] ido parenthetical ahri jtcs jzl telser- cyphase spion _ht Chousuke cemerick systemfault cheers bengt_ flux jokester vimto dude[m]3 kaiyou[m] gd2398[m] PragCypher nil aesi Firedancer_ digia stiell catern bob_twinkles mceier potato44[m]1 nickoralias quarters jkachmar nemesit|znc obfusk steell_)
+13:14:36 --- names: list (Wamanuz2 shreyasminocha im_not_afraid[m] olspookishmagus Tuplanolla noexcept PlasmaStar carter qzo legowheels[m] Uma[m] zopsi[m] olmvnec[m] joenase[m] nbardiuk dag[m] MerlinGttlinger[ teaknow[m] kai10[m] vigilian[m] nybble41[m] seeh[m] rainbyte[m] atopuzov[m] ovigren[m] MichalLaskus[m] epta GhostofaConsole[ trillpoli[m] dlilja[m] sputny[m] rcat[m] qasim[m] mujx[m] Mougan[m] shanesveller[m] foxadee[m] alibabzo lapav[m] dustyp[m] eayus[m] thejonny[m])
+13:14:36 --- names: list (roberth jochens[m] eyenx[m] bluefly[m] JakeO[m] maxdeliso[m] raoul centril3 bjobjo Zemyla henrik_ srnty_ cocreature 7ITAAHOT1 pie_ mitchellsalad amuck azahi lavalike cross InternetShill sqrt2 mudri simony JSharp Velpoman pent elvishjerricco Jonathan[m]2 Squarism kqr verlet64 sariyar fcse__ cjskaggs[m] nh2 thi peschkaj sppky tehidiot runde dmj` __4matter_ coot aveltras kip unclechu dgpratt cyjiao__ nirvin[m] drdo seiz[m] kicker22004[m] EduardoBautista)
+13:14:36 --- names: list (rodlogic feepo newhoggy_ alexelcu Geekingfrog agrif totte theophil893 lukelau psydroid kipras`away josef[m]1 contrun[m]1 hsiktas zv forell isacl___ georgew treehaqr mjrosenb reyu amiri kaol pebeto[m] xblacky[m] booghost123 masaeedu[m] dannyfrog[m] jorge-jbs[m] elgot int-e hvr xplat yorick EmilKarlson dontdieych mian Remy^ wildsebastian bitonic ProofTechnique alexknvl AfC luqui runeks caasih peel amatecha darthThorik jonrh koankeeper ibloom ullbeking)
+13:14:36 --- names: list (angerman edwardk higherorder devopsdeluxe jbetz nvt ent liff d6e Randy charliebucket[m] solonarv sm matheus dTal nuxdie asonixDogHeThey[ Klumben xacktm nyaomi dh jp SolarAquarion freusque apoc Niamkik mjuad geekosaur irclogger_com mankyKitty andjjj23 M0x8badf00d[m] yoltid[m] dysfigured godva[m] nartir[m] luciandesozay[m] sm[m] jennie[m] AkikoHimenokoji[ vsts[m] Jello_Raptor fgaz tynanbe tinwood[m] somni[m] wengrow[m] papazeus[m] alex[m]10 josiah_sama)
+13:14:36 --- names: list (silverneedle Videled[m] buster528[m] ephemeron shiroeni[m] Jon tabaqui1 luminousnine[m] periapseez[m] unrooted[m] NickHu1 popo[m] MarquisKurt[m] mujx[m6 tswett[m] mat8913[m] kylos[m] bohannes[m] laniu[m] Cenion[m] codedmart dfalk[m] adaj[m] yi[m] applecluster[m] tsahyt nshepperd_ rootmos zymurgy LeaChim dexterfoo Arguggi billstclair Rembane rj1 nano- adarqui Clint dpn` micro integral Twey lispy c_wraith mingc petercommand betawaffle seventh__ lstdgtfp)
+13:14:36 --- names: list (joeyh devalot rann sujeet gregberns sebhoss m-renaud fionnan pdxleif xalek[m] sclv Nevoic nighty Tene Anxietyhatesme[m zweimach[m] oak ByronJohnson jfredett hjozwiak godzilla[m] intelux Ekho @glguy ClownMaster[m] gmips[m] hiredman dfordivam sudden subfacto1 enragedjam Cloud[m] WeiTang[m] ShujaRafi[m] thecodedmessage soaoaig[m] avocado runningriot9[m] iarp[m] GNULizard[m] cr0gs Warder[m] vars[m] actartis[m] haiderkhan[m] reedhhw[m] hkimhvyh[m])
+13:14:36 --- names: list (Obscurity[m] kahuna[m] fregex deklund[m] hackeryarn[m] petrichor ad5twoknebor[m] mithrandi[m] pineapple[m] buggeas40d[m] cepxuo m1andrew[m] hans[m]4 limabeans[m] supersweetsweetc jhg_0[m] hjoest[m] jenkee[m] tmallard[m] cawal[m] risorg[m] aitzol[m] ciet[m] Mesa[m]1 Syllo[m] unevens[m] zocijux[m] bt[m] javjarfer[m] hsw[m] NickHu bdesham[m] atgo[m] alicedebob[m] bobach[m] capillary_cup[m] fiddeldibu[m] cosson[m] Noughtmare[m] Bimmie[m] bb010g alexshpilkin)
+13:14:36 --- names: list (tet[m] sielicki whoops sylvie[m] marijuanafermion siraben hgfedcba[m] vaibhavsagar spherinder[m] simbergm maigel[m] nkhodyunya[m] mmynsted[m] kadoban jibby[m] macerbi[m] ejpcmac sepp2k kitsune[m]1 vkleen vk3wtf[m] giuseppe[m] hdurer[m] kaychaks[m] bee[m]1 alexfmpe[m] arsdragonfly[m] aloiscochard[m] anishathalye ziman Putonlalla _ashbreeze_ tjbp sea-gull_ newhoggy wto kyagrd__ dani- ocharles Wizek milessabin monad_cat ghuntley Kamuela glowcoil J_Arcane)
+13:14:36 --- names: list (typetetris stilgart Mike2_ swater Guillaum immae phadej xpoqp cow-orker jonatan rom1504 Chobbes chirpsalot jle` a3Dman nopf dsal jsatk roflik _janne bartavelle SquidDev kubrat cppxor2arr duckonomy oleks hsyl20 teehemkay adamse mmaruseacph2 cbarrett lightandlight rotaerk celphi ajmcmiddlin gonz_ alunduil PotatoGim bs338 NemesisD jetpack_joe pasukon bollu nonzen quaestor hackage markus1189 hive-mind Sparadox Zoddo steve Mo0O energizer_ Bergle_2 AkhILman)
+13:14:36 --- names: list (Netwolf yushyin acro M2tias i7c le_jonge stylewarning parseval edmundnoble unsymbol scav johs mou cpape eikke so Ke bdw niko monokrome lemald tv suzu jdevlieghere Cathy _guios evilmonads_ infinity0_ gothos Adeon raek_ hongminhee exarkun orzo_ ayako tmciver apeyroux_ jlamothe nilOps_ tA_ Tristan- ManiacTwister diginet Shockk srk Adluc bcoppens kAworu lpsmith infinisil seliopou jrslepak obiwahn RusAlex affinespaces alextes Profpatsch yumh darxun TMA)
+13:14:36 --- names: list (lassulus RoguePointer bwe a3f bolverkr Dykam ab9rf dan64 Igloo S007 uwap arkeet AJTJ noctux lambdabot feuerbach Phyx- haveo Tourist @Sigyn mikolaj_ mupf rdivyanshu absence d0liver Tritlo iravid Taneb greymalkin runawayfive charukiewicz MasseR wayne_ CindyLinz gaze___ Peppep violeta vxe Hijiri cloudhead dredozubov linoge thoughtpolice remexre comboy_ Deadhand pdgwien noko_ c-rog diskie Tspoon__ nekomune `slikts mort michalrus gsingh93 pwestling xorpse ft)
+13:14:36 --- names: list (tdammers kav _ikke_ bind iltiades1 spamlessj Firedancer ecx86 Peter_Storm jmsx abbe Hotbees flogfr hodapp pierrot SrPx Konehalt1 heyj AndreasK ranberry__ acowley casdr mrd [exa] Philonous scal PHO connrs_ Jonno_FTW ljhms Nascha amx sphalerite DustyDingo xtsee SegFaultAX glowpelt ebutleriv zabracks fingerzam nbouscal banjiewen Jabbslad scivola Eliel locallycompact raoulb srhb gluegadget polux7 wtw alanz jix saurik_ Logio cgoldamm1r davl vodkaInf1rno)
+13:14:36 --- names: list (ammar2 edwtjo Wojciech_K blackdog rzmt aib Nikotiini earthy saidinwot bjs mtjmullen t36s gambpang dumptruckman hexagoxel rootnode_ deni Ring0` connrs- sebastianrkg ynyounuo shrifbot PtxDK beka vanyaklimenko Ulrar vqrs lortabac tstat gargawel strangeglyph Unode deu aidecoe tigerchops owlscientist greeny__ qz shapr dilinger Ornedan luite lexi-lambda platz Reisen burp Kiruwa exferenceBot moocow flebron canta beaky lurkless fiQ2 sms [df] Aleksejs coldpress)
+13:14:36 --- names: list (carbolymer ycheng mulderr nibbling_ vin-ivar exio4 h30 rkrishnan puffnfresh akermu fiddlerwoaroof sivs atomi niklasb_ dqd _flow_ Deewiant lieven debugloop tchakka kosmikus barrucadu SlashLife rodgzilla koala_man e eldritch geal luigy jorj Willis ego Liskni_si nisstyre maerwald Jacoby6000 aplainzetakind EvanR implementation_ crooked d3lxa w1gz comstar Flonk adarshaj ubercow eagleflo Xandaros wz1000 duairc HalfEatenPie fiatjaf pharaun zenzike makergrl)
+13:14:36 --- names: list (ventonegro sssilver dyl lowryder ftop Kneiva avp tureba _6a68 ambrosia asm89 anderson djanatyn xnyhps Someguy123 solarus jinblack ezyang jdanforth markhuge idupree DwarfMaster davean rinfiyks iron_houzi brisbin lugh ryjm[payon] wraithm abra0 kloeri cjay- tolt sbrg joeytwiddle ruffy_ adamCS cyberlard furnost klugez michalisko jvanbure)
+13:24:30 <__monty__> Tuplanolla: About the DCCS blog. Was that remark because they use haskell or because they don't and the bugs are silly?
+13:24:41 <Tuplanolla> The latter, __monty__.
+14:08:08 <higherorder> Is there a different between those two type signatures? https://gist.github.com/hmaurer/293f52dd738df976c00ceb9e2f00180e
+14:08:14 * hackage tsweb 0.1.0.0 - An API binding Web.Spock to Database.Beam  https://hackage.haskell.org/package/tsweb-0.1.0.0 (tsuraan)
+14:08:15 <higherorder> int-e: related to our chat in #ghc
+14:14:44 * hackage squeal-postgresql 0.5.1.0 - Squeal PostgreSQL Library  https://hackage.haskell.org/package/squeal-postgresql-0.5.1.0 (echatav)
+14:17:34 <mikail_> what is the point of strongly typing a UUID field in a class definition?
+14:18:06 <mikail_> one thing I don't like about doing it is that leads to an ugly JSON representation
+14:26:11 <Stuck_> hi
+14:32:53 <ski> hello Stuck_
+14:34:15 <__monty__> mikolaj: Does it? Can't you define a read instance that reads any hash as a UUID? And show `MyUUID somehash` as "somehash"?
+14:35:38 * ski . o O ( bad `Show' instance )
+14:36:13 <__monty__> Fine, from/toJSON.
+14:39:35 <mikolaj> __monty__: I guess mikail_ disconnected; but nice to meet you :)
+14:40:39 <__monty__> mikolaj: Woopsie : )
+14:41:47 <Stuck_> I have (test :: d a => a) then I want to infere the d so I tried to (test :: Num a => a), but it gave me an error it couldn't deduce a (d0 a1)
+14:43:02 <dmwit> higherorder: Yes, they are different.
+14:43:24 <dmwit> err
+14:43:39 <Stuck_> how can I say that I want the d to be Num
+14:45:19 <dmwit> higherorder: Hm. I'm actually not sure! In the explicit version where dictionaries are passed around they're different. But I don't know that it's possible to observe this difference from surface Haskell.
+14:45:55 <dmwit> higherorder: But the difference is this:
+14:46:39 <__monty__> Stuck_: Why can't you define `test :: Num a => a`?
+14:46:39 <higherorder> dmwit: I tried it, they are different. But I am slightly struggling to see why. In the first case, `f1 :: forall a. (Show a -> a) -> r`, `f1` accepts a function which, given an instance of `Show` for `a`, can return an a
+14:46:44 <dmwit> higherorder: `f1 :: (Show a => a) -> r` says: pick an `a` and an `r`. The implementor of `f1` will give you proof that `a` has a `Show` instance, which you may use to construct a value of type `a`. Then the implementor of `f1` will produce an `r`.
+14:47:34 <dmwit> higherorder: `f2 :: Show a => a -> r` says: pick an `a` and an `r`. The *caller* of `f1` is required to provide proof that `a` has a `Show` instance. Then the rest stays the same: caller picks an `a`, implementor of `f1` picks an `r`.
+14:47:59 <dmwit> higherorder: So the difference is about who is required to produce the `Show a` dictionary and who's allowed to use it.
+14:48:23 <dmwit> higherorder: For any concrete choice, this doesn't matter, because the `Show` instance will be known or not, and also because `Show` doesn't give you a way to produce a value anyway.
+14:48:26 <Stuck_> because I want other times to d be other than Num
+14:48:41 <dmwit> higherorder: The difference might be more obvious with `Monoid` instead of `Show`, say.
+14:49:03 <higherorder> dmwit: but with `f1`, the caller is still required to pass a function `Show a => a`, right? so for a set `a`, eg. `Int`, it would have to pass a function `Show Int => Int`
+14:49:16 * solonarv wonders idly why people always use Show for this kind of example
+14:49:20 <higherorder> how is that the implementor of `f1` proving that `a` has a `Shoa` instance?
+14:49:21 <dmwit> higherorder: Then `f1 (mempty :: Bool)` would be well-typed even though `Bool` has no `Monoid` instance.
+14:49:41 <higherorder> solonarv: haha well initiially my problem was with `Given a` but I thought using Show would be the simplest
+14:50:01 <__monty__> Stuck_: Hmm, I haven't seen variable constraints so far. What are you actually trying to do? This sounds like an XY problem.
+14:50:05 <dmwit> higherorder: That (how do you write a thing that has one of these types?) is a separate question. It probably isn't possible for `f1`. =)
+14:51:06 <dmwit> higherorder: re: "for f1 it would have to pass a function `Show Int => Int`" yes. But for `f2`, it's not the same: for `f2`, it must pass a `Show Int` dictionary and an `Int`, not a function from `Show Int` dictionaries to `Int`s.
+14:52:41 <dmwit> Stuck_: You may turn on ScopedTypeVariables, AllowAmbiguousTypes, and TypeApplications; change the type signature of `test` to `test :: forall d a. d a => a`; then write `test @Num`.
+14:52:42 <Stuck_> \m __monty_ what I'm actually trying to do it's a little complicated, so I tried a simpler problem this is it
+14:53:05 <dmwit> Oops, that got away from me. ScopedTypeVariables is not needed.
+14:53:22 <int-e> higherorder: sorry, I was busy writing this related idea: https://github.com/ekmett/reflection/issues/44
+14:53:25 <higherorder> dmwit: sorry, back-tracking a little. I tried `:t mempty :: Bool` in ghci and got `    No instance for (Monoid Bool) arising from a use of ‘mempty’
+14:53:25 <dmwit> % :set -XAllowAmbiguousTypes -XTypeApplications
+14:53:25 <yahb> dmwit: 
+14:53:37 <int-e> higherorder: but it appears that you got your answer :)
+14:53:46 <dmwit> higherorder: Correct. But `f1 (mempty :: Bool)` is a completely different situation.
+14:54:05 <dmwit> % test :: forall d a. d a => a; test = undefined
+14:54:05 <yahb> dmwit: 
+14:54:10 <dmwit> % :t test @Num
+14:54:11 <yahb> dmwit: Num a => a
+14:54:23 <higherorder> int-e: sort of; still digging down the rabbit hole 
+14:54:30 <higherorder> dmwit: why is it a different situation? 
+14:55:04 <int-e> higherorder: when you see light you'll know you've dug too far (with hardly any apologies to Knorkator)
+14:56:14 <dmwit> higherorder: Because the type signature `f1 :: (Monoid a => a) -> r` says that `f1` provides its first argument with a `Monoid a` dictionary, no matter what type you pick for `a`.
+14:56:27 <dmwit> higherorder: Now, of course it can't live up to this promise. But that's the promise made by the type.
+14:57:01 <dmwit> % f1 :: (Monoid a => a) -> r
+14:57:01 <yahb> dmwit: ; <interactive>:14:1: error:; * Variable not in scope: f1 :: (Monoid a1 => a1) -> r1; * Perhaps you meant `_1' (imported from Control.Lens)
+14:57:04 <dmwit> % f1 :: (Monoid a => a) -> r; f1 = undefined
+14:57:05 <yahb> dmwit: 
+14:57:06 <Stuck_> :o thank you very much that helped allot
+14:57:09 <dmwit> % :t f1 (mempty :: Bool)
+14:57:09 <yahb> dmwit: r
+14:57:13 <dmwit> higherorder: ^
+14:57:39 <higherorder> dmwit: uh, I see. And why did `:t (mempty :: Bool)` throw, then? or `:t mempty @Bool`? Does GHCI try to resolve the directionary?
+14:57:43 <higherorder> dictionary*
+14:57:46 <dmwit> yes
+14:57:59 <dmwit> This is called context reduction, and I have occasionally been frustrated that it's done.
+14:58:15 <dmwit> But probably more times than that, I have been happy it's done without realizing I was happy it's done. =)
+14:58:55 <dmwit> (And if you tried to actually implement `f1`, you would also be forced to resolve the dictionary.)
+14:59:18 <dmwit> (But that's separate from context reduction. Whew, this stuff is hecking complicated.)
+14:59:22 <higherorder> dmwit: haha ok, good to know, thanks! This is how I got to the qustion I asked you, by the way: https://hackage.haskell.org/package/reflection-2.1.4/docs/src/Data.Reflection.html#line-221
+14:59:44 <higherorder> which I still don't understand, but now I am a little more equipped too
+14:59:47 <higherorder> to*
+14:59:51 <dmwit> In fact, `mempty :: Bool` might not need context reduction, either. The fact that you can't write `mempty :: Monoid Bool => Bool` is because of context reduction, though.
+15:00:11 <dmwit> Yeah, reflection is deeply tied to exactly how this kind of thing works.
+15:01:45 <dmwit> (What is context reduction? It is the process of taking a constraint which doesn't just mention type variables, finding a matching instance, and replacing it with constraints that do just mention variables. For example, you will see `(Ord a, Ord b)` in inferred contexts, not `Ord (a,b)`, even if the thing you actually called `compare` on was actually a tuple.)
+15:01:57 <higherorder> the whole reflection thing boggles my mind tbh. Reifies as well
+15:02:07 <dmwit> Mine too.
+15:02:21 <dmwit> I know enough to help with this particular subproblem, though.
+15:02:59 <dmwit> ski: Now tell him about your type-level (*>)
+15:03:19 <dmwit> ;-)
+15:07:55 <higherorder> *shivers*
+15:08:13 <higherorder> dmwit: could you give me a practical example of where this `give`/`given` stuff would be useful?
+15:08:41 <dmwit> Nope. I've never needed it.
+15:08:53 <dmwit> You could look in the original Oleg writing; perhaps he tried to motivate it some.
+15:25:53 <jle`> i've never found a use for give/given, but i use reifies/reflect decently often
+15:29:35 <dmj`> I have a test suite of C FFI calls. When compiled with -threaded and '+RTS -N' no issues occur, when I do not compile with -threaded, or omit '+RTS -N' , it seems that memory appears to be getting reused, and gobbledygook can occur. How can this be? (Note: all tests always pass when run individually).
+15:30:05 <dmj`> no forkIO is used anywhere
+15:30:25 <dmj`> the c code is numerical in nature and reentrant
+15:40:35 <dmwit> Seems like step 1 is making a nice crisp, self-contained example of the problem in the usual way.
+15:40:45 <dmwit> Start deleting code until it works right, then back up one step.
+15:41:13 <dmwit> Should be possible to get it down to just a few lines each of Haskell and C.
+15:42:34 <dmwit> (Or: just how sure *are* you that you have correctly diagnosed the problem?)
+15:45:37 <dmj`> Honestly, not that confident. The failures are spurious. Maybe I can try to isolate this single call and reproduce, but isolation of the call seems to keep it from occuring, it seems to happen when multiple calls occur
+15:46:34 <dmj`> the code is very similar to hmatrix, but hmatrix has no test suite, so I couldn't see if they suffer from this same issue
+15:48:54 <dmj`> dmwit: ok I think I got something
+15:48:58 <dmj`> dmwit: main = forever (print =<< getVersion) 
+15:49:30 <dmj`> where getVersion just looks like this
+15:49:31 <dmj`> https://gist.github.com/dmjio/3c29d0fae5e27f1e22a13535f8b96906
+15:50:54 <dmj`> dmwit: when called in rapid succession, causes this kind of output to occur
+15:50:57 <dmj`> https://gist.github.com/dmjio/3c29d0fae5e27f1e22a13535f8b96906#file-output-txt
+15:51:07 <dmj`> it's all going fine, but then car crash
+15:51:46 <ClaudiusMaximus> i'm guessing int/CInt vs HsInt/Int size mismatch and you were just lucky the first bunch (memory was 0)
+15:52:22 <ClaudiusMaximus> what are the least significant 32bits of the bad output?
+15:53:15 <ClaudiusMaximus> > (sizeOf (0::CInt), sizeOf (0::Int))
+15:53:17 <lambdabot>  error:
+15:53:17 <lambdabot>      Not in scope: type constructor or class ‘CInt’
+15:53:17 <lambdabot>      Perhaps you meant one of these:
+15:53:36 <ClaudiusMaximus> > (sizeOf (0::Foreign.C.CInt), sizeOf (0::Int))
+15:53:38 <lambdabot>  error:
+15:53:38 <lambdabot>      Not in scope: type constructor or class ‘Foreign.C.CInt’
+15:53:38 <lambdabot>      No module named ‘Foreign.C’ is imported.
+15:54:10 <ClaudiusMaximus> (CInt usually 4 on all systems, while Int is 4 on 32bit and 8 on 64bit in GHC)
+15:55:06 <dmj`> ClaudiusMaximus: seems you're exactly right, making it a CInt solved it, I was generated the FFI declarations with Int instead of CInt
+15:55:16 <dmj`> guess I have a lot of fromIntegraling to do
+15:56:56 <ClaudiusMaximus> what to do when the value is out of range of CInt, is something to consider
+15:58:28 <cmries> i feel like i'm stumbling trying to understand frp, and i think what i don't understand is how events are fed into a program. apologies if this is kind of naïve as i'm a bit of a dilettante. is it essentially an event loop?
+16:00:05 <cmries> take a carousel on a web page, for instance: it has a timer, and maybe a little svg circle whose border lights based on what percent time has elasped before it's automatically set to turn to the next slide
+16:00:12 <dmj`> ClaudiusMaximus: certainly
+16:00:36 <cmries> i suspect that's some behavior, Behavior T, say, but if you click "next" manually, that's an event
+16:01:26 <conal> cmries: right. if the example is just driven by time, which is continuous in frp, there are no events.
+16:01:32 <cmries> so the next slide animates in, the circle must get redrawn from 0%, the timer resets, and all that
+16:02:11 <Welkin> carousels are a crime against humanity
+16:02:19 <cmries> Welkin: :)
+16:03:04 <Welkin> *start reading the headline, halfway through it skips to the next slide* "Guess I won't read that one then"
+16:03:26 <cmries> conal: i just watched your talk at lambda jam 2015, essence and origins of FRP!
+16:04:10 <conal> cmries: :) 
+16:05:38 <higherorder> Quick question: with type applications, what's the use of Data.Proxy? 
+16:06:16 <Welkin> to channel your inner anime fan
+16:07:18 <higherorder> Welkin: Ergo Proxy? Seriously, though :D 
+16:10:16 <jle`> higherorder: compatibility mostly, but, there are some edge cases where type applications won't work where Proxy will
+16:10:18 <jle`> https://ryanglscott.github.io/2019/02/06/proxy-arguments-in-class-methods/
+16:11:21 <higherorder> jle`: thanks! I'll read that. it seemed to me that every use-case of Proxy was covered by type applications, but it seems you're saying that's not the case
+16:11:39 <jle`> higherorder: oh, actually it seems i misread the post. it seems that you can replace every use-case
+16:11:50 <jle`> the post mentions one 'cons', which is worse error messages
+16:12:42 <jle`> but also, not every use-case of proxy is covered by type applications
+16:12:51 <jle`> only use-cases where proxy is used to convey type information
+16:13:12 <jle`> other use-cases (like where you want `Const ()`, essentially --  a data type with one inhabitant) are unrelated
+16:13:14 <higherorder> jle`: what else can proxy be used for? I thought conveying type information was its sole purpose
+16:13:24 <jle`> well, it can be used as the identity of functor products
+16:13:33 <jle`> data Product f g a = Pair (f a) (g a)
+16:13:45 <jle`> Product f Proxy is isomorphic to f
+16:14:00 <jle`> so it can be used for filling in gaps or acting as a no-op temporarily
+16:14:24 <jle`> but also if you're heavily working in 'generics' type territory, it can be useful
+16:14:37 <jle`> for example, Maybe is isomorphic to Product Proxy Identity
+16:14:44 <higherorder> jle`: why use Proxy and not Unit in those cases?
+16:14:51 <jle`> what is Unit?
+16:15:08 <higherorder> some unit type? like `data Unit = Unit`; Proxy without the type variable
+16:15:13 <jle`> it has the wrong kind
+16:15:20 <jle`> we need a (* -> *)
+16:15:23 <higherorder> ha
+16:15:42 <jle`> `Either e` is equivalent to `Product (Const e) Identity`
+16:15:56 <jle`> this style of programming is used heavily in GHC.Generics
+16:16:27 <jle`> List ~ Product Proxy (Product Identity List)
+16:16:56 <jle`> er, List ~ Sum Proxy (Product Identity List)
+16:17:52 <jle`> Proxy is also the 'zero' of monad transformer composition
+16:18:14 <jle`> er wait, i'm thinking of ProxyT
+16:18:43 <jle`> but Proxy can also be used at the 'base' of a monad transformer chain to effectively 'disable' the chain, which can be useful for debugging
+16:19:14 <jle`> (that's because Proxy is a Monad)
+16:24:12 <Welkin> no no no!
+16:24:21 <Welkin> You have it backward. Monad is a Proxy!
+16:25:24 <xaltonon[m]> Does anyone know if there's a proposal to allow @-patterns in type synonyms, typeclass instances, etc? It would be incredibly handy to be able to do `instance Foo a@(x ': xs) where`.
+16:26:00 <jle`> xaltonon[m]: instance (a ~ (x ': xs)) => Foo a where
+16:26:09 <jle`> is the typical way to handle it
+16:26:23 <xaltonon[m]> I don't know how I didn't see that connection! Thanks
+16:26:24 * hpc has flashbacks to the "typing the interview" link from yesterday
+16:26:30 <Welkin> https://ergoproxy.fandom.com/wiki/Monad
+16:26:35 <jle`> it's a little more verbose admittedly, but it's nice that it doesn't require any extra syntax
+16:26:44 <xaltonon[m]> hpc: 
+16:26:48 <jle`> Welkin: ha ha
+16:26:58 <xaltonon[m]> Modern "typelevel haskell" is soooo much nicer
+16:27:21 <jle`> is this a haskell anime? it has Functional Programming ray guns
+16:27:47 <xaltonon[m]> Was -XDataKinds around when that blog post was written, anyway?
+16:27:58 <jle`> xaltonon[m]: although, there is a difference between what you wrote and what i wrote
+16:28:12 <jle`> xaltonon[m]: what i wrote will match all lists, cons or nil
+16:28:21 <jle`> and then fail afterwards on nil
+16:28:25 <jle`> what you wrote would ideally only match on cons
+16:28:35 <jle`> so actually what i gave cannot supplant what you wrote, alone
+16:28:47 <jle`> i've always thought it would be nice to have local type aliases for something like this.
+16:29:29 <xaltonon[m]> Ah that would be important. It's just that I'm writing a lot of type-level algorithms recently and it gets really tedious complete writing out all the type variables from the instance pattern for type applications in the body
+16:30:02 <jle`> i think you can 'fake' it with the proper OverlappingInstances, but i always try my best to avoid relying on Overlaps
+16:30:19 <jle`> so actually i agree that what you want is not doable in an easy way right now :)
+16:30:36 <jle`> i don't know of any current proposals to suggest it, but you can browse in the ghc proposals github
+16:31:01 <xaltonon[m]> Was just curious if anyone else was itching for something like this
+16:32:12 <jle`> i think it would be a nice QoL/ergonomic gain
+16:32:30 <jle`> however, as-patterns at the term level are arguably a bit more 'important', because they're not just used for convenience, but rather to preserve sharing
+16:33:03 <jle`> at the type level sharing isn't really something we think about (we just like to see ghc suffer), so it makes it a little less useful than term-level as-patterns
+16:33:10 <jle`> i still wouldn't mind it though :)
+16:35:14 <xaltonon[m]> Admittedly, compile times are not great with type-level algorithms
+16:35:31 * xaltonon[m] cries as GHC sorts his 100-element list of types
+16:38:08 <int-e> . o O ( Maybe 10 years from now, GHC will have a parallelized type checker to support serious type-level programming. )
+16:39:12 <hpc> brb writing a typechecker in GLSL
+17:00:23 <fernandomrtnz> Given a record that represents an http json payload with fields that may be invalid, I want to build a function that returns a list of errors depending on the validity of each of the record’s fields. In an imperative context, I’d ask “how can I loop over an object’s fields to create a list depending on the field’s values?” (If that helps to convey my meaning). What Haskell concepts should I study to be able to build
+17:01:00 <fernandomrtnz> Gist of desired inputs/outputs and types: https://gist.github.com/fernandomrtnz/dad8c564cae8bccc277e174482fd42af. 
+17:02:37 <Axman6> The validation type might be useful for that
+17:02:54 <Axman6> Validation is Either that allows you to collect all errors, not just the first
+17:04:57 <fernandomrtnz> Axman6, you mean http://hackage.haskell.org/package/validation ?
+17:05:10 <Axman6> I believe so
+17:05:21 <fernandomrtnz> Thanks, I'll look into it.
+17:07:04 <dmwit> jle`, xaltonon[m]: `instance a ~ x:xs => Foo (x:xs)` gives you the name and only matches conses.
+17:08:04 <Axman6> validateFoo,ValidateBar :: String -> Validation Error String. validatePayload :: Payload -> Validation Error Payload; validatePayload (Payload foo bar) = Payload <$> validateFoo foo <*> validateBar bar
+17:08:15 <Axman6> roughly
+17:08:34 <dmj`> ClaudiusMaximus, dmwit: had to do `Bool` -> `CBool` and `Int` -> `CInt`, was a pretty sweeping change, but now all tests pass , can't account for why tests passed moreso when +RTS -N was specified, fooled by randomness I guess ... 
+17:10:10 <dmwit> > foldMap (\x -> ["can't be blank" | null x]) ["", "foo"] -- fernandomrtnz 
+17:10:13 <lambdabot>  ["can't be blank"]
+17:10:41 <dmwit> Hm. Getting the key is fun, though.
+17:11:57 <dmwit> Could do it by writing a `Keyed` instance (from the `keys` package), I guess. But Validation is probably better in the long run anyway.
+17:12:07 <dmwit> Okay, ignore this whole exploratory sidequest.
+17:12:27 <dmwit> dmj`: Great!
+17:12:39 <dmj`> dmwit: yes, many thanks :) 
+18:10:14 * hackage tsweb 0.1.1 - An API binding Web.Spock to Database.Beam  https://hackage.haskell.org/package/tsweb-0.1.1 (tsuraan)
+18:15:17 <infinisil> solonarv: Axman6: Update, my withFreezed function isn't safe after all
+18:15:37 <infinisil> thunks from the immutable array inside can still escape outside via side effects
+18:16:14 <infinisil> E.g. an Output effect
+18:18:35 <Axman6> yeah that's something I said yesterday
+18:19:37 <infinisil> Oh sorry, must've missed that
+18:20:00 <Axman6> it was probably after you left
+18:20:06 <infinisil> I'll just go with the "Just not mutating the mutable array even if you could" route
+18:20:25 <infinisil> For now
+18:20:46 <nshepperd> you could define a new immutable io array type
+18:21:06 <nshepperd> which is just a wrapper around a mutable array, that only supports reading functions
+18:29:58 <infinisil> nshepperd: There's nothing preventing me from modifying the original mutable array though
+18:34:12 <nshepperd> i assumed the function passed to withFreezed would only have access to the 'Immutable' wrapped version
+18:34:21 <nshepperd> so it wouldn't be able to modify it
+18:35:28 <nshepperd> and the reading would be all done in IO so it wouldn't matter if you modified it afterward
+18:35:44 * hackage pandoc-pyplot 2.1.4.0 - A Pandoc filter to include figures generated from Python code blocks  https://hackage.haskell.org/package/pandoc-pyplot-2.1.4.0 (LaurentRDC)
+18:36:56 <nshepperd> though you could still modify the original array on another thread while the withFreezed is running
+18:37:14 <nshepperd> so i guess making a truly immutable copy of the array is the only way to be sure
+18:38:53 <infinisil> nshepperd: Yeah but I can't do that, because I need this a *lot* in my code
+18:53:44 <dmwit> s/freezed/frozen/ig pls
+18:55:11 <Axman6> frigerized
+18:59:16 <Axman6> infinisil: after you left I suggested using the ST rank N type trick so stop the inner computation being able to access the outer one's mutable array, something like withFrozen :: forall s a i e. MArray a i e => a i e -> (forall s'. IArray b i e => b i e -> m s' x) -> m s x, (there's some stuff missing there, haven't actually played with it.) If the mutation operations all use s, then anything inside the m s' won't be able to mutate the outer
+18:59:17 <Axman6>  mutable array... but I'm not sure if this works, and if it's possible to do with polysemy
+19:01:56 <dmj`> Do I really need CDouble and CFloat if they're the same size as Double and Float? Can't I just use the latter
+19:02:32 <dmj`> CDouble is just a newtype on Double
+19:02:44 * hackage lens-tutorial 1.0.4 - Tutorial for the lens library  https://hackage.haskell.org/package/lens-tutorial-1.0.4 (GabrielGonzalez)
+19:02:54 <The_Shiny_Diamon> Hi. Any reviews for this product in Amazon? I think buying it, but I decided to ask you first. Thanks in advance: https://bitlylink.com/m3BPK
+19:06:48 <Axman6> please don't click that
+19:18:07 <bandali> speaking from experience? :p
+19:18:39 <bandali> but yes it’s very susp, 10/10 wouldn’t click
+19:33:03 <Black_Panther_98> I will start my Live Show in 10 minutes. Check my sexy body, ass, boobs and pussy. Fastest people will join my Private Live for FREE (First 5 only that message me "Free Invite" in the Cam site)! The fun is GUARANTEED. Join now ---> https://hec.su/g1iX :)
+19:46:46 <nshepperd> :/
+19:46:57 <nshepperd> is there anything ops can do about this spam?
+19:48:12 <nshepperd> apart from banning all unregistered webchat users
+19:52:08 <cheers> sigyn stuff, maybe
+19:52:13 <dibblego> we can set mode +r but yes, all unregistered users. glguy has a script that attempts to detect them before the message itself
+19:56:51 <jake> hola :) 
+19:56:55 <jake> how we doing? 
+20:02:37 <jake_> I had a question re the data61 functional programming course if someone is free. One sec, I'll pop up a gist
+20:03:26 <jake_> I can't work out why this would fail https://gist.github.com/jakequade/ca42e13a018587cb081e401619fa32f2
+20:05:57 <dibblego> what exactly is failing?
+20:06:30 <dibblego> I think it won't compile
+20:06:59 <jake_> thats what i said, lol
+20:07:36 <dibblego> ok, "failing" means a few things :)
+20:07:43 <jake_> ah, sure, sorry
+20:07:49 <dibblego> try without the pattern guards
+20:07:56 <dibblego> find Nil = … 
+20:08:01 <dibblego> find (x :. xs) = … 
+20:10:03 <dibblego> also fyi, #qfpl is a channel specifically for this course, and other related projects
+20:10:27 <jake_> when i use `find pred (x :. xs) = if (pred x) then x else (find pred xs)` i get "Occurs check: cannot construct the infinite type: a ~ Optional a"
+20:10:39 <jake_> ah, okay, I'll try there next :) 
+20:10:48 <dibblego> if (pred x) then Full x
+20:11:09 <jake_> oh what
+20:11:11 <jake_> that worked.
+20:11:27 <jake_> ah, I didn't match the output type
+20:11:58 <dibblego> when you get type errors, fill them in with undefined, get it compiling, then change undefined to _ piece by piece
+20:12:12 <jake_> okay, thanks for the tip
+20:12:15 <dibblego> 1. undefined
+20:12:19 <dibblego> 2. if undefined then undefined else undefined
+20:12:21 <jake_> why would guards not work for this kind of thing?
+20:12:27 <dibblego> 3. if _ then undefined else undefined -- you need a Bool
+20:12:36 <dibblego> 4. if pred x then undefined else undefined -- compiles, next
+20:12:45 <dibblego> 5. if pred x then _ else undefined -- you need Optional a
+20:13:00 <dibblego> etc etc
+20:13:04 <dibblego> they would work, but I think they were confusing you a little — you can try again now
+20:14:08 <jake_> ah cool, i ended up with https://gist.github.com/jakequade/ca42e13a018587cb081e401619fa32f2
+20:14:16 <jake_> (Solution.hs)
+20:14:40 <jake_> thank you so much for your help, and the pointers. Would you say guards would be your preferred approach over if/else? 
+20:15:43 <dibblego> I prefer neither guards nor if/else :)
+20:15:52 <jake_> how would you write this? 
+20:15:58 <dibblego> @type bool -- if/then/else with the arguments around the correct way
+20:15:59 <lambdabot> a -> a -> Bool -> a
+20:16:00 <jake_> would love to learn if there's a better way
+20:16:42 <jake_> would you mind showing me what you mean, please? All good if you're busy
+20:17:04 <dibblego> where you have written (if p then t else f) I'd have written (bool f t p)
+20:17:17 <dibblego> then perhaps factored from there
+20:17:59 <nisstyre> jake_: your code looks fine to me
+20:18:08 <dibblego> if/then/else takes 3 arguments, where bool takes 1 — I prefer this a lot (and the arguments are around the correct way)
+20:18:15 <nisstyre> I usually put the type signature on one line unless it exceeds a certain number of characters
+20:20:23 <nisstyre> you could use a case expression instead of a guarded function
+20:20:27 <nisstyre> but it doesn't make much difference
+20:22:15 <jake_> yeah
+20:22:18 <jake_> okay
+20:22:31 <dibblego> I also don't care so much. I only care that they are all equivalent.
+20:22:33 <jake_> I tend to not really like if/else or case, but maybe that's just PHP ptsd
+20:22:44 <jake_> just tried out your method - it's neat
+20:22:46 <nisstyre> jake_: case is good when you need to do pattern matching on the result
+20:22:53 <jake_> ah, sure
+20:22:57 <dibblego> did the bool function update the swozzle counter? No, it didn't, because it's a function. <-- I care only about that.
+20:23:00 <nisstyre> so instead of `x == Nil`
+20:23:07 <nisstyre> you could just write `Nil`
+20:23:21 <nisstyre> but then you would have to deal with your predicate so...
+20:23:28 <nisstyre> there are tradeoffs
+20:23:31 <jake_> sure
+20:23:33 <jake_> makes sens
+20:23:35 <jake_> sense
+20:23:50 <jake_> I think:     find p (x :. xs) = bool (find p xs) (Full x) $ p
+20:23:57 <jake_> as you mentioned, is much nicer
+20:24:33 <dibblego> I think when you have such expressions as: \x -> bool (f x) (g x) (h x), it becomes much more exemplary
+20:24:45 <dibblego> liftA3 bool f g h -- I find that a lot easier to read
+20:24:46 <jake_> yeah, sure
+20:24:53 <dibblego> there are exercises later on where this comes up
+20:28:25 <nisstyre> jake_: if I'm not mistaken (haven't tested it) this should work? https://gist.github.com/weskerfoot/f9b7f13055528526ef806c19ddf2eb21
+20:28:41 <nisstyre> I'm not sure why you are using the `Full` constructor
+20:28:56 <dibblego> data Optional a = Full a | Empty
+20:29:01 <nisstyre> oh I see
+20:29:14 <nisstyre> so p expects an Optional a
+20:29:31 <nisstyre> actually no
+20:29:37 <nisstyre> that's not what your type signature says
+20:29:56 <dibblego> https://github.com/data61/fp-course/blob/master/src/Course/List.hs#L264
+20:31:01 <nisstyre> so it should really be: find (x :. xs) = bool (find p xs) (Full x) $ p x
+20:31:04 <nisstyre> right?
+20:31:34 <dibblego> yes I think so
+20:31:41 <nisstyre> yeah that's what I thought
+20:32:21 <jake_> no
+20:32:33 <jake_> your declaration does not have the predicate
+20:32:43 <nisstyre> oops yeah
+20:32:48 <jake_> (i might be missing something
+20:32:49 <nisstyre> but just add that
+20:33:00 <nisstyre>  find p (x :. xs) = bool (find p xs) (Full x) $ p x
+20:33:22 <jake_> ah, that was me failing to fully copy/paste
+20:33:23 <jake_> sorry
+20:33:42 <nisstyre> i updated the gist
+20:44:43 <dmwit> find p (x :. xs) = ensure p x <|> find p xs -- ;-)
+20:48:46 <contrun[m]1> what is the easiest way to build haskell project with stack while having many cabal packages which are not available on stackage? I mannually added haxr then stack told me to add another. Can stack show me what I need to add to extra-deps in one shot?
+20:48:56 * contrun[m]1 uploaded an image: screenshot-2019-06-19-11-47-35.png (114KB) < https://matrix.org/_matrix/media/v1/download/matrix.org/CSyVnACfaVQXtrCZZAjFpLRG >
+20:51:02 * contrun[m]1 uploaded an image: screenshot-2019-06-19-11-50-10.png (135KB) < https://matrix.org/_matrix/media/v1/download/matrix.org/CIyvwrQfEjJnxOVlaGINWkCa >
+20:54:16 <contrun[m]1> my package.yaml https://bpaste.net/show/d6a0d659e742 and stack.yaml  https://bpaste.net/show/4bbac4ae11cd
+21:03:08 <dibblego> @check \x -> bool False True x == x
+21:03:11 <lambdabot>  +++ OK, passed 100 tests.
+21:05:53 <dmwit> ?check ap (==) (bool False True)
+21:05:55 <lambdabot>  +++ OK, passed 100 tests.
+21:33:23 <dmj`> ?check \(x :: Double) -> fromIntegral (fromIntegral x :: CDouble) == x
+21:33:23 <lambdabot>  <unknown>.hs:1:16:ScopedTypeVariables language extension is not enabled. Ple...
+21:56:39 <dmwit> ?check \x -> realToFrac (realToFrac (x :: Double) :: CDouble) == x
+21:56:41 <lambdabot>  error:
+21:56:41 <lambdabot>  Not in scope: type constructor or class ‘CDouble’ Perhaps you meant ‘Double’...
+21:58:22 <dmwit> dmj`: (Anyway, local testing confirms this test passes.)
+21:58:50 <dmj`> dmwit: \o/
+21:58:50 <dmj`> not segfaulting is great
+22:59:14 * hackage tasty-lua 0.2.0.1 - Write tests in Lua, integrate into tasty.  https://hackage.haskell.org/package/tasty-lua-0.2.0.1 (tarleb)
+23:22:58 <maqbool> I have haskell version 8.6.3 and want to install haskell-ide but building with command ./install build-all build the hie with ghc version 8.2.2 getting error of incompatible version in sublime text 
+23:23:11 <maqbool> https://github.com/haskell/haskell-ide-engine
+23:23:43 <maqbool> Other options i tried like hie-8.6.3 it crash after half of the compiling 
+23:24:07 <Rembane> maqbool: Which OS are you running? 
+23:24:22 <maqbool> Fedora 29 
+23:25:23 <maqbool> Rembane, Fedora 29
+23:25:51 <Rembane> Where did you get ghc 8.2.2?
+23:26:16 <Rembane> Or rather, can you get a newer version of ghc? Preferably 8.6.3.
+23:27:22 <maqbool> Rembane, I have 8.6.3 but ./install script of haskell-ide is building with version 8.2.2
+23:27:24 <maqbool> Version 0.10.0.0, Git revision ad0d21f14a2b8f770110660942f46a1977b5f42e (dirty) (2818 commits) x86_64 ghc-8.2.2
+23:28:18 <Axman6> you almost certainly do not want to use build-all
+23:28:30 <alanz> maqbool, do "./install.hs hie-8.6.3"
+23:28:56 <maqbool> alanz, It crash after a while 
+23:28:59 <Axman6> you probably want ./install.hs hie-8.6.3
+23:29:19 <maqbool> i mean ./install.hs
+23:29:24 <paolino> hs is the new sh
+23:32:40 <maqbool> Is there flag i can pass to ./install.hs to speed up the compile like -j in make
+23:33:08 <Axman6> it should be compiling in parallel already I think. run ./install.hs on its own to get help
+23:33:39 <maqbool> there is no flag which i think about speed up
+23:34:10 <Rembane> maqbool: If you want to fall down a serious rabbit hole nix and cachix is the way to go to install hie.
+23:34:32 <maqbool> I tried to compile on good spec computer it take 1 core 100% and other core 2 to 3 %
+23:35:22 <Axman6> I'
+23:35:34 <Axman6> I'm compiling it now and it's using all my cores
+23:36:21 <maqbool> I was using digitalocean highest config machine about 32 or 32 cores
+23:38:21 <sicklorkin> Axman6: i've got hie build here if you want a release tar
+23:38:27 <sicklorkin> *built
+23:39:10 <maqbool> sicklorkin, Hey can you share for 8.6.3 :) 
+23:39:29 <Axman6> maqbool would probably appreciate it more than me :)]
+23:39:29 <dminuoso> Okay the diagnostics cabal emits do not seem to be very helpful..
+23:40:00 <dminuoso> What exactly is cabal trying to communicate here? https://gist.github.com/dminuoso/7bddbedfdb1a417611c82277b3812a87
+23:41:17 <sclv> something has the flag buildable set to false
+23:41:44 <dminuoso> sclv: I do not have that flag set in my cabal file.
+23:42:17 <sclv> ok then a dep has it.
+23:42:44 * hackage publish 2.0.1 - Publishing tools for papers, books, and presentations  https://hackage.haskell.org/package/publish-2.0.1 (AndrewCowie)
+23:42:52 <sclv> its considered bad practice to manually set it in most circumstances because it screws with cabal iirc
+23:43:14 <dminuoso> sclv: But wouldn't it be nice if cabal told me which package that was?
+23:43:24 <sclv> Usually ppl do it in an  “if impl(ghc)” clause
+23:43:36 <dminuoso> Oh and that `freyja-lib` *is* from my own cabal package by the way.
+23:43:50 <sclv> yes it would. I think it propagates in a weird way
+23:43:52 <sicklorkin> maqbool: wow, it was built 3 months ago..i'm rebuildign new tarballs now
+23:44:20 <sclv> like its treated globally
+23:45:03 <sclv> did you try cranking up verbosity
+23:45:46 <dminuoso> sclv: Indeed, just not sure what Im looking for.
+23:50:18 <sicklorkin> maqbool: have you used hie before?
+23:51:38 <maqbool> yes 
+23:51:50 <maqbool> sicklorkin, yes 
+23:51:57 <sicklorkin> what lang server client do you use?
+23:52:15 <maqbool> sublime lasp
+23:57:29 <maqbool> I tried the `./install.hs hie-8.6.3` got this error just like previous times https://paste.gnome.org/pfnszjwwr
+23:57:51 <sicklorkin> lol it doesn't build on my machine now.. apparently help requires GHC 8.6.4 and clean requires 8.6.5.. what a mess
+23:58:32 <maqbool> haha
+23:59:57 <sicklorkin> maqbool: gonna let it run in the back ground.. at the moment it has been stuck on `Cabal-2.4.1.0 build` for ~3mins

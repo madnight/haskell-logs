@@ -1,0 +1,1302 @@
+00:11:13 <pesco> Good morning, everyone!
+00:14:34 <Itkovian> good morning!
+00:16:45 <dons> tintin: you thinking of working on it?
+01:02:22 <wli> hmm
+01:02:28 <wli> I can't find System.Posix.fileRead
+01:05:12 <musasabi> you don't mean the things in System.Posix.IO ?
+01:07:39 <dons> not System.IO.readFile?
+01:08:13 <musasabi> grepping didn't produce a fileRead.
+01:08:54 <wli> dons: readFile is one of the stock things that blocks all threads.
+01:10:12 <musasabi> wli: have you tried System.Posix.IO with -threaded?
+01:10:48 <dons> oh, sorry. you're specifically looking for thready stuff
+01:11:44 <musasabi> "Dynamically linked "Hello, world" now works on x86 Linux." ^_^
+01:11:44 <wli> musasabi: yes, though I didn't do anything nontrivial that I even bothered looking at wrt. performance
+01:12:03 <musasabi> Thaller does wonders..
+01:12:35 <wli> Being aware of performance characteristics of different things is all I'm really trying to do. I don't have any specific/immediate/etc. need.
+01:14:40 <musasabi> the most important performance characteristic seems to be avoiding Strings ;)
+01:16:18 <dons> agreed
+01:16:48 <dons> Ptr CChar forever!
+01:17:35 <wli> musasabi: cpu performance isn't really a large consideration
+01:17:51 <wli> musasabi: cpu overhead is even negligible in various kinds of network servers
+01:18:39 <musasabi> wli: I know, but using Strings can make the memory requirements absurd.
+01:18:56 <wli> hmm
+01:19:19 <wli> actually resource scalability/footprints/etc. are concerns; generally things want to be "lightweight".
+01:19:49 <juhp> hmm, yeah registerized 6.2.2 x86_64 seems to segfault for me too... "grin"
+01:20:13 <musasabi> a naive implementation can e.g. use 16* size_of_file memory, and this can make things halt very quickly (think serving a 4mb file for 10 clients concurrently)
+01:21:00 <wli> That's showstopping. =(
+01:22:10 <wli> Naive implementations of other kinds use 10*(sizeof(buffers) + sizeof(client state))
+01:22:42 <wli> which is probably 64KB/client
+01:23:17 <wli> i.e. 640KB grand total footprint for 10 clients, plus global footprints (code, shared libraries, etc.)
+01:24:07 <musasabi> yes, that is why one should look at Strings and how one uses them.
+01:24:33 <musasabi> but then again serving large files is not a lot of code if you are carefull.
+01:27:44 <pesco> So when is somebody finally going to come up with a way to keep String on the outside but get Ptr CChar on the inside?!
+01:28:47 <wli> pesco: program tranformation?
+01:29:02 <pesco> wli: Possibly.
+01:29:38 <pesco> Which reminds me, has anyone gotten a look at the GRIN paper?
+01:33:19 <musasabi> pesco: I think that *is* possible currently.. But that does not help.
+01:34:36 <musasabi> pesco: think about it. we have an array somewhere. Now we traverse it with a foldl and thus generate the list in lazy fashion. Now if someone keeps holding the head of the list (e.g. CSE) then we are back to square one.
+01:37:09 <pesco> But then, isn't what you are refering to a slightly different problem?
+01:38:16 <pesco> As I understood you, you were initially worried about [Char] overhead (pointers, cons cells, 16bit unicode IDs)
+01:38:26 <musasabi> pesco: yes.
+01:38:43 <musasabi> pesco: and reading a compact array with folds creates a such list.
+01:38:57 <musasabi> and if we keep the head...
+01:41:33 <pesco> How exactly do you mean that fold creates that list? As its result?
+01:41:41 <pesco> Or in-between?
+01:42:08 <musasabi> pesco: first we have a thunk representing the list which refers to the array. 
+01:42:43 <pesco> OK.
+01:43:03 <pesco> And then you fold over that?
+01:43:04 <musasabi> pesco: evaluating the thunk will produce (<first value of array>:<thunk to create list from array index 1>)
+01:43:22 <pesco> OK. But why should the list fold be used on an array?
+01:43:46 <musasabi> and then (<1st value>:<2nd value>:...:<thunk to create list from array index N>)
+01:44:36 <musasabi> pesco: well a String is a list so it is accessed using list functions, even if we start from an array internally.
+01:45:24 <pesco> You're right. It's not enough to _start_ from an array internally. The array must be _kept_ internally.
+01:45:37 <musasabi> true.
+01:46:21 <pesco> It would be nice to have the array internally (on the inside) all the time, while operating on it with regular list functions (on the outside). That's what I meant.
+01:46:59 <wli> Most of the benefit is derived from contiguous allocation removing pointer linkage overhead.
+01:47:11 <wli> Chunked data structures like e.g. B+ trees can amortize it to a large degree.
+01:47:23 <musasabi> The problem is that operating with external list functions creates automatically lists.
+01:47:39 <pesco> musasabi: I'd think that's the problem to solve.
+01:47:43 <musasabi> of course if lists *were* defined in a diffrerent way...
+01:47:51 <musasabi> *different
+01:48:09 <wli> Which part of this do rank-ordered B+ trees fail to solve?
+01:48:45 <pesco> wli: I'm not familiar enough with B+ trees to comment right now.
+01:48:45 <musasabi> wli: not degrading performance when things are used as a list?
+01:49:30 <wli> It's not clear (to me) they would degrade performance. Chunked lists are generally advantageous.
+01:49:47 <wli> Oh, yes, the linear chunked list is possible as well.
+01:50:38 <wli> That was actually in use in Linux prior to around 2.6.7
+01:51:21 <musasabi> wli: an another problem is supporting the fact that utf32 is not the perfect representation for all things.
+01:52:04 <musasabi> but if the list implementation is optimized then that is not a problem as one can just use Word8.
+01:53:12 <araujo> morning.
+01:53:21 <musasabi> wli: this needs magic inside the compiler. (as (:) is a constructor and we want it to be something more)
+01:53:59 <wli> musasabi: if Char were a class one could simply qualify with a specific type to pick Word8
+01:54:28 <pesco> musasabi, wli: I'm off. Thanks for the discussion.
+01:57:51 <wli> musasabi: hmm, yes, being able to do something odd with constructors behind the scenes may help here
+02:00:04 <musasabi> I think it is required - but should actually be quite easy.
+02:08:12 <wli> hmm, this Haskell thread blocking stuff sounds like it could be solved with aio.
+02:08:47 <wli> and relatively nonproblematically even with the epoll/aio split
+02:08:58 <wli> nonblocking event notification etc.
+02:09:01 <musasabi> aio is quite buggy and slow on many platforms.
+02:09:16 <musasabi> Using libevent instead of select could be nice.
+02:09:34 <wli> I have Linux' kernel aio implementation in mind.
+02:09:53 <wli> -ENOSYS ---> fall back to old behavior
+04:31:04 * boegel wonders why #haskell is always this quiet during the day...
+04:32:34 <mflux_> no idea, but it might have got something to do with time zones..
+04:32:51 <araujo> everybody is programming in haskell
+04:34:27 <wli> aha, he meant fdRead
+04:34:33 <wli> System.Posix.fdRead
+04:35:21 <araujo> wli, for reading file posix'ly?
+04:35:38 <wli> araujo: s/posixly/concurrently/
+04:35:47 <araujo> :-)
+04:36:13 <jan__> 'lo
+04:37:13 * musasabi has to start programming in C now :-(
+04:37:22 <araujo> :-P
+04:37:31 <musasabi> but did manage to get a few hemplate fixes in the morning..
+04:37:53 <araujo> be happy, it could be worse*-
+04:48:12 <Itkovian> how do I write oneliners using ghc -e ?
+04:49:19 <Itkovian> I'm sick of using perl :-)
+04:51:02 <Itkovian> can I load stuff in there? or am I limited to the Prelude?
+04:57:11 <wli> $ time ghc -e "let newt f f' x tol = head . dropWhile (\x -> abs (f x) > tol) $ iterate (\x -> x - (f x)/(f' x)) x in newt (\x -> x^2-2) (\x -> 2*x) 1 1e-9"
+04:57:11 <wli> 1.4142135623746899
+04:57:11 <wli> ghc -e   1.27s user 0.11s system 84% cpu 1.630 total
+04:57:16 <wli> nice
+04:57:34 <Itkovian> eh?
+04:57:35 <Itkovian> :-)
+04:57:44 <wli> I've got uses for that. =)
+04:58:07 <Itkovian> who doesn't? :-)
+04:59:14 <wli> I can do text munging superfast now
+04:59:39 <Itkovian> I'm still learning :-(
+05:01:15 <Itkovian> how does one give it arguments?
+05:02:18 <Itkovian> alike to perl -e 'print $ARGV[0]' 1 2 3
+05:02:23 <juhp> damn, just about to go off to bed, when I notice my x86_64 rpm packages of ghc are done! ;o)
+05:02:23 <Itkovian> ouch, forgot a ;
+05:12:58 <juhp> phew, luckily the pkg is broken :-P
+05:18:07 <wli> ghc -e 'let { munch [] = [] ; munch (x:xs) = case x of { ("From":_) -> munch (dropWhile (/=[]) xs) ; _ -> x : munch xs } } in do { cs <- getContents; mapM_ (\(n, w) -> putStrLn (show n ++ "\t" ++ w)) . take 10 . List.sortBy (\(n, _) (k,_) -> k `compare` n) . map (\us -> (length us, head us)) . List.group . List.sort . concat . munch . map words . lines $ cs }' < ~/Mail/spam
+05:18:12 <wli> This had depressing results.
+05:18:49 <wli> "the, "to", "of", "a", "and", "in", "not", "you" were the top 8, the next 2 were HTMLtags.
+05:48:03 * Itkovian bows to one-line wli
+05:48:05 <wli> interesting
+05:48:14 <wli> oh, it gets better
+05:48:26 <wli> ghc -e 'let { step :: [(String, String)] -> [((String, String), Int)] ; step xs = (Data.FiniteMap.fmToList) . foldr (\x fm -> (Data.FiniteMap.addToFM_C) (+) fm x 1) (Data.FiniteMap.emptyFM) $ xs ; munch [] = [] ; munch (x:xs) = case x of { ("From":_) -> munch (dropWhile (/=[]) xs) ; _ -> x : munch xs } } in do { cs <- getContents ; let { ws :: [String] ; ws = concat . munch . map words . lines $ cs } in mapM_ (\(w, n) -> putStrLn $ (show n) ++ "\t" ++ (show w)) .
+05:48:33 <wli> feh, I got cut off
+05:48:46 <mflux_> wli, optimize teh whitespace!
+05:48:47 <wli> anyway it finds the top 10 pairs of words in ~/Mail/spam
+05:49:14 <Itkovian> looking for dirty words?
+05:49:35 <wli> nope
+05:49:46 <wli> I'm surprised actually.
+05:52:18 <juhp> hm, a trivial fix the /usr/bin/ghc* scripts and darcs builds anyway
+05:53:18 <wli> the top 3 are tied:
+05:53:19 <wli> 428     ("****","Command")
+05:53:19 <wli> 428     ("not","recognized.")
+05:53:19 <wli> 428     ("recognized.",">>>>")
+05:53:37 <wli> i.e. the majority of spam is people who are not me trying to subscribe me to mailing lists
+05:55:38 <wli> the runners up are the following gems:
+05:55:39 <wli> 337     ("<tr>","<td")
+05:55:39 <wli> 230     ("</tr>","<tr>")
+05:58:35 <wli> interesting thing about spamfiltering
+05:58:38 <wli> humans don't read the content
+05:59:06 <wli> they can look at the Subject: line and From: line and junk it based on that alone
+06:03:03 <Itkovian> most of the time, yes.
+06:06:13 <wli> well, it says something to me about content-based filtering
+06:06:36 <Itkovian> :-)
+07:14:30 <chip> Buenos.  I've been reading through introductory Haskell info and I haven't found anything about namespace separation
+07:15:03 <CosmicRay> MegaMonad: GOOD MORNING!
+07:15:04 <MegaMonad> CosmicRay: Thank fuck for that, but you don't notice until you explicitly need the separate notes in swedish is rather different from it, you should cut my losses, and quit spending the time though.
+07:15:14 <CosmicRay> chip: you mean in different modules?
+07:15:27 <CosmicRay> heh
+07:15:39 <chip> CosmicRay: Indeed
+07:16:01 <CosmicRay> chip: http://www.haskell.org/hierarchical-modules/
+07:16:08 <Lunar^> MegaMonad: You really really talk too much, you know?
+07:16:09 <MegaMonad> Lunar^: In actual fact i like how i talk.
+07:16:14 <CosmicRay> haha
+07:16:18 <Lunar^> :)
+07:16:36 <CosmicRay> chip: I think that YAHT also mentions it
+07:16:40 <chip> CosmicRay: OK
+07:16:49 <CosmicRay> chip: if you have any specific questions, feel free to ask
+07:17:09 <CosmicRay> chip: the basic constructs that you will be interested in are the import and module statement, which control importing and exporting, respectively
+07:17:48 <CosmicRay> some compilers such as ghc take this a step farther with a concept of packages
+07:18:27 <CosmicRay> once you grok the hierarchical modules (shouldn't be hard) I can try to explain the packages, though their original purpose seems to have been obsoleted by the advent of the hierarchical namespace
+07:20:26 <chip> CosmicRay: I'm big in Perl, so the concept of user-managed namespace with A.B mapping to A/B.hs is quite clear :-)
+07:20:45 <CosmicRay> chip: yup, that's about what it is.
+07:20:57 <CosmicRay> all module names must begin with a capital letter
+07:21:04 <CosmicRay> the import semantics are similar to java or python
+07:21:12 <CosmicRay> (almost identical to python, in fact)
+07:21:33 <CosmicRay> the export semantics are a little trickier in complex situations, but generally easy (you list all the symbols you want to export before the "where")
+07:21:38 <chip> One thing I'm seeing ... the only problem with that approach that I've seen in Perl, actually ... is that import names can conflict.   So sometimes it's helpful to specify fully-qualified names.  Is it generally permitted to say A.b instead of importing b from A?
+07:21:57 <musasabi> chip: you can use qualified imports
+07:21:58 <CosmicRay> you can say "import qualified" to achieve that
+07:22:04 <CosmicRay> so, for instance, I could say"
+07:22:08 <CosmicRay> import System.Time
+07:22:08 <CosmicRay> ...
+07:22:10 <CosmicRay> getClockTime
+07:22:13 <CosmicRay> or, I could say:
+07:22:17 <CosmicRay> import qualified System.Time
+07:22:17 <musasabi> import A hiding(list,of,conflicting,names)
+07:22:18 <CosmicRay> ...
+07:22:22 <CosmicRay> System.Time.getClockTime
+07:22:28 <CosmicRay> also, I can import only certain symbols
+07:22:36 <CosmicRay> import System.Time(getClockTime)
+07:22:40 <chip> OK, that's covering all the bases.  Thanks.
+07:22:40 <musasabi> import qualified A (list,of,conflicting,names) as WhatEverILike
+07:22:43 <CosmicRay> or hide certain symbols like musasabi showed you
+07:22:53 <CosmicRay> or rename symbols like musasabi showed you :-)
+07:23:18 <chip> I've been meaning to implement renaming in Perl's Exporter for a long time.  Never got enough round tuition.
+07:23:21 <musasabi> the trick is that you can both hide and rename.
+07:23:47 * chip makes a note to carefully read the "import" docs
+07:24:10 <CosmicRay> the nice thing about it is that the simple cases stay simple
+07:24:17 <musasabi> it is really easy, those are the most complex cases.
+07:24:42 <CosmicRay> the compiler also will notice when you use a symbol that you have imported from two different places, and generate an error
+07:24:54 <CosmicRay> it is not an error to import that symbol from two different places if you never reference it.
+07:25:15 <chip> That's ... more clever than I expected.
+07:25:41 <CosmicRay> :-)
+07:26:47 <CosmicRay> our haskell compilers are just as lazy as the language
+07:40:05 <ikegami--> hej, all
+07:41:38 <ikegami--> I've been caught in a dilemma between using Posix.POpen and portability on Windows
+07:44:39 <Philippa> I know where my vote goes, but you can prolly guess my OS :-)
+07:45:17 <Muad_Dibber> windows ME?
+07:45:18 <Muad_Dibber> :)
+07:46:12 <Philippa> nah, I wouldn't touch that
+07:46:27 <Philippa> 2k. But even the NT branches don't implement the posix stuff
+07:46:31 <Philippa> not properly
+07:46:52 <Philippa> so eg the binary distribution of GHC doesn't have the posix modules
+07:54:54 <ikegami--> hmm
+07:55:11 <CosmicRay> ikegami--: cygwin maybe?
+07:55:22 <CosmicRay> Philippa: I thought they had some of the posix stuff
+07:55:48 <CosmicRay> Igloo: awake?
+07:55:53 <CosmicRay> @seen igloo
+07:55:53 <lambdabot> I haven't seen igloo
+07:56:02 <CosmicRay> lambdabot: you lie!
+07:56:02 <lambdabot> Sorry, I'm not a very smart bot yet, try "lambdabot: @listcommands"
+07:56:08 <ikegami--> CosmicRay: you are right, but using cygwin occurs another problem on portability... (about cygwin1.dll)
+07:56:13 <CosmicRay> @seen Igloo
+07:56:13 <lambdabot> Igloo is in #darcs and #haskell.
+07:56:15 <CosmicRay> ah..
+07:56:54 <CosmicRay> chip: are you learning haskell right now, coming from a perl background?
+08:06:22 <chip> CosmicRay: Yes.  I'm casting about for something worth spending time on, and I know C, C++, and Perl very well.  Lisp disappoints me.  Haskell's benchmarks on the shootout aren't encouraging, either.
+08:07:07 <chip> I'm also a bit concerned that the Buddha docs say that 'even experts find the behavior of their programs hard to understand'
+08:07:14 <CosmicRay> chip: Haskell is a good thing to learn, if only because it's so different than everything else
+08:07:40 <CosmicRay> There is some truth to the shootout results, but I wouldn't read too much into them.
+08:07:49 <chip> Seems so.  Y'know, my $DAYJOB is about modelling large data sets and doing probabilistic entity matching.  Haskell really seems well-suited for it.
+08:07:57 <CosmicRay> Most of the Haskell examples there aren't very optimized, if at all
+08:08:15 <chip> Or mroe specifically, functional programming is well-suited for it.
+08:08:18 <CosmicRay> that is, they're written for beauty rather than speed
+08:08:24 <chip> Hm
+08:08:33 <CosmicRay> I would disagree with that Buddha statement.
+08:08:34 <ozone> chip: o'caml is a good stepping stone to haskell
+08:08:47 <ozone> more predictable performance, and no laziness to wrap your head around
+08:09:00 <ozone> though its syntax is much more ugly than haskell's, imho
+08:09:08 <CosmicRay> that is quite true, check out http://merjis.com/developers/ocaml_tutorial/
+08:09:10 <chip> Hm.  Quite a lot of Debian support for OCaml
+08:09:12 <CosmicRay> ocaml is sort of a "half haskell"
+08:09:16 <CosmicRay> chip: haskell too
+08:09:30 <chip> Yes, I have ghc5 and hugs installed, and the docs
+08:09:31 <ozone> only serious problem with o'caml is that it has no type classes
+08:09:39 <samc_> and laziness is cool
+08:09:41 <CosmicRay> chip: install ghc6 instead.  ghc5 is seriously old
+08:09:42 <ozone> but eh, then it's time to move on to haskell ;)
+08:09:49 <chip> I actually have ghc6 
+08:09:52 * chip miswrote
+08:10:06 <CosmicRay> chip: let me tell you why I disagree with those buddha docs.
+08:10:10 <chip> k
+08:10:31 <CosmicRay> chip: one of the best features about a Haskell program is that you can read through the source and understand exactly what is happening.
+08:11:00 <CosmicRay> chip: every time you call a function with a certain set of args, the same value gets returned.  there are no exceptions.  and it doesn't mutate some global state, either.
+08:11:26 <CosmicRay> the academics like this because they can prove correctness easier.
+08:11:35 <CosmicRay> I like it because, usually, my brain is the debugger.
+08:11:51 <chip> CosmicRay: I appreciate this theory, but I also recognize that there need to be practical exceptions.  Consider opening a file, or keeping a global event counter.
+08:11:56 <CosmicRay> right.
+08:12:07 <CosmicRay> do you have the URL for YAHT?
+08:12:21 <CosmicRay> those are not actually exceptions in Haskell, but we have a mechanism for them: the IO monad, and "actions"
+08:12:26 <samc_> I think by behaviour the quote wasn't referring to what it does, but how it does it
+08:12:27 <CosmicRay> http://www.isi.edu/%7Ehdaume/htut/
+08:12:32 <chip> Is that YAHT?
+08:12:39 <CosmicRay> that is Yet Another Haskell Tutorial
+08:12:47 <CosmicRay> IMHO the best Haskell tutorial out there
+08:12:57 <chip> Connection refused from those links
+08:13:03 <CosmicRay> the best way to learn haskell, though, I think is with the book Haskell: The Craft of Functional Programming
+08:13:09 <CosmicRay> really?  I just now pulled up both of them
+08:13:22 <CosmicRay> I can e-mail the latter to you
+08:13:36 <chip> "Craft" is around as a pdf?
+08:13:42 <CosmicRay> chip: sorry, I meant YAHT
+08:13:49 <CosmicRay> my wife got me Craft for Christmas :-)
+08:13:54 <chip> Ah.  Yes, please.  chip@pobox.com.  PDF preferred, others OK
+08:14:26 <CosmicRay> sent, 632K PDF.
+08:14:36 <chip> Marvy.  Now I must go ... $DAYJOB calls.
+08:14:41 <chip> Thanks for the help.
+08:14:47 <CosmicRay> ok.  stop buy again and we can talk about IO.
+08:14:53 <chip> OK
+08:16:48 <samc_> what would be a good place to point newbies to, so they can see the modularity afforded by laziness?
+08:17:20 <CosmicRay> maybe YAHT, I dunno
+08:17:35 <CosmicRay> shapr, syntax, and I are working on a doc that has a little bit of that
+08:17:38 <CosmicRay> an example of a lazy grep
+08:18:09 <CosmicRay> chip: you might dig this:
+08:18:11 <CosmicRay> -- simplegrep1.hs
+08:18:11 <CosmicRay> import MissingH.List
+08:18:11 <CosmicRay> main = do
+08:18:11 <CosmicRay>        c <- getContents
+08:18:11 <CosmicRay>        putStr (unlines(filter (\line -> contains "Haskell" line) (lines c)))
+08:21:11 <samc_> to answer my own question: Hughes' wfpm seems good in that respect
+08:36:35 <greentree> cosmic: do you think you could send me that pdf? the link is broken :(
+08:37:30 <CosmicRay> yes
+08:37:36 <greentree> thanks
+08:37:49 <CosmicRay> done
+08:42:55 <CosmicRay> oh tihs is too cool
+08:42:59 <CosmicRay> there is already a hugs ipk for the zaurus pda
+08:48:17 <hcchien> sorry, does anyone run haskell on mac osx?
+08:49:04 <earthy> me does
+08:49:07 <earthy> why?
+08:49:17 <hcchien> I try to install the Haskell XML Toolbox on osx, but seems failed.
+08:49:32 <earthy> hm. never tried that
+08:52:09 <hcchien> I am not sure if it is the ld problem.
+08:53:03 <hcchien> It may be not GNU ld on XCode.
+08:54:31 <earthy> actually, it is an Apple ld directly derived from GNU ld
+08:54:42 <earthy> however, namespace issues may be biting you
+08:55:08 <earthy> as Mac OS X defaults to a two-level namespace in libraries, as opposed to the single library namespace for ordinary unixes
+08:55:21 <samc_> what is the error?
+08:55:43 <hcchien> samc_: ld -r --whole-archive -o HSnetextra.o libHSnetextra.a
+08:55:43 <hcchien> ld: unknown flag: --whole-archive
+08:56:22 <earthy> anyway, I need to be off doing other stuff
+08:56:30 <earthy> good luck!
+08:56:38 <hcchien> thanks anyway. :)
+08:58:43 * earthy looks at the ld command and the docs for --whole-archive and thinks it can be changed to -all_load for mac os x
+08:59:37 <earthy> not exactly sure though, you should test that hypothesis
+09:00:47 <hcchien> seems working now
+09:01:02 <Igloo> Cos: Not awake if you want to talk about arm, short of saying it would need cross-porting and may fail
+09:01:13 <Igloo> CosmicRay, I should say
+09:04:28 <CosmicRay> heh
+09:04:37 <CosmicRay> Igloo: ok...  hmake then? :-)
+09:04:53 <Igloo> Oh, I meant to ask you about that. I need steps to reproduce it
+09:05:00 <CosmicRay> which one?
+09:05:06 <Igloo> The haxml tarball I downloaded didn't havea file of the name you mentioned
+09:05:12 <Igloo> which one? Were there two?
+09:05:18 <CosmicRay> yes, I think so
+09:05:26 * CosmicRay checks
+09:05:35 <Igloo> I thought I got 2 copies of one and didn't read carefully, so you're probably right
+09:05:36 <CosmicRay> or not.
+09:05:46 <CosmicRay> ah, one hmake, the other nhc98
+09:05:47 <Igloo> Ah, OK  :-)
+09:06:19 <Igloo> What's the nhc98 one?
+09:06:20 <CosmicRay> er, hm.
+09:06:32 * CosmicRay checks his mail archives
+09:07:12 <Igloo> Anyway, I need a step-by-step reproduction of http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=291231
+09:08:11 <CosmicRay> gr.
+09:08:21 <CosmicRay> my mail archives don't have either one.
+09:08:45 <CosmicRay> e-mailing now.
+09:08:55 <CosmicRay> dtmconv.hs is just a file that uses HaXml
+09:09:28 * Igloo probably can't do anything about it until Monday, for the same reason I don't have time to go into arm, though
+09:09:36 <CosmicRay> no problem
+09:10:14 <CosmicRay> sent.
+09:22:10 <stepcut> we got competition !
+09:22:22 <stepcut> the next clean release will include: Hilde (Arjen's van Weelden prtotype functional operating system)
+09:22:23 <stepcut> :p
+09:22:32 <stepcut> and!
+09:22:37 <stepcut> - a GEC library for generating editors
+09:22:57 <CosmicRay> heh
+09:26:42 <stepcut> :p
+10:43:12 <CosmicRay> anyone here cross-compiled hugs?
+10:43:44 <shapr> I'd be cross too if someone did that to me!
+10:44:10 <CosmicRay> heh
+10:44:17 <CosmicRay> shapr: I'm trying to build it for the Zaurus
+10:44:21 <shapr> oh hey, does anyone know what Iavor Diatchki was talking about by deriving monads from their operations?
+10:44:24 <shapr> CosmicRay: ooh aah!
+10:44:27 <CosmicRay> :-)
+10:44:42 <CosmicRay> it is already built and mainly works, but important bits of fptools are broken, as is ffi
+10:46:08 <ikegami--> dinner time
+10:46:50 <ikegami--> shapr: hej 
+10:46:57 <shapr> konichiwa
+10:47:13 <shapr> oh hey! I just had a really cool anti-spam idea!
+10:48:08 <shapr> hashcash works by making an email computationally expensive, but that requires support on both the client and the sender.
+10:48:28 <ikegami--> good
+10:48:29 <shapr> What if submission to the smtp server were computationally expensive?
+10:49:14 <shapr> Especially if the cost increases more than linearly with the number of emails submitted.
+10:50:05 <ikegami--> then no one uses email?
+10:50:20 <Igloo> hashcash sounds like it should mean drug money to me
+10:50:23 <shapr> I think it just means that your client has to spend some time when sending each email.
+10:50:30 <shapr> truly
+10:51:31 <Lemmih> shapr: Yo. Are you receiving my mails?
+10:51:50 <wolfman8k> shapr: hi
+10:52:04 <wolfman8k> shapr: i saw a comment of yours on ltu
+10:52:38 <shapr> was it contentful?
+10:53:11 <wolfman8k> i don't remember
+10:53:11 <shapr> Lemmih: I dunno, maybe not. I turned on more anti-spam features recently.
+10:55:21 <musasabi> shapr: you can do that already - just throtle the mail server process to be slow - if the sender is not whitelisted.
+10:55:23 <Lemmih> Patches to [hemplate,hacanon]@scannedinavian.org seams to be ignored.
+10:56:05 <shapr> :-(
+10:56:13 <Lemmih> *seems
+10:56:18 <shapr> I'll look at it when my work for today is done.
+10:56:38 <Lemmih> Thanks.
+10:57:08 <musasabi> Lemmih: btw I made some changes at http://www.cs.helsinki.fi/u/ekarttun/hemplate/ - you won't want all of them, but some may be nice.
+11:00:56 <Lemmih> musasabi: It was too slow?
+11:08:26 <musasabi> Lemmih: not really - just tweaking things.
+11:12:18 <Lunar^> musasabi: Is there documentation somewhere ?!
+11:12:22 * Lemmih is generally against optimizations without profiling data to back it up.
+11:25:37 <musasabi> Lunar^: I am writing comments and I think I will have a small example on weekend.
+11:25:47 <Lunar^> musasabi: cool :)
+11:25:59 <musasabi> Lemmih: btw the code is quite nice.
+11:30:14 <Lemmih> musasabi: Getting Network.Hemplate.Functions would made an example so much easier to code.
+11:32:07 <Oejet> Hello, I saw an earlier message asking if WxHaskell will compile with GHC 6.3.  It's something about the package register.
+11:32:16 <Oejet> Anyone else has that problem?
+11:32:25 <Lemmih> I should really start thinking more about its license. Parts of it has been stolen from other various CGI projects.
+11:32:50 <Lemmih> Oejet: >= GHC 6.3 only supports Cabal packages.
+11:33:23 * Oejet want's WxHaskell as a Cabal package then
+11:33:28 <Lemmih> Oejet: I have cabalized wxHaskell if you're interested.
+11:34:01 <Igloo> Lemmih: Have you given it to Daan?
+11:34:07 <Lemmih> But it's _very_ dirty.
+11:34:29 <Oejet> Lemmih: I want to package it for GoboLinux.
+11:35:25 <shapr> ohhh I have an idea to make distributed multi-CPU garbage collection much simpler!
+11:35:52 <Oejet> shapr: Only use one CPU?
+11:36:04 <Oejet> :-P
+11:36:53 <CosmicRay> bwahahaha
+11:36:55 <Lemmih> Igloo: Cabal is in a state of flux right now. I'm not sure for how long my packages (wx and wxcore) will be valid.
+11:37:05 <CosmicRay> hugs is working on my zaurus, every module except System.Posix.Signals
+11:37:09 <shapr> If you adapt Moscow ML's region allocation memory scheme, you can generate new samurai[1] programs that are optimized for a single CPU. [1] http://c2.com/cgi/wiki?SamuraiPrinciple
+11:37:15 <shapr> Oejet: actually, yes. You're right!
+11:37:16 <musasabi> Lemmih: I don't want to add it locally from hackage as that would probably break things when it gets to the scannedavian hemplate repo.
+11:37:23 <Lemmih> Oejet: I would recommend to wait for GHC 6.4 unless it's really important.
+11:37:37 <CosmicRay> <-- quite pleased
+11:38:07 <shapr> Oejet: but the idea is to generate a new subprogram that should return only a single result, and it does its own garbage collection on that CPU
+11:38:29 <shapr> musasabi: scannedINavian
+11:38:31 * shapr grins
+11:38:57 <shapr> I'm sure everyone already knows it's a pun on the Linux penguin and Scannedinavia
+11:39:38 <Lemmih> musasabi: I don't follow?
+11:39:46 <Lemmih> s/?/./
+11:39:51 <musasabi> shapr: sorry ;P
+11:40:33 <musasabi> Lemmih: the scannedinavian repo does not seem to contain Functions.
+11:41:07 <Lemmih> musasabi: Indeed. I'm currently having problems sending patches to the repos.
+11:41:36 <shapr> ok ok, I'll look at it right now :-)
+11:41:47 <Lemmih> Yay (:
+11:42:15 <wagle> shapr: you are the only real google hit for "firm types"..  what do you mean by the term?
+11:42:20 <stepcut> CosmicRay: I am still waiting for the nhc port to palm :(
+11:42:31 <CosmicRay> stepcut: that will be more difficult
+11:42:34 <shapr> wagle: Soft Typing with rejection.
+11:42:44 <CosmicRay> stepcut: palmos is not nearly as similar to any other OS as the zaurus is
+11:42:46 <shapr> wagle: http://c2.com/cgi/wiki?SoftTyping
+11:42:51 <stepcut> CosmicRay: Perhaps, waiting is not that hard :p
+11:42:57 <CosmicRay> heh
+11:43:02 <CosmicRay> it may be easier to port hugs
+11:43:13 <shapr> stepcut: I think those guys are never gonna do it.
+11:43:14 <CosmicRay> or you could just get a linux-based pda
+11:43:19 <wagle> shapr: how is that different than strong typing?
+11:43:31 <shapr> They've had most of a PalmOS runtime for years, just haven't been very active.
+11:43:46 <shapr> wagle: Strong Typing rejects programs that it cannot prove to be correct. 
+11:43:58 <shapr> Firm Typing would only reject programs that it can prove to be *in*correct.
+11:44:15 <wagle> shapr: oic
+11:44:54 <wagle> i think i like your definition..  is it yours, or did you find it somewhere?
+11:44:58 <shapr> I made it up.
+11:45:20 <shapr> feel free to steal it and use it.
+11:45:26 <xerox> 'lo
+11:45:30 <shapr> 'hi
+11:45:43 <wagle> i'm more thinking in terms of revocation than admission control
+11:46:07 <shapr> eh?
+11:46:16 <wagle> so i'm trying to figure out what the types mean at run-time when something goes wrong
+11:46:46 <shapr> Lemmih: oh, I found the problem. desktop.sund.dk isn't a valid hostname.
+11:47:25 <musasabi> well I won't do anything before tomorrow night (~24hours - so no hurry)
+11:47:39 <musasabi> and I think my first project will be switching to Data.Map.
+11:48:00 <wagle> one hopes that you know more about a program that type checks than one that doesnt -- when trying to recover from a fault (security, noise, etc)
+11:48:14 <Lemmih> shapr: So why did it work before?
+11:48:41 <shapr> Because one of my friends in the USA called me on the phone and told me my mailserver was broken, so I turned that feature off for them until their server admin fixed it.
+11:49:01 <shapr> I've just turned that feature off again, but I encourage you to helo with a valid hostname :-)
+11:49:46 <wagle> you familier with soft timers and firm timers?
+11:52:36 <shapr> nope
+11:52:51 <shapr> Is that something in type theory?
+11:53:02 <wagle> opsys
+11:53:54 <wagle> normal timers use interrupts..  have a tendency to unncecessarily pollute caches
+11:54:17 <shapr> oh I see.
+11:54:22 <wagle> soft timers use polling..  now have to add polling points
+11:54:45 <shapr> Lemmih: should work now
+11:54:51 <wagle> but you put the polling points at places nicer to caching
+11:55:00 <wagle> firm timers mix the two
+11:55:25 <wagle> not sure how this is all that interesting, but i brought it up
+11:55:46 <wagle> but it is where i'm extrapolating soft/firm from
+11:55:59 <wagle> not a very good fit
+11:56:14 <shapr> It is a good fit.
+11:57:16 <shapr> Because interrupt based timers cannot be ignored, modified, changed, or adapted. They're not optional.
+11:57:38 <shapr> I think it's the same dichotomy you see in hard, firm, and soft typing.
+11:57:47 <wagle> you can mask interrupts, but thats nassty
+11:58:40 <wagle> s/ss/s/
+11:59:11 <wagle> but yeah
+12:01:17 <shapr> Lemmih: oh hey, I think we found a new colo ISP for ScannedInAvian, I expect the move to happen sometime in the next two weeks.
+12:02:38 <wagle> ornithological photos?
+12:03:08 <Lemmih> shapr: Okay.
+12:05:00 <shapr> wagle: sort of, yeah. :-) Long ago on #python I said that I live my open source (linux) life on the internet, while my physical body hibernates in the northernmost countries of Europe, therefore I'm a ScannedInAvian.
+12:08:34 <wagle> cybernetic penguin
+12:08:52 <wagle> like in the movie "tron"
+12:11:35 <shapr> It was such a marvelously bad pun that I registered the DNS name.
+12:11:46 <wagle> cool
+12:18:42 <wagle> heh..  i've gotten lost in the sturgeon's law region of c2
+12:18:50 <shapr> it's easy to get lost in c2
+12:19:55 <CosmicRay> shapr: are you aware of any date/time libraries for haskell?
+12:20:06 <shapr> er, yes.
+12:20:13 <shapr> What about the libtai thingy?
+12:20:19 <shapr> We already talked about this, remember?
+12:20:31 <CosmicRay> ah, I do now, yes.
+12:20:43 <CosmicRay> I'm looking for something in pure haskell though
+12:20:52 <shapr> I thought Marlow's library was?
+12:21:03 <CosmicRay> you mean the one in fptools?
+12:21:14 <shapr> I don't know if it's in fptools.
+12:21:23 <shapr> I thought it was one of those proposed new libs like his IO lib.
+12:21:35 * CosmicRay googles
+12:22:01 <CosmicRay> I found it.  not what I need really
+12:23:08 <CosmicRay> may need to write one for missingh.
+12:23:43 <CosmicRay> shapr: anyway, whenever chip returns, you might want to give him your tour.
+12:31:17 <shapr> if I have time, I will.
+12:53:43 <shapr> SCHVUNG!
+12:54:04 <shapr> Can you tell my Concerta just ran out?
+13:05:06 <shapr> blackdog: Which Septemberites album should I start with?
+13:06:51 <wagle> ..  i sometime eat soup with a fork..  8)
+13:10:45 <monochrom> must be some gelato kind of soup then
+13:20:47 <wagle> http://www.gelato.org/ ?
+14:17:32 * CosmicRay growls at the lack of mktime()
+14:23:41 <Lemmih> Woot woot! I just used Hacanon to generate a minimal binding to ClanLib.
+14:23:56 <wolfman8k> cool
+14:24:01 * CosmicRay googles for the two strange words in that sentence
+14:24:06 <CosmicRay> and they aren't "woot woot" :-)
+14:24:31 <Lemmih> Hacanon and ClanLib?
+14:25:14 <CosmicRay> yes :-)
+14:25:19 <CosmicRay> does hacanon only work with c++ stuff?
+14:25:49 <CosmicRay> and I can't seem to figure out how one describes pointers (passed-in buffer?  something I need to free later?  static buffer?)
+14:25:50 <Lemmih> Right now, yes. But it will probably change in the future.
+14:25:59 <CosmicRay> but other than that, nice.
+14:26:10 <wolfman8k> would be really nice if someone would make a haskell compiler that would compile haskell programs to .net programs, and would allow calling .net methods as haskell IO monad actions
+14:26:52 <CosmicRay> I agree
+14:26:58 <CosmicRay> I brought that up on cafe a week or two ago
+14:27:04 <CosmicRay> apparently the ms cambridge effort is restarting
+14:27:21 <CosmicRay> though they seem to think it's more useful to integrate haskell into some crappy ms ide
+14:27:29 <wolfman8k> :(
+14:27:30 <Lemmih> CosmicRay: It's done via TH.
+14:27:58 <Lemmih> CosmicRay: You can write your own marshalling function in Haskell.
+14:42:44 <WilX> Mmm.
+14:43:14 <WilX> Is there a way to debug Haskell code by "stepping" through the code?
+14:43:52 <musasabi> WilX: buddha comes close to that.
+14:43:56 <WilX> :)
+14:44:04 <WilX> Or...that was not a joke?
+14:44:31 <musasabi> stepping through code does not really make sense for a lazy language.
+14:44:42 <WilX> I know, hence the quotes.
+14:44:52 <musasabi> CosmicRay: then again that needs lots of things - and with that much effort much more important things could be done.
+14:47:59 <musasabi> Yet Another Haskell Tutorial seems to be down :-(
+14:48:30 <tic> lame! it should be called Yet Another Haskell Coding Tutorial, for Yacht :)
+14:49:15 <CosmicRay> musasabi: I can e-mail you the code
+14:49:18 <CosmicRay> s/code/pdf/
+14:49:25 <CosmicRay> somebody should write hal
+14:49:49 * musasabi writes the mail
+14:49:54 <musasabi> CosmicRay: that would be nice.
+14:50:01 <CosmicRay> musasabi: what's your addr?
+14:50:13 <musasabi> ekarttun at cs helsinki fi
+14:50:40 <CosmicRay> sent
+14:50:48 <musasabi> thanks
+14:51:04 <CosmicRay> that's the third time I've sent that today
+14:52:54 <WilX> Gagh!
+14:52:59 <WilX> No Win32 support :/
+14:53:07 <WilX> Life sucks.
+14:53:22 <Pseudonym> An alternative interpretation is that Win32 sucks.
+14:53:37 <CosmicRay> yes, I think Pseudonym is correct
+14:53:43 <Pseudonym> Yet another interpretation is that it sucks to be you.
+14:53:52 <CosmicRay> haha
+14:54:00 <CosmicRay> MegaMonad: does it suck to be wilx, or does win32 suck?
+14:54:01 <MegaMonad> CosmicRay: Wilx: what if you use win32.
+14:54:21 <wolfman8k> MegaMonad: good morning
+14:54:22 <MegaMonad> wolfman8k: Aber mein deutsch ist sehr blöd :p.
+14:54:26 <wolfman8k> :O
+14:54:27 <jberg> CosmicRay, can you e-mail me yet another haskell tutorial as well?
+14:54:39 <CosmicRay> jberg: sure, address?
+14:55:21 <CosmicRay> sent
+14:55:37 <jberg> thanks.. is it it better than a gentle introduction to haskell?
+14:55:42 <CosmicRay> much
+14:55:47 <jberg> ah cool
+14:56:07 <CosmicRay> the "gentle introduction" seems to be an apt title only for a porcupine
+14:56:18 <jberg> :)
+14:57:52 <wolfman8k> this is maybe a dumb question, but is there a lot more to the haskell language then the basic stuff found in most tutorials?
+14:58:25 <wolfman8k> cause compared to something like c++ it doesn't seem like haskell has a lot of language features
+14:58:35 <musasabi> My gf started to talk about learning haskell today when we cuddled in bed ^_^
+14:58:49 <WilX> Huh.
+14:58:52 <monochrom> Gross.
+14:58:57 <wolfman8k> her?
+14:58:58 <wolfman8k> http://www.kontrabandcontent.co.uk/1/graphics/pics/almost_spring.jpg
+14:59:05 <Pseudonym> I worry for your love life.
+14:59:20 <esap> wolfman8k: Haskell doesn't need many language features. It's because the ones it has do work well with each other.
+15:00:18 <wolfman8k> ok, i'm not complaining, just making sure i'm not missing anything :)
+15:00:45 <musasabi> actually she is a nice looking rock engineering student ;P
+15:00:53 <wolfman8k> but it seems that there are lots of extensions that add features, like existential types
+15:00:54 <esap> wolfman8k: For accurate information, you need to read the spec (+ GHC libraries :-)
+15:01:10 <wolfman8k> evertime i try reading the spec i go blind for a few minutes
+15:02:32 <monochrom> c++ has many features because it is inadequate in higher-order functions.
+15:03:20 <monochrom> if you have full support for higher-order functions, a lot of features can be user-defined.
+15:03:39 <monochrom> The other thing c++ lacks is defining your own operators.
+15:03:48 <WilX> Hmm, I thought I have seen Win32 API library for Haskell but I cannot find any docs for it in my GHC...
+15:04:04 <wolfman8k> well, operators are a syntax thing. and haskell doesn't have the greatest support for extending it's syntax either
+15:20:41 <WilX> Is there anything that resembles Win32 API bindings for Haskell?
+15:33:37 <gzl> is there any built-in function \x y -> y or should I just use that?
+15:34:16 <Riastradh> flip const
+15:34:25 <Riastradh> @type flip const
+15:34:30 <lambdabot> flip const :: forall a b. b -> a -> a
+15:34:38 <monochrom> \x y -> y has fewer keystrokes :)
+15:34:45 <Riastradh> It requires using the shift key.
+15:35:01 <Riastradh> And moving the finger all the way to the backslash key.
+15:35:28 <Riastradh> It requires also interspersing a space between almost every key.
+15:35:29 <wolfman8k> not if you have the proper keyboard layout. if you do then it's easier to type then the alternative
+15:36:23 <Riastradh> One should not have to switch keyboard layouts to be able to more conveniently write '\x y -> y' than 'flip const'.
+15:37:20 <gzl> ok.
+15:37:22 <gzl> thanks
+15:37:29 <gzl> I think I'll stick with mine for now
+15:38:45 <wolfman8k> one should use voice recognition
+15:39:11 <kuribas> doesn't it matter more which is easier to read than which is easier to write?
+15:39:26 <jadrian> that's what I was thinking
+15:40:31 <monochrom> I don't know which one is easier to read.
+15:40:52 * kuribas votes for the lambda form
+15:40:56 <wolfman8k> shouldn't it be \_ x -> x though?
+15:41:12 <gzl> kuribas: yes. that's why I kept mine
+15:41:33 <gzl> wolfman8k: what's the difference?
+15:41:51 <wolfman8k> easier to read :D
+15:42:09 <gzl> ok, that's fair
+15:42:56 <jadrian> you can make it a little shorter  \_ x->x  or even better \_->id
+15:43:10 <jadrian> I think the last one is as short as it can get
+15:43:33 <wolfman8k> yeah, i like the last one
+15:44:34 <musasabi> const id
+15:45:14 <wolfman8k> is haskell good for cgi scripts? does it work well with mysql?
+15:45:44 <musasabi> wolfman8k: see e.g. hackage.
+15:45:51 <wolfman8k> thanks
+15:46:04 <jadrian> musasabi: yeap, I prefer that one (even thought it's some chars longer :D)
+15:46:18 <gzl> haha
+15:46:54 <gzl> I think I'll stop halfway overboard at \_ x -> x, thanks
+15:47:23 <desrt> that's a strange function
+15:47:29 <desrt> it's like (flip const)
+15:47:32 <desrt> aka, zero
+15:47:48 <gzl> it is flip const
+15:48:25 <gzl> what's so strange about it?
+15:54:36 <gzl> bbl
+16:14:13 <jadrian> hmmm thinking of obfuscated stuff... how easy is it to tell which function is this?
+16:14:18 <jadrian> scanl (const id)
+16:14:46 <Riastradh> @type scanl (const id)
+16:14:48 <lambdabot> scanl (const id) :: forall b. b -> [b] -> [b]
+16:14:57 * Riastradh has no idea.
+16:15:00 <jadrian> (:)
+16:19:12 <monochrom> ought to be able to calculate it algebraically.
+16:19:52 <jadrian> should be that hard to do...
+16:20:24 <jadrian> const id  always returns the 2nd parameter
+16:20:43 <jadrian> so if you fold with that functions you'll get
+16:21:30 <jadrian> foldl (*) e xs =   (...) * e
+16:21:40 <jadrian> where * is the (const id)  function
+16:22:37 <jadrian> opss
+16:22:43 <jadrian> that was another example
+16:22:49 <jadrian> you always get the last element
+16:23:05 <jadrian> foldl (const id) e xs   == last
+16:23:24 <jadrian> that is easily proved by induction
+16:23:34 <jadrian> then you just need the step from foldl to scanl
+16:24:15 <monochrom> Ah.
+16:26:45 <jadrian> you could use the specification scanl f e  = map (foldl f e) . inits   I guess
+16:27:56 <jadrian> actually there is a small mistake here...
+16:28:04 <jadrian> foldl (const id) e xs   == last  <-- not really
+16:28:09 <jadrian> it isn't if xs == []
+16:29:15 <jadrian> but other than that all works
+16:41:09 <Pseudonym> Ah, poor spouse of mine.
+16:41:36 <Pseudonym> She's hit a Windows bug where every few minutes, without fail, it tells her that it's found a new printer.
+16:41:39 <Pseudonym> The one which is already installed.
+16:41:52 <Pseudonym> "It's like Chinese water torture!"
+16:42:11 <Pseudonym> "GOD MAKE IT STOP!!!!!!!"
+16:42:28 <Pseudonym> I tried to explain to her that God has no jurisdiction over Windows, and she should talk to the other guy instead.  She was not impressed.
+16:45:58 <jadrian> lol
+16:51:17 <Itkovian_> wli: u here?
+16:53:03 <Itkovian_> hmmm
+16:53:06 <Itkovian_> I guess not
+16:55:04 <jadrian> hmmm
+16:55:32 <jadrian> these are nice too: 
+16:55:35 <jadrian> uncurry const
+16:55:38 <jadrian> uncurry (const id)
+16:55:45 <Pseudonym> @type uncurry const
+16:55:47 <lambdabot> uncurry const :: forall a b. (a, b) -> a
+16:55:50 * jadrian should really stop thinking about this stuff...
+16:55:56 <Pseudonym> @type uncurry (const id)
+16:55:57 <lambdabot> uncurry (const id) :: forall a b. (a, b) -> b
+16:56:27 <Pseudonym> The free theorems for these types state that these must be fst and snd respectively.
+16:56:38 <jadrian> yeap :)
+16:56:44 <jadrian> nice way to prove it by the way
+16:56:46 <Pseudonym> Assuming they don't return bottom, anyway.
+16:56:48 <jadrian> I hadn't thought of that
+16:57:23 <Pseudonym> Category theory rules.
+16:57:56 <jadrian> yeap... and I should learn more about it... haven't touched it in a while
+17:20:02 <Itkovian_> gdnight
+17:20:46 <jadrian> Pseudonym: are you around?
+17:20:54 <Pseudonym> http://www.gotw.ca/publications/concurrency-ddj.htm
+17:20:57 <Pseudonym> Interesting paper.
+17:21:01 <Pseudonym> Uhm... yeah.
+17:21:01 <jadrian> ok that's a yes... :)
+17:21:16 <jadrian> I was wondering why we don't have:
+17:21:20 <jadrian> instance Functor ((->) a) where 
+17:21:20 <jadrian>     fmap = (.)
+17:21:23 <jadrian> ...
+17:21:32 <jadrian> is there any other sensible definition besides that one?
+17:21:33 <Pseudonym> I thought we do.
+17:21:37 <jadrian> we do?
+17:21:48 <Pseudonym> Import Control.Monad.Reader
+17:21:52 <jadrian> oh
+17:22:05 <jadrian> why is it in Monad reader...
+17:22:18 <Pseudonym> Because ((->) a) is a reader monad as well as a functor.
+17:22:34 <jadrian> yes but we  don't need to think of (->) a as a monad to have it as a reader...
+17:22:39 <jadrian> opss
+17:22:42 <jadrian> as a functor
+17:22:46 <Pseudonym> That's true.
+17:22:54 <jadrian> Functor is exported by the prelude
+17:22:58 <Pseudonym> We don't have to think of _any_ monads as monads to use them as functors.
+17:23:09 <jadrian> yes of course :)
+17:23:12 <jadrian> that was my point
+17:23:16 <Pseudonym> I agree that Control.Monad.* needs some reorganisation.
+17:23:27 <Pseudonym> If that was your point. :-)
+17:24:02 <Pseudonym> OTOH some definitions of fmap might make more sense to express in terms of bind and return.
+17:24:08 <jadrian> well, at first I was really just wondering about that functor instance...
+17:24:25 <jadrian> but is Monad.Reader in the report?
+17:24:32 <jadrian> standard libs that is
+17:24:33 <Pseudonym> Don't think so.
+17:24:38 <Pseudonym> It's in the MTL.
+17:25:15 <jadrian> so I guess I just expected to have (->) a  as Functor in the stdlibs
+17:25:29 <jadrian> in the H98 report
+17:25:35 * Pseudonym is a believer that the prelude is a bit bloated as it is
+17:27:04 <Pseudonym> "Make a CPU ten times as fast, and software will usually find ten times as much to do (or, in some cases, will feel at liberty to do it ten times less efficiently)."
+17:31:42 <Lemmih> Are there other bindings to C++ libraries than wxHaskell and hs-fltk?
+17:35:21 <icb> how do i continue to build ghc from stage2?
+17:38:52 <shapr> build stage3!
+17:39:00 * shapr is joking
+17:39:16 <monochrom> try stage 2.0000187277384998203
+17:40:06 * esap thinks floating-point stages are a nice idea. Maybe somehow related to fractals? :-)
+17:40:33 <jadrian> doesn't need to be that complicated
+17:40:34 <monochrom> Yeah, if there are fractal dimensions, there can also be fractal version numbers.
+17:40:38 <jadrian> might just be a limit
+17:40:42 <dons> combined with GNU make. I'm scarred
+17:40:46 <dons> scared
+17:40:57 <monochrom> the limit idea has already been used. need something more avant garde
+17:41:08 <Pseudonym> You get stuck around stage e
+17:41:20 <Pseudonym> Wake me when you get to stage pi, though.
+17:41:28 <jadrian> no, you'd never get stuck...
+17:41:48 <jadrian> you just kept going towards e
+17:41:52 <jadrian> infinitely
+17:42:00 <esap> just take derivates
+17:42:11 <esap> and 'e' will appear almost immediately...
+17:42:20 <monochrom> We should design a scheme so that generally the questions "will you get stuck around x" or "will the version number exceed x" are undecidable.
+17:46:41 <jadrian> for that you'd be defining a non-computable number, right?
+17:46:54 <jadrian> so I can only think of omega...
+17:47:00 <jadrian> (chaitins)
+17:53:30 * icb is trying to build 622 from scratch on a mac
+17:53:52 <monochrom> Yeah, it's going to be hard.  I just hope not hard enough to make the scheme itself uncomputable. :)
+17:54:28 <monochrom> Or we can weaken it to: "will the version number exceed x" is an open problem.
+17:58:53 <Pseudonym> You could use ordinals or cardinals.
+18:07:13 * jadrian should really learn about Monad.Reader
+18:07:26 <jadrian> just looking at type signatures doesn't help much
+18:13:56 <shapr> oh hey
+18:14:05 <shapr> That's gotta be the title of the Haskell periodical
+18:14:34 <dons> "type sigs don't help much" ?
+18:14:44 <shapr> The Monad.Reader
+18:14:53 <dons> ah, yeah :) that's good
+18:21:33 <jadrian> hmm ok so I managed to understand >>=  in (a->) I think
+18:21:39 <shapr> Speaking of which, I may do another call for contributors once my new server is up.
+18:21:53 <jadrian> haven't come up with nice examples of using it though
+18:21:58 <jadrian> shapr: conytibutors for?
+18:22:07 <shapr> for The Monad.Reader
+18:22:31 <shapr> I'd like to start a Haskell wikizine, but I won't do it unless I can get several people to commit to regular columns.
+18:22:31 * jadrian is kinda lost
+18:22:35 <jadrian> oh!
+18:22:44 <jadrian> I didn't know that
+18:23:12 <shapr> I like your name suggestion :-)
+18:23:17 * sh10151 has interest in too many programming languages to commit to a regular language, let alone a regular column about one
+18:23:21 <jadrian> yap :)
+18:23:44 <jadrian> composeM (replicate n (><) ) a a  <-- hmmm not that great :-/
+18:23:45 <shapr> sh10151: no way, interest in lots of langs gives you a better perspective.
+18:24:00 <jadrian> let big n (><) a = composeM (replicate n (><) ) a a
+18:24:21 <jadrian> big 3 (+) 2  -->  2 + 2 + 2 + 2  
+18:24:48 * jadrian can't come up with a nice example of >>= on (a->)
+18:26:46 <sh10151> heh
+18:27:10 * sh10151 was helping a coworker with some XSLT a few weeks ago
+18:27:11 <shapr> sh10151: I really do think so. A regular compare/contrast column would be great.
+18:27:22 <shapr> something like comparing Haskell to the flavor of the month.
+18:27:34 <sh10151> one of the things I said was "well, it works this way in other languages I know with pattern matching..."
+18:27:36 <shapr> How does Haskell compare and contrast to Scala?
+18:27:47 <sh10151> then I think I sent him to the developerWorks page on HaXML
+18:29:22 <jadrian> is fail also in the Categorical definition of monads?
+18:29:56 <jadrian> I know that  >>= is similar to the  *  
+18:30:02 <jadrian> but that the * is more like composition
+18:30:19 <jadrian> but what is fail?
+18:30:47 <sh10151> I think first-class functions is my favorite feature of a language
+18:31:05 <sh10151> luckily I can program in perl, jython, and javascript at work
+18:31:23 <shapr> sh10151: what about first class actions and first class transformers?
+18:31:40 <shapr> Those are the next steps up the hierarchy.
+18:31:50 <shapr> value, function, action, transformer
+18:33:56 <sh10151> at work I will push for functions :)
+18:34:29 <sh10151> show those strategy pattern wankers what's what
+18:36:41 * jadrian thinks fail is too weird :-/
+18:37:11 <jadrian> I mean, fail :: forall a. String -> m a 
+18:37:16 <jadrian> String?
+18:37:25 <jadrian> in the definition of a monad...
+18:37:39 <monochrom> You can put an error message there.
+18:37:42 <jadrian> yes
+18:37:53 <jadrian> I understand the point, just hate it...
+18:38:27 <jadrian> seems an ugly hack
+18:40:22 <jadrian> Would it make much more sense to have Monad with no fail
+18:40:33 <jadrian> and for fail just use MonadError?
+18:40:41 <jadrian> for instance 
+18:40:53 <jadrian> Maybe is an instance of monad error with the Error being ()
+18:41:28 <jadrian> so you only have one type of failure
+18:41:32 <jadrian> which is ()
+18:41:48 <jadrian> if you want strings you can define the error as being String
+18:41:50 <monochrom> Yes, sounds reasonable.
+18:42:09 <jadrian> and I could have Either as a Monad
+18:42:12 <jadrian> (Either a)
+18:42:26 <jadrian> as a Monad with no ugly hacks for fail
+18:43:06 <monochrom> Yuck, unfortunately for all monads you need a "fail" of some sort.  do { (x:xs) <- blah; ... }  needs "fail" for the time when blah returns [].
+18:43:51 <monochrom> But you can say "let's outlaw that except for MonadError's ..."
+18:44:20 <jadrian> hmm I don't really get you... I suspect circular reasoning
+18:44:44 <jadrian> in the sense that all Monads need them, because since we have fail in the Monad class
+18:44:56 <jadrian> we only define instance of Monad for types which have fail
+18:45:11 <jadrian> but maybe I just didn't understand what you meant
+18:45:39 <jadrian> I don't think you have anything like fail in the categorical definition
+18:48:13 <monochrom> Do you agree that do { (x:xs) <- blah; ... } is a nice thing to have?
+18:48:21 <jadrian> yes...
+18:48:36 <monochrom> Then you need "fail".  This is not circular reasoning.  It is from you.
+18:49:03 <jadrian> ah, you mean the do notation needs fail
+18:49:10 <jadrian> ?
+18:49:26 <monochrom> Yes.
+18:49:32 <jadrian> hmmm does it?
+18:49:43 <jadrian> are you sure?
+18:49:58 <monochrom> You can change your mind now and say "do { (x:xs) <- blah; ... }" is not worth the trouble.
+18:50:27 <jadrian> I just don't understand why does it needs fail at all
+18:50:54 <monochrom> blah may return [].  What do you do then?
+18:51:24 <monochrom> do { (x:xs) <- return []; return x }   1. do you want this to be legal?  2. If so what should it do?
+18:51:31 <jadrian> right, let me think
+18:53:07 <jadrian> hmm let me check what happens now
+18:55:39 <jadrian> monochrom: I had no idea about this...
+18:55:54 <jadrian> monochrom: I exepcted that to just give an error...
+18:57:09 <jadrian> monochrom: and I haven't give it much thought, but to be honest, I don't even think I like it
+18:57:35 <monochrom> Currently do { (x:xs) <- blah; Q } is defined to be do { z <- blah; case z of {(x:xs) -> Q; _ -> fail "pattern matching problem"}}
+18:57:42 <jadrian> right
+18:57:54 <jadrian> does someone use that at all?
+18:58:01 <monochrom> I use it all the time.
+18:58:19 <jadrian> right... maybe now that I'm aware I'll find it useful
+18:59:01 <jadrian> at first glance I don't really like it though...
+18:59:43 <jadrian> I'm used to think that if my pattern match doesn't work, I have a bug, and it should crash imediatly
+19:00:36 <jadrian> I can see myself missing some pattern that might happen, program not crashing, just getting an wrong result in the end
+19:01:17 <jadrian> but then again, I have never really thought about it... these are just first impressions
+19:01:39 <jadrian> And I still think that fail doesn't make sense in all monads
+19:02:16 <jadrian> in fact, fail probably doesn't make sense in Monads that model computations that can fail in more than one way
+19:02:34 <jadrian> unless you can define a standard failure, which might not be the case
+19:06:00 * Pseudonym looks back
+19:06:04 <Pseudonym> Monad.Reader is good!
+19:06:30 <jadrian> lol
+19:10:29 <jadrian> Pseudonym: can I get your opinion on the "fail" thing too? Do you think it is natural to have "fail" in the Monad class?
+19:11:07 <Pseudonym> Yes.
+19:11:16 <Pseudonym> For the pattern matching reason mentioned earlier.
+19:11:30 <Pseudonym> By default it should be "error", though.
+19:11:52 <Pseudonym> I'd find it more unnatural if you couldn't say what happened when pattern matching fails.
+19:12:39 <jadrian> I understand the argument... but I really think it backwards in the sense that Monad Class definition should come first, and only then syntatic sugar for what you have
+19:13:27 <Pseudonym> In Gofer, there was a monad between Monad and MonadPlus.
+19:13:30 <Pseudonym> MonadZero
+19:13:58 <jadrian> right
+19:14:10 <Pseudonym> But I don't see how you could express that in do notation.
+19:14:36 <Pseudonym> You do want to use refutable patterns in do-notation for non-MonadZeros in general, I think.
+19:14:44 <jadrian> ?
+19:14:45 <yaasastfu> Is there a category-theoretic interpretation of "fail"?
+19:14:48 <jadrian> we do?
+19:15:04 <yaasastfu> "unit" and ">>=" make a lot of sense from a category theory point of view.  
+19:15:27 <jadrian> because right now I think our Monad is actually more than Monad Zero no?
+19:15:36 <jadrian> fail "" being the zero
+19:16:48 <Pseudonym> yaasastfu: "fail" makes sense because all domains in Haskell are lifted.
+19:16:55 <Pseudonym> fail == bottom
+19:16:59 <yaasastfu> Oh, sure.
+19:17:05 <yaasastfu> Thanks.
+19:17:44 <jadrian> that would justifies meaningless methods in classes though
+19:17:46 <jadrian> no?
+19:18:37 <yaasastfu> It seems to me that "undefined" takes care of that.
+19:19:06 <Pseudonym> No, because you want to override it if the monad does have a zero element.
+19:19:10 <Pseudonym> Like Maybe, which has Nothing.
+19:19:50 <retardo> I don't understand.  Nothing is not analogous to fail.
+19:19:58 <Pseudonym> Sure it is.
+19:20:11 <jadrian> actually it's not
+19:20:15 <jadrian> fail "" maybe ;)
+19:20:18 <jadrian> not fail
+19:20:20 <Pseudonym> do { (x:xs) <- return [] } :: Maybe a
+19:20:23 <Pseudonym> That should be Nothing.
+19:20:24 <retardo> Nothing has the property that   a >>= Nothing =  Nothing >>= a  = a
+19:20:28 <Pseudonym> jadrian: RIght.
+19:20:34 <retardo> fail has   fail >>= a  = a >>= fail  = fail.
+19:20:46 <jadrian> Pseudonym: I meant that it in the sense that you could get rid of Eq, Just define Ord, and use bottom for  > 
+19:20:49 <Pseudonym> Why does Nothing >> a == a?
+19:21:18 <Pseudonym> Prelude> Nothing >> return ()
+19:21:19 <Pseudonym> Nothing
+19:21:23 <Pseudonym> There you go.
+19:21:23 <jadrian> Pseudonym: and say, well some instances of Ord do need the >, the ones that don't will have bottom
+19:21:47 <Pseudonym> Yeah, I see what you mean.
+19:21:55 <Pseudonym> But the thing is, fail is important for do notation.
+19:22:13 <Cale> a >>= Nothing is a type error
+19:22:25 <Pseudonym> If we didn't have do notation (or the equivalent, like monad comprehensions), we wouldn't need fail.
+19:22:29 <jadrian> Pseudonym: but fail came before the do notation no?
+19:22:31 <Pseudonym> Cale: I think retardo meant a >> Nothing
+19:22:53 <Pseudonym> jadrian: I don't believe so, but it may have come from monad comprehensions.
+19:22:59 <retardo> I meant both. I'm not claiming it makes any sense.
+19:23:00 <Pseudonym> Which is equivalent to do notation.
+19:23:31 <jadrian> Pseudonym: but wasn't the Monad Class defined before Monad comprehensions?
+19:23:37 <retardo> I need a full night's sleep to make sense.  I'll think on it and come back tomorrow if I am still puzzled.
+19:23:57 <Cale> retardo: read my article?
+19:24:00 <Cale> :)
+19:24:06 <Pseudonym> jadrian: I don't think so.
+19:24:17 <jadrian> now that's weird...
+19:24:24 <Pseudonym> jadrian: The monad class came from Gofer, which first implemented constructor classes and higher kinds.
+19:24:31 <Cale> retardo: http://www.haskell.org/hawiki/MonadsAsContainers
+19:24:36 <jadrian> Pseudonym: oh
+19:24:37 <Pseudonym> Before they were in Haskell.
+19:24:53 <Pseudonym> And I _think_ that monad comprehensions were first.
+19:24:58 <jadrian> right
+19:25:02 <Pseudonym> And when they moved into Haskell, they became do-notation.
+19:25:09 * Pseudonym might be confusing the history, though
+19:25:14 <Pseudonym> It was a long time ago. :-)
+19:26:07 <Pseudonym> I really liked monad comprehensions, but I must admit that do-notation is better.
+19:26:34 <Cale> I think both should be supported
+19:26:35 <jadrian> Pseudonym: it just seems that fail is an hackish throwError
+19:27:08 <Pseudonym> Yes, you're probably right.
+19:27:17 <Pseudonym> But I don't see an alternative.
+19:27:34 <Pseudonym> Unless you say, for example, that any do-notation which involves a refutable pattern must be in MonadZero instead of Monad.
+19:27:42 <Pseudonym> That's a maintenance nightmare, if you ask me.
+19:27:47 <jadrian> Pseudonym: if you're working with a MonadError E, with E /= String  then  fail on that monad is probably weird
+19:27:52 <Pseudonym> One small change could make your program not compile.
+19:28:15 <Pseudonym> jadrian: Yes, it probably is.  But you can synthesise an E.
+19:28:23 <Pseudonym> fail on Maybe ignores the STring.
+19:28:46 <jadrian> Pseudonym: yeap... therefore the weird  :) 
+19:28:57 <Cale> fail on most things will likely ignore the string
+19:29:04 <jadrian> yeap
+19:29:24 <jadrian> Maybe and [] for instance
+19:29:35 <jadrian> I prefer  throwError ()
+19:29:51 <jadrian> makes more sense than  fail ""
+19:30:17 <jadrian> Ah!
+19:30:21 <Pseudonym> @type guard
+19:30:22 <lambdabot> bzzt
+19:30:28 <Pseudonym> @type Control.Monad.guard
+19:30:29 <lambdabot> Control.Monad.guard :: forall m.
+19:30:29 <lambdabot> 		       (Control.Monad.MonadPlus m) =>
+19:30:29 <lambdabot> 		       Bool -> m ()
+19:30:39 <jadrian> now I understand an example from Darius some time ago!!
+19:30:41 <Pseudonym> I think that makes more sense on a MonadZero.
+19:30:44 <jadrian> with list notation
+19:30:54 <jadrian> where the pattern failed
+19:31:44 <jadrian> Pseudonym: yes, and MonadZeros could have a default instance for MonadError with Erro = ()
+19:33:28 <jadrian> throwError () = zero
+19:56:29 <jadrian> Pseudonym: just one more thing, if we just need fail because of the do notation, why isn't it,   fail :: ma
+19:56:41 <jadrian> instead of fail :: String -> m a
+20:00:09 <Pseudonym> Because the String is useful information.
+20:00:26 <Pseudonym> It's the normal error message that would be passed to error if it was a failed pattern match of any other kind.
+20:08:54 <bluegods> HEY IS HASKELL SCALABLE?
+20:09:04 <bluegods> PYTHON SAID IT AINT
+20:09:09 <bluegods> SMALLTALK 2
+20:09:29 <Pseudonym> Who is this "Python"?
+20:09:50 <Pseudonym> And what definition of "scalable" did this person use?
+20:10:03 <Pseudonym> Haskell scales to more developers than Python, easily.
+20:10:12 <sh10151> no one on #Python has mentioned haskell in the last 4 hours :)
+20:10:19 <jadrian> lol
+20:10:26 <Pseudonym> Clearly shapr is working.
+20:10:35 <jadrian> :D
+20:11:27 <monochrom> You listen to bigots of one language for advice on other languages?
+20:11:52 <sh10151> "scalable" is the worst buzzword of the bunch too
+20:12:07 <sh10151> http://www.shirky.com/writings/situated_software.html
+20:12:18 <Pseudonym> No, the worst is "level".
+20:12:19 <jadrian> I'm going to bed
+20:12:28 <jadrian> but I still don't like fail :-/
+20:12:31 <Gahhh> what is "level' ?
+20:12:34 <Pseudonym> Nobody knows what the strata in "high level" vs "low level" languages are.
+20:12:38 <Gahhh> oh
+20:12:51 <Gahhh> You dont get to hear that often tho
+20:13:14 <Pseudonym> I think that "scalable" refers to the size of the project budget, personally.
+20:13:22 <Gahhh> I like "leverage"
+20:13:40 <Pseudonym> "Pattern" is no good because it actually means something.
+20:13:45 <Gahhh> Yeah
+20:14:01 <Gahhh> I dont know much about it, but "aspect" is cool sounding.
+20:14:07 <Gahhh> AOO that is
+20:14:10 <Pseudonym> Right.
+20:14:28 <Gahhh> anything with beans and enterprises goes over my head
+20:14:32 <Pseudonym> "Object" was good because it originally meant something but everyone conveniently forgot what that was.
+20:14:35 <sh10151> Pseudonym: au contraire. "A programming language is low level when its programs require attention to the irrelevant." -- Alan Perlis
+20:14:55 <Gahhh> in that sense, assembly is not low level
+20:14:58 <Pseudonym> For every luminary quote there is an equal and opposite luminary quote.
+20:15:08 <Gahhh> nice 1 Pseudonym
+20:15:17 * sh10151 wonders what this one is
+20:15:19 <sh10151> oh yes
+20:15:39 <sh10151> " A LISP programmer knows the value of everything, but the cost of nothing." -- Alan Perlis
+20:15:40 <Gahhh> you are at work Pseudonym ?
+20:16:49 <sh10151> or perhaps "Purely applicative languages are poorly applicable."
+20:16:54 <sh10151> ooh, fighting words :)
+20:16:59 <Pseudonym> "Unfortunately, this author [...] cannot define the hierarchy that is implied in the use of those phrases.  In moments of skepticism one might suggest that the relation "less efficient than" or "has a bigger grammar than" or "has a bigger compiler than", however none of those phrases suggests an ordering, which is completely consistent with the use of ther term." -- David Parnas
+20:17:12 <Pseudonym> Gahhh: Yes.
+20:17:15 <sh10151> http://www.cs.yale.edu/homes/perlis-alan/quotes.html for enough witticisms for a decade
+20:17:32 <Pseudonym> Yeah, Alan Perlis is definitely the most quotable CS luminary.
+20:17:52 <aj> what's an applicative language?
+20:18:08 <Pseudonym> @foldoc applicative
+20:18:10 <lambdabot> No match for "applicative".
+20:18:12 <Pseudonym> Hmmm.
+20:18:22 <Gahhh> @wikipedia applicative
+20:18:22 <lambdabot> Sorry, I don't know the command "wikipedia", try "lambdabot: @listcommands
+20:18:30 <sh10151> @foldoc applicative language
+20:18:32 <lambdabot> No match for "applicative".
+20:18:32 <lambdabot> *** "language" foldoc "The Free On-line Dictionary of Computing (27 SEP
+20:18:32 <lambdabot> 03)"
+20:18:32 <lambdabot> language
+20:18:33 <lambdabot>      
+20:18:33 <Pseudonym> Right.
+20:18:35 <lambdabot>         1. <language, programming> {programming language}.
+20:18:37 <lambdabot>      
+20:18:39 <lambdabot>         2. <human language> {natural language}.
+20:18:41 <lambdabot> [4 @more lines]
+20:18:43 <sh10151> http://foldoc.doc.ic.ac.uk/foldoc/foldoc.cgi?applicative+language
+20:18:44 <Pseudonym> @foldoc "applicative language"
+20:18:45 <lambdabot> *** "applicative language" foldoc "The Free On-line Dictionary of Computing
+20:18:47 <lambdabot> (27 SEP 03)"
+20:18:49 <lambdabot> applicative language
+20:18:51 <lambdabot>      
+20:18:53 <sh10151> "A functional language. Sometimes used loosely for any declarative language though logic programming languages are declarative but not applicative."
+20:18:53 <lambdabot>         <language> A {functional language}.  Sometimes used loosely
+20:18:55 <lambdabot>         for any {declarative language} though {logic programming}
+20:18:57 <lambdabot>         languages are declarative but not applicative.
+20:18:58 <sh10151> doh, sorry
+20:18:59 <lambdabot>      
+20:19:01 <lambdabot> [3 @more lines]
+20:19:23 <Gahhh> lambda calculus descendant ?
+20:21:35 <sh10151> so is OOP on the way out?
+20:21:35 <bluegods> hey so do u guys think I i can start a profitable company using haskell to solve computer related problems in public and private sector?
+20:21:48 <Pseudonym> sh10151: No more than structured programming.
+20:22:00 <Pseudonym> bluegods: I dunno.  How good are you at running profitable companies?
+20:22:06 <sh10151> "on the way out" meaning out of vogue
+20:22:15 <sh10151> by the purveyors of software fashion
+20:22:16 <Gahhh> sh10151, not likely
+20:22:21 <sh10151> i dunno
+20:22:21 <Pseudonym> Yeah, OO is _so_ five minutes ago.
+20:22:24 <sh10151> even the big vendors are pushing SOA and pi calculus :)
+20:22:45 <Pseudonym> More seriously, OO will be around as long as GUIs are around.
+20:22:53 <Pseudonym> There's a reason they grew up together.
+20:22:57 <sh10151> not that any programmers or architects purchasing their products understand the issues
+20:23:04 <sh10151> oh yeah, good point
+20:23:19 <Pseudonym> And as long as technical specs are presented as object models.
+20:23:24 <Pseudonym> DOM being a good example.
+20:23:25 <Gahhh> OO has so much tool and experience/comfort support behind it that even when people realise it's not the best tool, it will linger around longer than anybody likes.
+20:23:29 <sh10151> though Javascript is pretty handy for GUI
+20:23:31 <gzl> I think there's some company called Galois that uses Haskell a lot
+20:23:40 <Pseudonym> sh10151: JavaScript is object-oriented.
+20:23:49 <sh10151> not the way I program it!
+20:23:53 <Pseudonym> Yeah, but everyone at Galois is smarter than you.
+20:24:14 <Pseudonym> Fergus and Mark Shields work there, and they're both smarter than me.
+20:24:16 <Gahhh> are they smarter than people at inria too ?
+20:24:27 <Pseudonym> I don't know anyone at INRIA, so I can't comment.
+20:24:30 <sh10151> no inheritance, no encapsulation, 
+20:24:35 <sh10151> what else is big in OOP?
+20:24:38 <sh10151> I forget
+20:24:42 <Gahhh> subtyping and dynamic dispatch
+20:25:06 <Pseudonym> I know, because I've worked with both of them.
+20:25:13 <sh10151> none of that in my javascript either!
+20:25:18 <sh10151> lots of closures though
+20:25:22 <sh10151> and prototypes
+20:25:25 <Pseudonym> Nobody understood Mark Shields' honours thesis.  Including his supervisor, I suspect.
+20:25:33 <Gahhh> url ?
+20:25:37 <bluegods> POLYMORPHISM
+20:25:38 <bluegods> LOL
+20:25:40 <Gahhh> or should I google
+20:25:44 <bluegods> oo scares the hell outa me
+20:25:51 <bluegods> except when described by squeak
+20:26:01 <Pseudonym> http://www.cse.ogi.edu/~mbs/
+20:26:09 <bluegods> I just got a job selling auto insurance here in CA
+20:26:11 <Pseudonym> Can't see his thesis there, ghough.
+20:26:20 <bluegods> <---intellectually stunted since UCLA with econ
+20:26:33 <bluegods> 97
+20:26:38 <bluegods> wow 8 years ago
+20:26:40 <bluegods> im old
+20:26:45 <bluegods> :(
+20:26:52 <Gahhh> lol "let name = mbs in name@galois.com" ahaha
+20:27:02 <gzl> Pseudonym: *everyone* is smarter?
+20:27:24 <sh10151> heh
+20:27:33 <Pseudonym> gzl: OK, the janitor at Galois might not be as smart.
+20:27:35 <sh10151> SyntaxPolice isn't on so it's no fun to dis him
+20:27:41 <gzl> woohoo.
+20:30:04 <Gahhh> Pseudonym, I found Shields' resume via google scholar lol
+20:30:32 <Gahhh> "Types Modes and Termination" for prolog
+20:30:42 <Pseudonym> That's the one.
+20:30:53 <Gahhh> I dont know Prolog sadly
+20:31:11 <Pseudonym> Don't be sad.  It's better that you don't.
+20:32:01 <Gahhh> A coworker of mine at work was interested in it. But I think he gave up on it.
+20:36:26 <Pseudonym> How many Prolog programmers does it take to change a lightbulb?
+20:36:28 <Pseudonym> false.
+20:36:59 <Gahhh> ba dum tiss
+20:37:56 <monochrom> haha
+20:39:06 <Gahhh> I still cannot believe that ocaml supports arrays only up to 4.1 million elements on 32 bit platforms.
+20:41:57 <monochrom> Tomorrow is another day.
+20:42:31 <Pseudonym> 4.1 million should be enough for anybody.
+20:48:06 <tintin> Is haskell a good language for machine translation ? 
+20:49:43 <tintin> something like pascal to c, or french to english ? would be the best choice for an engine ?
+20:51:05 * esap thinks Haskell is a very good choice for writing compilers.
+20:51:45 <tintin> hmmz this woudn't be a compiler would it ? its a translator ... 
+20:52:58 <Gahhh> There are some similarities. I am not sure what makes a language the best for translation, but I dont see why haskell would be a bad choice.
+20:54:23 <tintin> the advantages would be easy maintainance of the algorithm i guess 
+21:02:52 <Pseudonym> Pascal to C is definitely compilation.
+21:03:05 <Pseudonym> The only difference between compilation and translation is how formal the source and target languages are.
+21:04:49 <bluegods> hmm
+21:04:58 <bluegods> are you a computer phd pseudo?
+21:05:21 <bluegods> there seems to be a definite academic bent in here
+21:05:25 <bluegods> I kinda like it
+21:05:37 <bluegods> anyone watching apprentice 3 college vs no college?
+21:05:45 <sh10151> i like contrasting the discussion here with #Perl
+21:06:01 <bluegods> wel
+21:06:06 <bluegods> im banned from there :(
+21:06:14 <Pseudonym> bluegods: Nope.
+21:06:17 <Pseudonym> I'm an interested amateur.
+21:06:25 <bluegods> cool
+21:06:30 <Pseudonym> I don't hang around in #Perl any more.
+21:06:40 * Pseudonym used to be a serious Perl programmer once upon a time
+21:06:42 <bluegods> is there a business chat on irc?
+21:06:43 <Pseudonym> Well, I got paid for it, anyway.
+21:06:48 <bluegods> really?
+21:06:52 <bluegods> what an hour?
+21:07:04 <Pseudonym> University wages.  Translation: Not enough.
+21:07:11 <bluegods> Im selling auto insurance and would love to be a cash programmer
+21:08:54 <bluegods> lisp seems interesting but haskell also seems fascinating and sheesh i dont even program perl ;(
+21:08:59 <Gahhh> standard recipe for that is microsoft VB/VC++ and/or .net versions
+21:09:58 <bluegods> how does one get thier mits on that stuff
+21:10:24 <Gahhh> via college preferably
+21:10:56 <bluegods> hmm
+21:11:02 <Gahhh> not that they particularly teach that, but a college degree is highly correlated with continous employment in this sector
+21:11:24 <bluegods> what about building dominating software company from haskell and freebsd
+21:11:40 <Pseudonym> Well if you do that, I think you can probably get employment.
+21:11:59 <Pseudonym> But let me ask you again: How good are you at running companies?
+21:12:01 <bluegods> gosh i dunno i never done this b 4
+21:12:12 <bluegods> oh ive never run a company atoll
+21:12:19 <bluegods> I have an econ degree from UCLA
+21:12:22 <bluegods> n stuff
+21:12:26 <Pseudonym> Well that's a start.
+21:12:30 <bluegods> but no real biz experience
+21:12:47 <Pseudonym> But you actually need something to sell, or at least know what you're planning to sell.
+21:12:56 <Gahhh> bluegods, you can get hired by consulting companies. They were hiring econ majors when I was in school.
+21:13:20 <bluegods> such as accenture?
+21:13:26 <bluegods> that is a good idea
+21:13:28 <Pseudonym> Well if you're an economics major, maybe you can answer this question.
+21:13:32 <Pseudonym> How can I get a job as a quant?
+21:13:38 <Gahhh> yes. I went to seminars of deloitte-touche, etc.
+21:13:47 <bluegods> quantitative analysis?
+21:13:51 <Gahhh> A quant ? It's politically incorrect, sir.
+21:13:56 <bluegods> lol
+21:14:01 * Pseudonym laughs
+21:14:10 <bluegods> well I am only a wanna be management consultant
+21:14:17 <Pseudonym> I mean one of those people who get paid obscene amounts of money for producing mathematical models of artificial things.
+21:14:30 <bluegods> lol
+21:14:33 * Pseudonym could do that
+21:14:38 <bluegods> I never knew such a scam existed
+21:14:39 <Gahhh> Pseudonym, stanford has an economics/mathematics program
+21:14:49 <bluegods> math is easy
+21:14:55 <bluegods> but usible software is hard
+21:14:56 <Gahhh> err. no.
+21:15:02 <Pseudonym> According to slashdot, all you need is a theoretical physics degree.
+21:15:11 <Gahhh> ah. I remember that post now.
+21:15:14 <Pseudonym> bluegods: If you think maths is easy, you're in the right channel.
+21:15:17 <bluegods> thats a very useless degreee these days
+21:15:19 <Gahhh> Nah. the guy is a good mathematician.
+21:15:27 <Pseudonym> Sure he is.
+21:15:43 <bluegods> I was doing calculus as a soph in high school and I was not even self aware
+21:15:50 <Gahhh> btw, I don't think math is easy.
+21:15:51 <Pseudonym> And he's already got a head start by being a theoretical physicist.  He's used to playing with things that have little to do with the real world.
+21:16:00 <bluegods> some kids have parents telling them how to grad their MBA harvard when they are 14
+21:16:07 <Gahhh> lol. "little to do with the real world".
+21:16:09 <bluegods> so got huge plan
+21:16:09 <Pseudonym> I think maths is easy.  It's the details which are hard.
+21:16:17 <Gahhh> cheap wordplay.
+21:16:50 * Gahhh spent two days on an optimization problem at work. 
+21:16:58 <bluegods> I love big blonde women
+21:17:02 <bluegods> but there is a shortage
+21:17:03 <bluegods> :)
+21:17:06 <Gahhh> I dont think so
+21:17:26 <Pseudonym> Go to San Francisco.
+21:17:27 * sh10151 actually coded a binary search for massive improvement in speed at work
+21:17:33 <Pseudonym> The straight women outnumber the straight men.
+21:17:42 <Gahhh> That is a lie. 
+21:17:47 * Gahhh lives near SF
+21:17:53 <Pseudonym> No, it is not a lie.  It is a mistake.
+21:17:55 <sh10151> not fair that it was javascript in IE, so it needed the help
+21:18:13 <Pseudonym> Lies are intended to deceive.  I am not malicious, merely ignorant.
+21:18:38 <Gahhh> You know that it is not true, so it is a lie.
+21:18:46 <Pseudonym> Well I do now that you've told me.
+21:19:03 <wli> Intention is unobservable.
+21:19:04 <bluegods> wow
+21:19:07 <bluegods> cool concept
+21:19:17 <Gahhh> wli, I can read his mind.
+21:19:24 <monochrom> what cool concept? that false statements are lies?
+21:19:41 <Pseudonym> Lies are false statements, but the converse is not necessarily true.
+21:19:54 <Pseudonym> Merely being false is a necessary but not sufficient condition.
+21:20:11 <Gahhh> deliberate false statements are different
+21:20:47 <Pseudonym> wli: My intention was actually a quantum superposition.
+21:21:00 <Pseudonym> But now that it's been observed, it has collapsed into a specific eigenstate.
+21:21:20 <bluegods> ok
+21:21:34 * ozone is amazed
+21:21:35 <bluegods> women to me are cool, a place where im outnumbered is very cool :)
+21:21:42 <bluegods> yeah!
+21:21:44 <bluegods> :)
+21:21:46 <ozone> getting information abuot my postgraduate enrolment progress actually took less than 2 minutes
+21:21:55 <Pseudonym> If your women are cold, you probably need to find other women.
+21:22:00 <ozone> must be a world-first for any university
+21:22:33 <bluegods> really?
+21:22:37 <Pseudonym> Actually, when I was at Monash, we managed to get all student results out on time, with no slashdot effect.
+21:22:40 <bluegods> Im considering an MBA
+21:22:43 <Pseudonym> We cheated.
+21:22:45 <bluegods> sicne im selling auto insurance
+21:23:00 <bluegods> I am either ineffective at amrketing a BA econ or I just suck or something
+21:23:04 <Pseudonym> 45,000 students all got their results and the server didn't miss a beat.
+21:23:30 <Pseudonym> We pre-rendered the results into static web pages and faked it so that it looked like it was being generated from the database.
+21:23:32 <ozone> damian conway wrote your web services?
+21:23:37 <Pseudonym> Nope.
+21:23:42 <Pseudonym> I did.
+21:23:59 * Pseudonym did know Damian, though
+21:23:59 <ozone> ooh.  you liar :)
+21:24:12 <Pseudonym> OK, I co-wrote them.  But I definitely wrote the student results system.
+21:24:23 <Pseudonym> My name is on the paper at TPC 4 and everything.
+21:24:33 <bluegods> where are you  guys ?  what university?
+21:24:50 <Pseudonym> I was at Monash at the time.
+21:24:55 <Pseudonym> www.monash.edu.au
+21:25:00 <Pseudonym> In particular: my.monadh.edu.au
+21:25:03 <Pseudonym> monash
+21:25:09 <bluegods> are ozzy women wild
+21:25:23 <Pseudonym> I'm married to an American.  You're asking the wrong person.
+21:25:49 <Pseudonym> Though she is an Australian citizen now.
+21:27:43 <Pseudonym> Oh, hang on.
+21:27:46 <Pseudonym> I see what you meant.
+21:28:03 <Pseudonym> No, most Australian women are perfectly domesticated.  They are toilet trained and everything.
+21:28:15 <bluegods> do they like big tall american men
+21:28:17 <bluegods> :)
+21:28:53 <Pseudonym> Hang on, I'll ask my wife.
+21:29:53 * Pseudonym was curious what they teach economists these days
+21:29:55 <Pseudonym> Now I know.
+21:30:41 <bluegods> lol
+21:30:50 <bluegods> macro micro
+21:30:58 <bluegods> government evil etc
+21:31:03 <Pseudonym> And human feminine wildness.
+21:31:33 * Pseudonym clearly did the wrong degree
+21:35:14 <Pseudonym> Anyway.
+21:35:24 <Pseudonym> How about that Haskell, then.  Jolly good language if you ask me.
+21:47:53 <musasabi> morning
+21:51:55 <monochrom> Haskell is flawed.  Long live mutable states!
+21:52:01 * monochrom hides
+21:54:09 <musasabi> mutable state is not the thing missing from haskell.
+21:54:23 <dons> we've got lots of mutable state
+21:54:26 <Pseudonym> No, it's pointer casting.
+21:54:32 <Pseudonym> I want my pointer casting!
+21:54:37 <dons> yeah. sigh. I miss that soo much
+21:54:52 <dons> but unsafeCoerce# helps relieve the itch
+21:54:56 <Pseudonym> True!
+21:55:09 <dons> all the segfaults you can wish for
+21:55:42 <Pseudonym> How can I change the value of 4 in Haskell?
+21:56:06 <Pseudonym> I miss that feature from Fortran.
+21:56:40 <dons> change the value of 4? to, what, 5?
+21:56:47 <Pseudonym> Yeah, say.
+21:56:54 <dons> wow.
+21:57:04 <monochrom> newtype Funny = Funny Int
+21:57:14 <Pseudonym> Do you not know about this feature of Fortran?
+21:57:44 <dons> no! Fortran has so far eluded me
+21:57:50 <Pseudonym> Ah, you're missing out.
+21:57:58 <Pseudonym> In Fortran, all values are passed by reference.
+21:58:03 <Pseudonym> Including literal constants.
+21:58:20 <monochrom> instance Num Funny where fromInteger 4 = Funny 5 ...
+21:58:25 <monochrom> will that do?
+21:58:37 <Pseudonym> So if you have a function which modifies its argument, and you pass it a literal constant...
+21:58:51 <Pseudonym> It will be different the next time you perform that call.
+21:58:55 <Pseudonym> Say, if it's in a loop.
+21:59:18 <dons> ok, fair enough. hmm... now, since '4' in Haskell is just a closure, maybe we could hack it manually ... unsafeCoerce# style.
+21:59:33 <Pseudonym> Hmm, maybe.
+21:59:45 <dons> though ghc has this tendancy to turn things into inlined C words
+21:59:52 <Pseudonym> Actually, I like monochrom's solution.
+22:00:10 <Pseudonym> But unfortunately it doesn't modify it on the fly.
+22:00:10 <monochrom> heh heh
+22:00:29 <monochrom> yeah, need some unsafe hack
+22:00:52 <Pseudonym> We clearly need unsafeFromInteger#
+22:01:31 <musasabi> Pseudonym: just make Funny numbers be IORefs behind our back (or array indexes to a STUArray)
+22:01:51 <Pseudonym> You'd need to NOINLINE them.
+22:02:05 <dons> it's fairly easy, when consulting the C output, to write individual words of a closure, usually with disastrous results
+22:02:40 <dons> using unsafeCoerce# and writeWordArray#, for example
+22:02:55 <dons> chasing pointers is a little harder, methinks
+22:03:15 <dons> but we've got indexAddrArray#
+22:04:00 <dons> hmm. modifying a static string should be a nice test
+22:06:42 <dons> hmm. it's sitting on the stack. that's a bit harder to get at from user land: Sp[-4]=(W_)("abcdef");
+22:46:49 <ozone> dons: mmm, self-modifying haskell
+22:47:55 <musasabi> Can anyone explain the function of C-- in GHC ?
+22:52:37 <eivuokko> Do you mean http://www.cminusminus.org/index.html ?
+22:52:58 <musasabi> yes.
+22:53:48 <eivuokko> I didn't know it was actually used in ghc.
+22:54:29 <musasabi> Not in 6.2, but it is in 6.4 (i.e. the cvs)
+22:57:03 <musasabi> Seems it is using it as a low level internal representation (e.g. ghc/compiler/cmm/*)
+23:05:43 <WilX> It is kind of assembler.
+23:05:53 <WilX> But with its own compiler and optimizers.
+23:07:03 <WilX> It is a little bit higher level than ordinary assemblers but still close to HW.
+23:09:38 <WilX> http://www.cminusminus.org/extern/man2.pdf
+23:16:32 <musasabi> I know what it is - more to the point - why was it chosen for GHC e.g. instead of the mlrisc stuff.
+23:36:38 <dons> musasabi: it was developed with an eye to replacing the AbstractC phase of GHC, which it now does very nicely
+23:37:13 <dons> it is highly suitable as a target for a functional language, (and simplified ghc a lot in the process)
+23:38:08 <dons> btw, ghc now follows this path: Haskell -> Core -> Stg -> Cmm -> {C,C--,Asm}
+23:38:44 <musasabi> what route is bytecode produced?
+23:38:51 <dons> whereas it used to be: ... Stg -> AbsC -> C, and Stg -> AbsC -> Stix -> Asm.
+23:39:14 <dons> bytecode isn't produced these days, is it? or rather, it only happens internally, after the Stg phase
+23:39:32 <musasabi> (well ghci produces it doesn't it)
+23:39:34 <musasabi> and th.
+23:39:49 <dons> internally, in the compiler. it isn't ever emitted, afaik
+23:40:00 <musasabi> true.
+23:40:09 <dons> so if you invoke ghci you get: Core -> Stg -> ByteCode -> Value
+23:40:17 <dons> roughly, I think
+23:40:43 <musasabi> thanks.
+23:41:06 <dons> C--, and it's use as a type in ghc as Cmm, is really ideal for ghc. I'd always just write a C-- backend after my experience with Cmm and ghc.
+23:41:48 <Gahhh> Cmm = ?
+23:42:30 <dons> Cmm is a superset of C--, used as the target representation when compiling funcitonal code to imperitive code, inside ghc
+23:43:03 <dons> we used to use a type called 'Abstract C', which had around 60 expressionn forms (!)
+23:43:40 <dons> now Cmm means we can compile all of Haskell to about 8 forms
+23:43:50 <dons> sorry, 14
+23:43:53 <musasabi> a C-- frontend to gcc wouldn't be too hard either.
+23:44:00 <musasabi> I think.
+23:44:10 <Gahhh> Does this substitution have any improvements or penalties on performance ?
+23:44:22 <dons> I believe the C-- guys are working on a C-- -> C genertor, too
+23:44:29 <dons> so that's the gcc frontend
+23:44:46 <musasabi> dons: no, C-- -> C is a lossy conversion, not something I would want to do.
+23:45:03 <musasabi> dons: iirc C-- has more aliasing information than C.
+23:45:12 <dons> but it is useful for bootstrapping new architectures.
+23:45:20 <dons> ghc itself emits C from C--
+23:45:30 <dons> because we don't use all the fancy parts of C--
+23:45:58 <dons> Gahhh: I think the native code gen got 1-2% faster, if I remember correctly
+23:46:11 <dons> such that -fasm is now roughly equiv to -fvia-C
+23:46:19 <dons> with -O
+23:47:06 <dons> I recommend C-- to all of you :)
+23:47:54 <Gahhh> all of us who write compilers ?
+23:52:24 <bluegods> HEY PEEPS
+23:52:28 <bluegods> HOWS IT GOING
+23:52:47 <bluegods> :)
+23:53:39 <dons> Gahhh: guess so. but it is good for random people on the street too :P
+23:54:44 * Gahhh excuses dons' enthusiasm and motivates him even further
+23:54:52 <dons> and it is a lot easier to understand how to compile Haskell now that you can see the C-- target (-ddump-cmm) it's more intuitive
+23:55:18 <dons> more than the C+cpp macro form, anyway

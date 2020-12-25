@@ -1,0 +1,1360 @@
+00:05:05 <dminuoso> % :t indexed
+00:05:06 <yahb> dminuoso: Indexable i p => p a b -> i -> a -> b
+00:06:13 <dminuoso> "Build a function from an indexed function."
+00:06:43 <dminuoso> I've been staring at this for a while now, can someone give me a hint how to make sense of this?
+00:07:22 <dminuoso> Given the instances, this seems to be an overloading for both `const` or `runIndexed`, how is const an indexed function?
+00:08:03 <c_wraith> it returns a function that ignores the index
+00:08:39 <c_wraith> Don't worry about that class much.  treat it as internal to how indexed optics work
+00:09:03 <dminuoso> Heh, Im intentionally worrying about the internals, since Ive been diving in to port some functionality over to optics
+00:09:16 <c_wraith> It's just how it provides a uniform interface between Indexed i a b and (a -> b)
+00:10:19 <dminuoso> Perhaps I should rephrase the question then.
+00:10:25 <dminuoso> withIndex :: (Indexable i p, Functor f) => p (i, s) (f (j, t)) -> Indexed i s (f t)
+00:10:33 <dminuoso> withIndex f = Indexed $ \i a -> snd <$> indexed f i (i, a)
+00:10:51 <dminuoso> In what instance is this called with a function rather than Indexed?
+00:10:56 <dminuoso> (This is sort of hard to grep for)
+00:11:25 <dminuoso> (I guess the question applies to any Indexable optic, not just withIndex)
+00:13:40 <dminuoso> Phrased differently, when would you eliminate an Indexable optic with a function?
+00:13:56 <c_wraith> you can use it to fake an index, I suppose.
+00:25:58 <dminuoso> c_wraith: How would that even work?
+00:26:13 <dminuoso> I mean if I look at const, Id rather think its about *dropping* the index
+00:26:33 <dminuoso> maybe this is for allowing indexable optics as a non-indexed optics?
+00:28:40 <dminuoso> Because the choice of whether f is Indexed or (->) is done at the elimination site, not the optics definition
+00:29:07 <c_wraith> actually, if you chase the arrows around enough... *most* uses of withIndex will be using the (->) instance
+00:29:25 <dminuoso> Do you have an example? Im chasing ghosts here in lens.
+00:34:23 <dminuoso> Aha, I think Im getting somewhere
+00:34:50 <dminuoso> % let v l = getConst . l Const
+00:34:51 <yahb> dminuoso: ; <interactive>:123:5: warning: [-Wname-shadowing] This binding for `v' shadows the existing binding defined at <interactive>:122:5
+00:35:29 <c_wraith> I mean, the first example in the docs...
+00:35:45 <c_wraith> > [10, 20, 30] ^.. ifolded . withIndex @_ @(->)                         [(0,10),(1,20),(2,30)]
+00:35:47 <lambdabot>  <hint>:1:28: error:
+00:35:47 <lambdabot>      <hint>:1:28: error:
+00:35:47 <lambdabot>          Pattern syntax in expression context: withIndex@_
+00:35:53 <c_wraith> hah.  oops.
+00:36:01 <dminuoso> % :set -XTypeApplications
+00:36:01 <yahb> dminuoso: 
+00:36:06 <dminuoso> % [10, 20, 30] ^.. ifolded . withIndex @_ @(->)
+00:36:06 <yahb> dminuoso: ; <interactive>:127:1: warning: [-Wtype-defaults]; * Defaulting the following constraints to type `Integer'; (Show a0) arising from a use of `print' at <interactive>:127:1-45; (Num a0) arising from a use of `it' at <interactive>:127:1-45; * In a stmt of an interactive GHCi command: print it; [(0,10),(1,20),(2,30)]
+00:36:14 <c_wraith> anyway.
+00:36:36 <c_wraith> The first example in the docs is using the (->) instance for Indexable
+00:37:14 <dminuoso> c_wraith: Right! So Im right after all.
+00:37:29 <dminuoso> It's (^..) that demands (->) here
+00:37:49 <c_wraith> yes.
+00:38:06 <c_wraith> compare to...  [10, 20, 30] ^.. ifolded . withIndex @_ @(Indexed Int) . withIndex @_ @(->)
+00:38:08 <dminuoso> So itoListOf would pick Indexed, and toListOf would just force a regular van laarhoven functor arrow in there
+00:39:23 <dminuoso> ifoldrOf l f z = flip appEndo z . getConst #. l (Const #. Endo #. Indexed f)
+00:39:38 <dminuoso> foldrOf l f z = flip appEndo z . foldMapOf l (Endo #. f)
+00:40:20 <dminuoso> err
+00:40:22 <dminuoso> foldMapOf l f = getConst #. l (Const #. f)
+00:40:24 <dminuoso> There.
+00:41:12 <dminuoso> c_wraith: My difficulty was just chasing the code with all these coerces in place. :(
+00:41:20 <dminuoso> Thanks, I think this helped
+00:42:18 <kuribas> couldn't coerce make an invalid datatype?  For example, of you change the Ord instance in a Map, the Map could become invalid?
+00:42:54 <merijn> kuribas: Not if you set roles correctly
+00:43:00 <dminuoso> kuribas: That's not coerces fault, if you rewrapped manually with newtype the same thing would happen.
+00:43:20 <merijn> dminuoso: Coerce handes that correctly if you set roles correctly
+00:43:22 <kuribas> merijn: so you cannot coerce a Map?
+00:43:52 <merijn> kuribas: If the key type is nominal(not 100% I got that role right) as it should be, that's right?
+00:44:02 <merijn> kuribas: Or rather, you can only coerce the values, not the keys
+00:44:15 <merijn> Although they fucked it up by making the default role unsafe
+00:44:26 <kuribas> merijn: right.  Does ghc infer it, or do you need to manually specify roles?
+00:45:25 <merijn> You need to manually specify them to be safe
+00:45:31 <merijn> The inferred roles are unsafe
+00:45:34 <merijn> https://downloads.haskell.org/ghc/latest/docs/html/users_guide/glasgow_exts.html#roles
+00:45:58 <kuribas> right, thanks
+01:25:47 <Cale> If it helps any, that is entirely equivalent to  replicate 100 (product (map (*3) (zipWith max [1,2,3,4,5] [4,5,6,7,8])))
+01:25:55 <Cale> oops
+01:26:06 <Cale> Apparently I was scrolled all the way to the top of my buffer
+01:26:12 <merijn> Cale: Can I buy your time machine? :D
+01:33:12 <dminuoso> merijn: Wrong tense. Will I have bought your time machine? Cale can find out.
+01:34:04 <merijn> ;)
+01:37:30 * Lycurgus deplores the apparent disappearance of configurable pc vendors
+01:38:13 <Cale> "One of the major problems encountered in time travel is not that of becoming your own father or mother. There is no problem in becoming your own father or mother that a broad-minded and well-adjusted family can't cope with. There is no problem with changing the course of history—the course of history does not change because it all fits together like a jigsaw. All the important changes have happened before th
+01:38:13 <Cale> e things they were supposed to change and it all sorts itself out in the end.
+01:38:14 <Cale> The major problem is simply one of grammar, and the main work to consult in this matter is Dr. Dan Streetmentioner's Time Traveler's Handbook of 1001 Tense Formations. It will tell you, for instance, how to describe something that was about to happen to you in the past before you avoided it by time-jumping forward two days in order to avoid it. The event will be descibed differently according to whether you are 
+01:38:16 <Cale> talking about it from the standpoint of your own natural time, from a time in the further future, or a time in the further past and is futher complicated by the possibility of conducting conversations while you are actually traveling from one time to another with the intention of becoming your own mother or father.
+01:38:22 <Cale> Most readers get as far as the Future Semiconditionally Modified Subinverted Plagal Past Subjunctive Intentional before giving up; and in fact in later aditions of the book all pages beyond this point have been left blank to save on printing costs."
+01:38:27 <int-e> Hitchhiker :)
+01:40:10 <Lycurgus> the problem with time travel per se is its nonsense (literally) because time as a concept is just one thing AFTER another
+01:40:20 <Lycurgus> *it's
+01:41:00 <Lycurgus> events running backward makes sense in the mind due to its facility with concepts
+01:41:24 <Lycurgus> but the notion of actually doing it is an abuse of thought
+01:42:07 <Lycurgus> another case (like truth) of important concepts fuddled
+01:43:21 <Lycurgus> because goedel in one case, einstein/GR/SR in the other
+01:43:44 <Rembane> So good 
+01:50:50 <Lycurgus> (in contrast to differential forward time travel at relativistic speeds, which makes perfect sense)
+01:52:26 <Lycurgus> any opinions on Control.Monad.Logic as a (pure) prolog?
+01:56:45 <Echosolace> I'm having some trouble with basic level understanding. Can someone check my thought process here?
+01:56:50 <Echosolace> Function in question:
+01:56:53 <Echosolace> search :: (Eq a) => [a] -> [a] -> Bool  
+01:56:53 <Echosolace> search needle haystack =   
+01:56:53 <Echosolace>     let nlen = length needle  
+01:56:53 <Echosolace>     in  foldl (\acc x -> if take nlen x == needle then True else acc) False (tails haystack)  
+01:57:08 <lortabac> Lycurgus: I am not too familiar with Control.Monad.Logic, but I suppose you also need something like unification-fd to make a Prolog
+01:57:35 <Echosolace> So, from the top... We define the typeclass of the function we just named, search.
+01:57:44 <Lycurgus> it has unification i believe but just getting acquainted
+01:58:04 <Echosolace> It has typeclass of equateable. It takes two lists as parameters and returns a boolean.
+01:58:10 <Echosolace> Is that a fair enough understanding so far?
+01:58:12 <Lycurgus> just breaks a lot of commonly used stuff
+01:59:09 <Lycurgus> but i'm guessing you were referring to dependent types
+01:59:38 <lortabac> Echosolace: 'Eq a =>' is not a type class definition. It is a constraint on type 'a'
+02:00:25 <Echosolace> Interesting. Ok.
+02:00:37 <lortabac> Echosolace: you can read this type as: '[a] -> [a] -> Bool' where 'a' is an instance of 'Eq'
+02:00:51 <Echosolace> Thank you thank you.
+02:01:21 <ski> Echosolace : you can use a logical operation, instead of the `if'-`then'-`else'
+02:01:25 <Echosolace> Moving down, search needle haystack = 
+02:01:47 <Echosolace> search then parameter 1 and then parameter 2 =
+02:02:00 <Echosolace> I hear "and then" is a bad way to phrase it..
+02:02:32 <Echosolace> Anyways, I believe I'm correct in that we are just naming the parameters there..
+02:02:39 <ski> yes
+02:03:55 <Echosolace> let nlen = length needle - This is predefining a function before an in call I guess. Taking the length of the predefined needle variable.
+02:04:10 <merijn> Echosolace: You can think of typeclass constraints as conditional/prerequisites of types. So "foo :: Eq a => a -> a -> Bool" can be read as "IF 'a' is an instance of Eq THEN 'foo :: a -> a -> Bool' ELSE type error"
+02:04:43 <ski> Echosolace : not defining a function, but a integer (in this case). yes, it's locally defined
+02:05:14 <Echosolace> And now the meat: 
+02:05:15 <Echosolace>  in  foldl (\acc x -> if take nlen x == needle then True else acc) False (tails haystack)  
+02:05:49 * hackage ngx-export-tools 0.4.9.0 - Extra tools for Nginx haskell module  https://hackage.haskell.org/package/ngx-export-tools-0.4.9.0 (lyokha)
+02:06:24 <Echosolace> in foldl (moving from left of the array.., adding to an accumulator..., needs a first instance which is defined as False after the )
+02:06:55 <Echosolace> I'm having trouble verbalizing ->
+02:07:43 <Echosolace> x is the head of the list in this situation?
+02:08:12 <ski> `x' stands for each element of the list, in turn
+02:08:21 <Echosolace> Thank you.
+02:08:59 <ski> you can read `->' here as "maps to". so `\acc x -> ..acc..x..' is "the function that, when given two parameters, call them `acc' and `x', maps them to `..acc..x..'"
+02:09:27 <Echosolace> I'll run that through my head a bit, thanks.
+02:09:59 <ski> (`acc' is the "current result so far" (before taking `x' into account). `..acc.x..' is the "updated result (having taken `x' into account)")
+02:13:14 <ski> > foldl (\str n -> "(" ++ str ++ " * " ++ showsPrec 10 n "" ++ ")") "1" [2,3,5,7]
+02:13:17 <lambdabot>  "((((1 * 2) * 3) * 5) * 7)"
+02:32:22 <Echosolace> I can't get this code to (compile? Is that even the right word?) compile. From LYAH:
+02:32:24 <Echosolace> search :: (Eq a) => [a] -> [a] -> Bool  
+02:32:24 <Echosolace> search needle haystack =   
+02:32:24 <Echosolace>     let nlen = length needle  
+02:32:24 <Echosolace>     in  foldl (\acc x -> if take nlen x == needle then True else acc) False (tails haystack) 
+02:32:39 <Echosolace> First error suggesting that I change tails to tail...
+02:32:47 <Echosolace> When I do that, more errors.
+02:33:05 <Echosolace> Just wanting to play with that function so I can try to get a better understanding of how it works.
+02:33:52 <Echosolace> Anybody have a suggestion?
+02:34:48 <ski> @type let search :: Eq a => [a] -> [a] -> Bool; search needle haystack = let nlen = length needle  in  foldl (\acc x -> if take nlen x == needle then True else acc) False (tails haystack)  in  search
+02:34:49 <lambdabot> Eq a => [a] -> [a] -> Bool
+02:35:03 <ski> what's the (first) error you get ?
+02:35:19 <Echosolace> <interactive>:7:78: error:
+02:35:20 <Echosolace>     * Variable not in scope: tails :: [a] -> t0 [a]
+02:35:20 <Echosolace>     * Perhaps you meant `tail' (imported from Prelude)
+02:35:26 <ski> @index tails
+02:35:26 <lambdabot> GHC.OldList, Data.List, Data.ByteString.Lazy, Data.ByteString.Lazy.Char8, Data.ByteString, Data.ByteString.Char8, Data.Sequence
+02:35:31 <Echosolace> After fixing this is the second error:
+02:35:33 <ski> use
+02:35:36 <int-e> import Data.List
+02:35:37 <ski>   import Data.List
+02:35:45 <Echosolace> Oohhhhhh
+02:35:49 <Echosolace> Yeah that makes sense...
+02:36:00 <int-e> Don't follow ghc's suggestions blindly, it has almost no clue.
+02:36:38 <int-e> > tails "abc"
+02:36:40 <lambdabot>  ["abc","bc","c",""]
+02:36:44 <int-e> > tail "abc"
+02:36:46 <lambdabot>  "bc"
+02:37:18 <int-e> (that's a huge difference)
+02:37:19 <Echosolace> Domo
+02:38:28 <Echosolace> I'm attempting this... 
+02:38:29 <Echosolace> Prelude> :{
+02:38:30 <Echosolace> Prelude| import Data.list
+02:38:30 <Echosolace> Prelude| search :: (Eq a) => [a] -> [a] -> Bool
+02:38:30 <Echosolace> Prelude| search needle haystack =
+02:38:30 <Echosolace> Prelude|     let nlen = length needle
+02:38:31 <Echosolace> Prelude|     in  foldl (\acc x -> if take nlen x == needle then True else acc) False (tails haystack)
+02:38:32 <Echosolace> Prelude| :}
+02:38:44 <ski> Echosolace : anyway, you should use a logical operator, instead of an `if'-`then'-`else' with `True' or `False' as one (or both) branches
+02:39:25 <Echosolace> Just trying to still wrap my head around this stuff. I'm still working on understanding the in part of that function.
+02:39:38 <Echosolace> But I still can't run it. Getting a parse error on input 'Data.list'
+02:39:42 <Echosolace> Did I import wrong?
+02:39:51 <ski> Echosolace : it might also be nice to put definitions in a source file (using your favorite text editor), and then (after saving) (re)load that file into the interactor
+02:39:55 <ski> should be `Data.List'
+02:40:04 <Echosolace> Ok thanks.
+02:40:05 <merijn> Echosolace: tbh, I would recommend not trying to write large definitions in ghci, just write it in a file and ":load" it
+02:40:22 <Echosolace> Ok, I'll do that.
+02:43:09 <ski> > "abc" `isPrefixOf` "abdef"
+02:43:11 <lambdabot>  False
+02:43:23 <Echosolace> Ok, now that I've got the search function loaded in my new sandbox.hs file into GHCI, I figure I could run search of "apple" over a list of fruits.
+02:43:48 <ski> > "abc" `isPrefixOf` "abcdef"
+02:43:50 <lambdabot>  True
+02:44:43 <Echosolace> The meat of this function is: 
+02:44:44 <Echosolace> foldl (\acc x -> if take nlen x == needle then True else acc) False (tails haystack) 
+02:45:34 <Echosolace> nlen is the length of the word apple, which is why I wonder if this search function could apply...
+02:46:11 <ski> if `take nlen x == needle' is true, then we give `True', else we give `acc'
+02:46:36 <int-e> any (needle `isPrefixOf`) (tails haystack) <-- what I might write if I didn't know about `isInfixOf`.
+02:46:49 <ski> so `if take nlen x == needle then True else acc' is true if (and only if) ... ? (something about `take nlen x == needle' and `acc')
+02:46:58 <ski> Echosolace : can you fill in the "..." ?
+02:47:24 <Echosolace> ... to the search function. 
+02:47:34 <Echosolace> Err wait... disregard
+02:48:04 <Echosolace> nlen of apple is 5.
+02:49:29 <Echosolace> Oh man, I need some more time... Nevermind.
+02:57:43 <Echosolace> My search of my fruit over my fruitlist was successful, but my understanding about how the meat of the function progresses is where I am confused... For reference again:
+02:57:45 <Echosolace> in  foldl (\acc x -> if take nlen x == needle then True else acc) False (tails haystack) 
+02:57:58 <Echosolace> So, foldl is a binomial function.
+02:59:04 <Echosolace> From LYAH:  The binary function is applied between the starting value and the head of the list. 
+02:59:36 <Echosolace> So foldl is applying this function to the head of the list:
+02:59:37 <Echosolace> (\acc x -> if take nlen x == needle then True else acc
+02:59:46 <Echosolace> )
+02:59:59 <Echosolace> is that correct?
+03:00:23 <ski> Echosolace : not "binomial". you could say "binary", yes
+03:00:31 <Echosolace> Oops
+03:00:32 <Echosolace> Binary.
+03:00:49 <ski> yes, it's first applied to the initial accumulator, and the first element of the list. producing the next version of the accumulator
+03:01:18 <ski> then it's applied again, to that accumulator, and the next element of the list, and so on. final version/value of the accumulator is the overall result
+03:01:49 <Echosolace> Ok... so at first the function is applied to the initial value of False?
+03:01:51 <ski> (a binomial is a kind of polynomial)
+03:02:02 <ski> yes
+03:02:09 <Echosolace> Huh... ok.
+03:03:08 <ski> take this example
+03:03:16 <Echosolace> O god.
+03:03:22 <Echosolace> Be gentle.
+03:03:47 <ski> you can compare with the implementation of `foldl'
+03:03:49 <ski> @src foldl
+03:03:50 <lambdabot> foldl f z []     = z
+03:03:50 <lambdabot> foldl f z (x:xs) = foldl f (f z x) xs
+03:04:41 <ski> and remember that `[2,3,5,7]' is syntactic sugar for `2:3:5:7:[]' (which means / is parsed as `2:(3:(5:(7:[])))', because `:' is specified as an "right-associative" infix operator)
+03:04:59 <Echosolace> I got that last bit at least.
+03:05:01 <ski> so, consider a definition like
+03:05:17 <ski>   sum = foldl (\acc n -> acc + n) 0
+03:05:23 <ski> which could even be abbreviated as
+03:05:28 <ski>   sum = foldl (+) 0
+03:05:38 <ski> now, the example
+03:05:43 <Echosolace> Following.
+03:05:56 <ski>      sum [2,3,5,7]
+03:06:06 <ski>   =  sum (2:3:5:7:[])
+03:06:16 <ski>   =  foldl (+) 0 (2:3:5:7:[])
+03:06:30 <ski>   =  foldl (+) (0 + 2) (3:5:7:[])
+03:06:44 <ski>   =  foldl (+) 2 (3:5:7:[])
+03:06:53 <ski>   =  foldl (+) (2 + 3) (5:7:[])
+03:06:55 <Echosolace> Then 2 + 3 and then the next iteration
+03:06:57 <Echosolace> Yep
+03:06:57 <ski>   =  foldl (+) 5 (5:7:[])
+03:07:05 <ski>   =  foldl (+) (5 + 5) (7:[])
+03:07:10 <ski>   =  foldl (+) 10 (7:[])
+03:07:18 <ski>   =  foldl (+) (10 + 7) []
+03:07:23 <ski>   =  foldl (+) 17 []
+03:07:25 <ski>   =  17
+03:07:41 <Echosolace> Thanks. Although what's tripping me up is involving False as the accumulator.
+03:07:50 <Echosolace> (\acc x -> if take nlen x == needle then True else acc)
+03:08:06 <ski> so, you're working your way, from the left to the right, combining the initial "seed" / accumulator, with one element at a time, until you've gone through them all
+03:08:10 <ski> well
+03:08:35 <ski> <ski> if `take nlen x == needle' is true, then we give `True', else we give `acc'
+03:08:38 <ski> <ski> so `if take nlen x == needle then True else acc' is true if (and only if) ... ? (something about `take nlen x == needle' and `acc')
+03:08:41 <ski> ski> Echosolace : can you fill in the "..." ?
+03:09:19 <Echosolace> ?
+03:09:27 <Echosolace> Oh 
+03:09:33 <ski> there is a relatively simple way to express it
+03:09:51 <Echosolace> I know there's probably a better way to do it, but I'm trying to follow LYAH.
+03:11:20 <ski> well .. i was intending to try to show what happens with the accumulator, in your case
+03:11:34 <Echosolace> I think I am approaching an understanding. 
+03:11:41 <ski> but i think it's be easier to follow, with a more concise expression of the accumulating function
+03:12:14 <idnar> does something like `[Async a] -> IO (Async a)` exist?
+03:12:20 <idnar> err
+03:12:36 <idnar> I mean `[Async a] -> IO (Async [a])`
+03:12:47 <ski> you could still do the above "reduction/evaluation trace", for your `if'-`then'-`else' case .. but it'll be a little bit more cluttered
+03:13:29 <idnar> `traverse wait` is close but I'd like to fail fast
+03:17:45 <Echosolace> Ok ok I think I've got it. My only wonder is why tails haystack gets called?
+03:17:48 <Echosolace>     in  foldl (\acc x -> if take nlen x == needle then True else acc) False (tails haystack)  
+03:18:15 <ski> it produces a list of successive tails of the hay stack
+03:18:19 <merijn> > tails [1..5]
+03:18:20 <lambdabot>  [[1,2,3,4,5],[2,3,4,5],[3,4,5],[4,5],[5],[]]
+03:18:22 <ski> > tails "haystack"
+03:18:25 <lambdabot>  ["haystack","aystack","ystack","stack","tack","ack","ck","k",""]
+03:18:46 <merijn> It is, tbh, a rather inefficient way of doing things, but hey
+03:19:03 <ski> then, checking whether such a tail starts with the needle, amounts to checking whether they hay stack contains the needle somewhere
+03:22:46 <Echosolace> I need to play around some more. 
+03:25:55 <Echosolace> If I have fruitlist = ["strawberry","green apple","red apple","apple granny"]
+03:26:07 <Echosolace> and I search for ["apple"]
+03:26:14 <Echosolace> I get False.
+03:26:35 <Echosolace> I think this is because:
+03:26:39 <Echosolace> take nlen x == needle
+03:26:58 <Echosolace> We are taking the length of needle's worth of element x...
+03:27:11 <Echosolace> But... I'm kinda surprised.
+03:27:28 <Echosolace> nlen of apple is 5.
+03:27:31 <merijn> Echosolace: That does a different thing
+03:27:35 <merijn> Echosolace: no
+03:27:37 <Echosolace> Oh...
+03:27:43 <merijn> Echosolace: Or rather, yes, but that's not what you're doing
+03:27:54 <merijn> You're taking the length of ["apple"], which is 1
+03:28:04 <Echosolace> Ah.
+03:28:09 <merijn> It's a list containing one string
+03:28:18 <Echosolace> Ok I need to go back and rethink a lot one sec.
+03:28:30 <merijn> and then you're checking if any of the strings in your other list match "apple" (to which the answer is "no")
+03:28:47 <merijn> Echosolace: Consider the type of search
+03:28:59 <merijn> "Eq a => [a] -> [a] -> Bool"
+03:29:11 <ski> @let search :: Eq a => [a] -> [a] -> Bool; search needle haystack = foldl (\acc x -> if take nlen x == needle then True else acc) False (tails haystack) where nlen = length needle
+03:29:12 <merijn> it's checking whether the first list appears inside the second one
+03:29:12 <lambdabot>  Defined.
+03:29:25 <merijn> Does the list ["apple"] occur inside your second list? No
+03:29:32 <ski> > search ["apple"] ["strawberry","green apple","red apple","apple granny"]
+03:29:34 <lambdabot>  False
+03:29:44 <ski> > search ["green apple"] ["strawberry","green apple","red apple","apple granny"]
+03:29:46 <Echosolace> I see that. Thanks. 
+03:29:47 <lambdabot>  True
+03:29:49 <merijn> Echosolace: 'search "apple" "apple granny"' otoh should work
+03:29:57 <ski> > search ["green apple","red apple"] ["strawberry","green apple","red apple","apple granny"]
+03:29:59 <lambdabot>  True
+03:30:19 <ski> > search "apple" "apple granny"
+03:30:21 <lambdabot>  True
+03:31:04 <lortabac> idnar: if your purpose is running multiple actions concurrently you can use the Applicative instance of Concurrently
+03:35:14 <Echosolace> Ok I've got that main function body figured out, but in the case of fruitlist = ["strawberry","apple","orange","banana"], I wonder if I search for apple why it wouldn't eventually return false, because after iterating to orange or banana, the accumulator would turn False.
+03:35:42 <Echosolace> Right?
+03:36:14 <Echosolace> Or wait... 
+03:36:22 <Echosolace> Once it turns true it's always true.
+03:37:28 <Echosolace> I still don't see where tails haystack is called.
+03:37:34 <Echosolace>     in  foldl (\acc x -> if take nlen x == needle then True else acc) False (tails haystack)
+03:41:14 <nicknick> Is there any bot here who can solve this?
+03:41:15 <nicknick> f :: Num a => a -> a -> a
+03:41:33 <nicknick> I need to convert f :: Num a => a -> a -> a to function. 
+03:41:58 <ski>   f x y = x
+03:42:01 <ski> how about that ?
+03:42:27 <nicknick> What if it is more complex? 
+03:42:28 <nicknick> f :: Num a => (a -> a -> a) -> a -> [a] -> [a]
+03:42:47 <ski>   f _ _ _ = []
+03:43:13 <nicknick> Ikea rocks :)
+03:43:19 <nicknick> Are you God or a bot?
+03:43:26 <Echosolace> That's exactly what I was thinking.
+03:43:32 <ski> Echosolace : `tails haystack' is called in the last actual parameter of that `foldl' call
+03:43:48 <Echosolace> Right, I got that from my most recent error after deleting that segment.
+03:43:57 <Echosolace> Thanks.
+03:44:03 <ski> (it literally says `tails haystack', there)
+03:44:08 <Echosolace> >:t foldl
+03:44:13 <ski> @type foldl
+03:44:14 <lambdabot> Foldable t => (b -> a -> b) -> b -> t a -> b
+03:44:34 <Echosolace> Ok that I have major trouble understanding.
+03:44:36 <ski> @type foldl :: (s -> a -> s) -> s -> [a] -> s
+03:44:37 <lambdabot> (s -> a -> s) -> s -> [a] -> s
+03:44:55 <ski> `s' is the type of the accumulator state. `a' is the element type of the list
+03:45:21 <ski> (the version with `Foldable' is more general, in that it can also work over other ordered collections than lists)
+03:46:09 <nicknick> How can I use lambdabot to solve this? f :: Num a => (a -> a -> a) -> a -> [a] -> [a]
+03:46:53 <ski> no
+03:47:10 <nicknick> Sad :(
+03:47:22 <ski> @djinn (a -> (b,c)) -> (a -> b,a -> c)
+03:47:22 <lambdabot> f a =
+03:47:22 <lambdabot>     (\ b ->
+03:47:22 <lambdabot>      case a b of
+03:47:22 <lambdabot>      (c, _) -> c,
+03:47:22 <lambdabot>      \ d ->
+03:47:24 <lambdabot>      case a d of
+03:47:26 <lambdabot>      (_, e) -> e)
+03:47:51 <ski> but Djinn doesn't know `Num', nor does it understand recursive data types like `[]'
+03:48:29 <ski> @djinn (a -> a -> a) -> Maybe a -> Maybe a
+03:48:29 <lambdabot> f a b =
+03:48:29 <lambdabot>     case b of
+03:48:29 <lambdabot>     Nothing -> Nothing
+03:48:32 <lambdabot>     Just c -> Just (a c c)
+03:48:55 <nicknick> I see. 
+03:50:18 <nicknick> How can I solve f :: Num a => (a -> a -> c) -> [a] -> [a] -> [c] ? Is that hard?
+03:50:33 <olligobber> :t zip
+03:50:34 <lambdabot> [a] -> [b] -> [(a, b)]
+03:50:39 <olligobber> :t zipWith
+03:50:41 <lambdabot> (a -> b -> c) -> [a] -> [b] -> [c]
+03:51:00 <nicknick> :t zip or :t zipWith
+03:51:02 <lambdabot> error:
+03:51:02 <lambdabot>     • Couldn't match expected type ‘[a]’
+03:51:02 <lambdabot>                   with actual type ‘t0 Bool -> Bool’
+03:51:08 <nicknick> Which is better?
+03:51:18 <olligobber> zipWith does what you asked for
+03:51:21 <ski> better for what ?
+03:51:25 <olligobber> I just forgot that zip doesn't
+03:52:15 <Echosolace> @type foldl
+03:52:16 <lambdabot> Foldable t => (b -> a -> b) -> b -> t a -> b
+03:52:41 <Echosolace> Breaking this down, how many parameters are here?
+03:52:45 <ski> > zipWith (+) [0,1,2] [30,40,50]
+03:52:47 <lambdabot>  [30,41,52]
+03:52:56 <Echosolace> Is (b -> a -> b) a parameter?
+03:52:56 <ski> > liftA2 (+) [0,1,2] [30,40,50]
+03:52:58 <lambdabot>  [30,40,50,31,41,51,32,42,52]
+03:53:06 <ski> Echosolace : it's the type of the first parameter, yes
+03:53:21 <olligobber> oh yeah, liftA2 also works
+03:53:38 <Echosolace> but b is the first parameter, no?
+03:53:44 <ski> no
+03:53:47 <Echosolace> Crap.
+03:53:56 <Echosolace> Where do you see the first parameter?
+03:54:00 <nicknick> I think guys didn't understand :)  I need a function which satisfies this type signature  f :: Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+03:54:07 <ski> consider
+03:54:11 <ski>   foldl (+) 0 (2:3:5:7:[])
+03:54:24 <Echosolace> Yep.
+03:54:32 <olligobber> nicknick, zipWith and liftA2 both have that type signature
+03:54:38 <Echosolace> Oh.
+03:54:43 <olligobber> well, a supertype of that type signature
+03:54:58 <ski> `(+)' has type corrersponding to `b -> a -> b', `0' has type corresponding to `b', and `2:3:5:7:[]' has type corresponding to `t a' (or `[a]' more specifically). result has type `b'
+03:55:23 <ski> @type zipWith  ::  Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+03:55:24 <lambdabot> Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+03:55:28 <ski> @type liftA2  ::  Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+03:55:30 <lambdabot> Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+03:55:46 <olligobber> but there are other functions with that type signature
+03:55:48 <ski> nicknick : both of the offered functions does satisfy that signature
+03:56:07 <ski> (but they're more general, does also satisfy other signatures, as well)
+03:56:18 <nicknick> What if I have to write  |custom| function?
+03:56:19 <olligobber> @type (\_ _ _->[]) :: Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+03:56:21 <lambdabot> Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+03:56:28 <ski> nicknick : then write a custom function ?
+03:56:35 <ski> e.g. the one olligobber suggested
+03:57:22 <olligobber> @type (\f x y -> f (sum x) (sum y))
+03:57:24 <lambdabot> (Foldable t1, Foldable t2, Num t3, Num t4) => (t3 -> t4 -> t5) -> t1 t3 -> t2 t4 -> t5
+03:57:42 <ski> @type let customFunction :: Num a => (a -> a -> c) -> [a] -> [a] -> [c]; customFunction f xs ys = zipWith f ys xs in customFunction
+03:57:43 <lambdabot> Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+03:57:50 <olligobber> ^
+03:58:29 <olligobber> @type (\f x y -> [f (sum x) (sum y)]) :: Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+03:58:29 <ski> nicknick : there's many different such functions, having the given signature
+03:58:30 <lambdabot> Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+03:58:51 <olligobber> there are infinitely many functions with that type
+03:59:26 <ski> Echosolace : in that example, `b' would be `Integer', and `a' would also be `Integer'. in your earlier example, however, `b' would be `Bool'
+04:00:00 <olligobber> @type (\f _ _ -> [f 0 0]) :: Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+04:00:01 <lambdabot> Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+04:00:08 <Echosolace> Ski: Got an ADA address I can tip?
+04:00:34 <ski> dunno what that is
+04:01:09 <Echosolace> It's a crypto thing. Based on haskell. Big player in the space. 
+04:01:16 <ski> i see
+04:01:32 <Echosolace> daedaluswallet.io
+04:03:53 <olligobber> @type (\f _ _ -> f <$> [0..] <*> [0..]) :: Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+04:03:54 <lambdabot> error:
+04:03:54 <lambdabot>     • Could not deduce (Enum a1)
+04:03:54 <lambdabot>         arising from the arithmetic sequence ‘0 .. ’
+04:03:59 <olligobber> -_-
+04:04:19 <olligobber> @type (\f _ _ -> f <$> fromInteger [0..] <*> fromInteger [0..]) :: Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+04:04:19 * hackage haskoin-core 0.17.0 - Bitcoin & Bitcoin Cash library for Haskell  https://hackage.haskell.org/package/haskoin-core-0.17.0 (jprupp)
+04:04:20 <lambdabot> error:
+04:04:20 <lambdabot>     • Couldn't match expected type ‘Integer’ with actual type ‘[a0]’
+04:04:20 <lambdabot>     • In the first argument of ‘fromInteger’, namely ‘[0 .. ]’
+04:04:21 <siraben> Are there haskell packages that can help me write an LLVM backend?
+04:04:49 <olligobber> @type (\f _ _ -> f <$> (fromInteger <$> [0..]) <*> (fromInteger <$> [0..])) :: Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+04:04:51 <lambdabot> Num a => (a -> a -> c) -> [a] -> [a] -> [c]
+04:05:33 <nicknick> Okay okay :D
+04:05:38 <nicknick> You guys rock
+04:05:56 <dminuoso> siraben: What exactly are your intentions?
+04:06:40 <nicknick> But what is things are simple? Like what is I need a function implementation for type signature f :: Num a => a -> [a] -> a
+04:06:52 <nicknick> is = if
+04:06:55 <nicknick> if = is
+04:06:57 <siraben> dminuoso: I'd like to create an LLVM backend for the https://trigraph.net/powdertoy/R216/manual.md computer
+04:06:58 <siraben> Or a simpler arch, just to learn
+04:07:07 <olligobber> :t const :: Num a => a -> [a] -> a
+04:07:09 <lambdabot> Num a => a -> [a] -> a
+04:07:26 <olligobber> :t const (const 0) :: Num a => a -> [a] -> a
+04:07:28 <lambdabot> Num a => a -> [a] -> a
+04:07:44 <siraben> nicknick: you can easily find functions that exhibit a given type (provided it's possible to do so), but these functions may not be equivalent
+04:07:56 <olligobber> :t (\_ -> sum) :: Num a => a -> [a] -> a
+04:07:57 <lambdabot> Num a => a -> [a] -> a
+04:08:18 <olligobber> siraben, it's always possible to
+04:08:24 <olligobber> :t undefined :: a -> b
+04:08:25 <lambdabot> a -> b
+04:08:33 <siraben> lol
+04:08:47 <random> hey guys
+04:08:53 <random> what was the name of that monad tutorial
+04:09:00 <random> where you did like 5 examples
+04:09:07 <random> and eventually you arrived at monads in the end
+04:09:44 <nicknick> Can we do better than onst (const 0)
+04:09:54 <nicknick> Better than const (const 0)
+04:10:00 * Clint squints.
+04:10:16 <siraben> nicknick: what is your intention here? you just want any function that has that type?
+04:10:17 <olligobber> what makes one function better than another?
+04:10:18 <ski> can you qualify "better" more ?
+04:10:25 <nicknick> Any fucntion
+04:10:34 <nicknick> Should look like a gentleman
+04:10:40 <siraben> ?
+04:10:48 <siraben> :t undefined :: Num a => a → [a] → a
+04:10:49 <lambdabot> Num a => a -> [a] -> a
+04:10:50 <ski> then `const (const undefined)' should suffice, right ?
+04:10:54 <olligobber> :t (\_ _ -> sum $ fromInteger <$> [0..]) :: Num a => a -> [a] -> a
+04:10:55 <lambdabot> Num a => a -> [a] -> a
+04:11:18 <siraben> dminuoso: did that clarify my intentions?
+04:11:57 <siraben> :t (\x y → x <$ y) :: Num a => a → [a] → a
+04:11:59 <lambdabot> error:
+04:11:59 <lambdabot>     • Occurs check: cannot construct the infinite type: a1 ~ [a1]
+04:11:59 <lambdabot>     • In the expression: x <$ y
+04:12:40 <olligobber> :t (\x y -> sum $ x <$ y) :: Num a => a -> [a] -> a
+04:12:42 <lambdabot> Num a => a -> [a] -> a
+04:12:47 <siraben> Of course.
+04:14:58 <nicknick> How can I get a step-by-step solution for \f x y -> [f (sum x) (sum y)]
+04:15:13 <ski> what do you mean ?
+04:15:52 <olligobber> what is a solution?
+04:16:02 <nicknick> Like
+04:16:06 <nicknick> How we arrived at this? 
+04:17:23 <ski> we have two lists of numbers of type `a'. we want a list of `c's. `f' can turn two `a's into a `c'. if we sum the two lists, and pass the sums to `f', we get a `c', which we can put in a list so that we get something of the appropriate/expected result type
+04:18:44 <ski> of course, we could have taken the product instead, or something else entirely ..
+04:18:49 * hackage haskoin-node 0.17.0 - P2P library for Bitcoin and Bitcoin Cash  https://hackage.haskell.org/package/haskoin-node-0.17.0 (jprupp)
+04:23:42 <nicknick> How can we justify that const (const undefined) satisfies Num a => a -> [a] -> a?
+04:24:56 <ski> `const' has type `a -> ([a] -> a)' and `undefined' has type `a', so `const undefined' has type `[a] -> a'
+04:25:33 <ski> `const' also has type `([a] -> a) -> (a -> [a] -> a)', so `const (const undefined)' has type `a -> [a] -> a'
+04:26:06 <ski> further, we can always add more (unused/useless) constraints on type variables, so `const (const undefined)' also has type `Num a => a -> [a] -> a'
+04:34:19 <nicknick> If we apply some (but not all)of the arguments to a function, what kind of function do we get as a result? 
+04:35:26 <ski> all functions in Haskell take exactly one input parameter/argument
+04:36:16 <nicknick> What if it is a custom function? 
+04:36:19 * hackage dirichlet 0.1.0.0 - Multivariate dirichlet distribution  https://hackage.haskell.org/package/dirichlet-0.1.0.0 (dschrempf)
+04:36:30 <ski> so e.g. `take :: Int -> [a] -> [a]' really means `take :: Int -> ([a] -> [a])', and `take 3 "abcdefgh"' really means `(take 3) "abcdefgh"'
+04:36:36 <ski> doesn't matter
+04:36:48 <ski> > take 3 "abcdefgh"
+04:36:50 <lambdabot>  "abc"
+04:36:57 <ski> > map (take 3) (tails "abcdefgh")
+04:36:59 <lambdabot>  ["abc","bcd","cde","def","efg","fgh","gh","h",""]
+04:37:37 <ski> `take 3' is a function that, when given a list as input, will give the list of the first three elements of that list (or less, if there wasn't three elements available)
+04:37:38 <nicknick> If we apply some (but not all)of the arguments to a function, what kind of function do we get as a result?  ONE WORD ANSWER?
+04:38:00 <nicknick> what kind of function?
+04:38:43 <ski> one sometimes says that one gets a "partially applied" function. but that's not a property of the function itself, but rather of the way one arrived at it
+04:40:00 <ski> > elem 'c' "abcd"
+04:40:01 <lambdabot>  True
+04:40:04 <ski> > elem 'e' "abcd"
+04:40:06 <lambdabot>  False
+04:40:29 <ski> @let elemAbcd x = elem x "abcd"
+04:40:31 <lambdabot>  Defined.
+04:40:38 <ski> > elemAbcd 'b'
+04:40:40 <lambdabot>  True
+04:40:54 <ski> one could claim that `elemAbcd' is a partial application of `elem'
+05:10:47 <ixlun> Hi all, I was wondering if anyone knew of a way of making an equivalent of swapMVar, swapMVar_ :: MVar a -> a -> IO ()
+05:10:58 <ixlun> I tried `void . swapMVar'
+05:11:20 <ixlun> but that ends up somehow getting rid of the IO monad
+05:11:31 <ixlun> :t void . swapMVar
+05:11:33 <lambdabot> error:
+05:11:33 <lambdabot>     Variable not in scope: swapMVar :: a -> f a0
+05:11:37 <merijn> ixlun: Yes, because swapMVar takes two arguments, not 1
+05:11:50 <[exa]> ixlun: you need the magical (.).(.) operator
+05:11:53 <merijn> ixlun: So it's inferring that you're using the Monad instance of functions
+05:12:08 <nicknick> I need an explanation for a0 n xs = foldr (^) n xs
+05:12:09 <merijn> or just, you know, using a variable name
+05:12:28 <[exa]> merijn: so pointful
+05:12:39 <merijn> nicknick: You should probably start by saying where you get confused :)
+05:12:46 <nicknick> What is a0 n xs = foldr (^) n xs doing?
+05:13:11 <ski> @type ((() <$) .) . Control.Concurrent.MVar.swapMVar
+05:13:13 <lambdabot> GHC.MVar.MVar b -> b -> IO ()
+05:13:34 <ixlun> merijn: What's the magical operator you mention above?  I can't seem to hoogle that one
+05:13:54 <nicknick> Please tell me: What is a0 n xs = foldr (^) n xs doing?
+05:14:10 <ski> nicknick : `a0 2 [3,4,5] = 3 ^ (4 ^ (5 ^ 2))'
+05:14:50 <ski> @let infixr 9 .:; (.:) :: (c0 -> c1) -> (a -> b -> c0) -> (a -> b -> c1); (.:) = (.) . (.)
+05:14:52 <lambdabot>  Defined.
+05:15:05 <merijn> ixlun: I didn't mention it and you shouldn't use it, tbh
+05:15:08 <ski> @type (() <$) .: Control.Concurrent.MVar.swapMVar
+05:15:09 <lambdabot> GHC.MVar.MVar b -> b -> IO ()
+05:16:02 <[exa]> ixlun: take a look at type of (.) and compare with (.).(.)  (or with the one that ski just defined)
+05:18:07 <ixlun> :t (.) . (.)
+05:18:08 <lambdabot> (b -> c) -> (a1 -> a2 -> b) -> a1 -> a2 -> c
+05:18:34 <iMonad> hi, guys. I have a trouble with monad transformer.
+05:18:55 <iMonad> I am following the wikibook MaybeT example
+05:19:03 <iMonad> newtype MaybeT m a = MaybeT { runMaybeT :: m (Maybe a) }
+05:19:18 <iMonad> instance Monad m => Monad (MaybeT m) where  return  = MaybeT . return . Just
+05:19:33 <iMonad> but it can't compile
+05:20:00 <iMonad> it says
+05:20:02 <iMonad>     • Could not deduce (Applicative (MaybeT m))        arising from the superclasses of an instance declaration      from the context: Monad m        bound by the instance declaration at main.hs:4:10-36    • In the instance declaration for ‘Monad (MaybeT m)’  |4 | instance Monad m => Monad (MaybeT m) where
+05:20:14 <[exa]> iMonad: please pastebin the longer messages
+05:20:34 <ski> you need to make an `Applicative' (and a `Functor') instance, as well
+05:21:03 <[exa]> ixlun: anyway, your composed function has 2 parameters, which in the type here have types 'a1' and 'a2'.
+05:21:06 * ski thought that wasn't too bad
+05:21:08 <geekosaur> this is a ghc-specific chaneg from standard Haskell, which is why the wikibook doesn't tlk about it
+05:22:35 <ski> iMonad : for the time being, if you don't want to bother with it right now, you could just make empty instances
+05:23:23 <ski>   instance Monad m => Functor (MaybeT m)
+05:23:26 <ski>     where
+05:23:33 <ski>     fmap = liftM
+05:23:44 <ski>   instance Monad m => Applicative (MaybeT m)
+05:23:47 <ski>     where
+05:23:51 <ski>     pure = return
+05:23:55 <ski>     (<*>) = ap
+05:24:10 <ski> would also work, as default implementations, in terms of your `Monad' instance
+05:25:17 <ski> (however, it would be better to have `Functor f => Functor (MaybeT f)' and `Applicative i => Applicative (MaybeT i)'. but that requires you to do the work of actually implementing those instances "properly", rather than just deferring to the `Monad' instance)
+05:25:21 <ski> iMonad ^
+05:26:04 <ski> (to clarify, by "empty instances", i mean just skipping the `where', and the method implementation(s) after it)
+05:27:30 <iMonad> @ski what is "ap" comes from ?
+05:27:30 <lambdabot> Maybe you meant: wiki src ask
+05:27:52 <iMonad> My ghc complain that is not in scope
+05:27:56 <ski> @index ap
+05:27:56 <lambdabot> Control.Monad
+05:28:18 <ski> it (and `liftM') is defined in terms of `return' and `(>>=)'
+05:28:19 * hackage haskoin-store-data 0.38.0 - Data for Haskoin Store  https://hackage.haskell.org/package/haskoin-store-data-0.38.0 (jprupp)
+05:28:50 <ski> so, by defining `(<*>)' as `ap', that makes it call your `return' and `(>>=)' implementations, in your `Monad (MaybeT m)' instance
+05:28:58 <iMonad> Oh, it works
+05:29:19 * hackage haskoin-store 0.38.0 - Storage and index for Bitcoin and Bitcoin Cash  https://hackage.haskell.org/package/haskoin-store-0.38.0 (jprupp)
+05:29:29 <ski> iMonad : now for `(>>=)' ?
+05:30:40 <iMonad> wiki example works
+05:30:46 <ixlun> Out of interest, what's people's opinion on what's better: `foo . bar . baz $ a' or `foo $ bar $ baz a'?
+05:31:18 <merijn> ixlun: THe former is better
+05:31:20 <ski> ixlun : the former
+05:31:20 <geekosaur> the former
+05:31:30 <merijn> Because repeated . is more easily refactored
+05:31:38 <ski> ixlun : or `(foo . bar . baz) a' or `foo (bar (baz a))'
+05:31:57 <ski> (i'd prefer any of those three, to the latter you mentioned)
+05:32:03 <iMonad> if i understand correctly, monad transformer is just combine multiple monad into single one
+05:32:37 <ski> iMonad : it takes a(ny) monad and adds another (specific) "monad capability" to it
+05:33:02 <ski> (it does not combine any two arbitrary monads)
+05:33:24 <ixlun> Cool, I'll start to write in that method - coming from an imperative background it takes a while to rewire the brain!
+05:33:41 <ski> it does, but it's worth it :)
+05:34:22 <ski> it's only to expected that learning a new programming paradigm takes more time than learning yet another language in a paradigm one knows. it's a bit more like learning to program from scratch all over again
+05:35:24 <iMonad> @ski thanks for you explanation
+05:35:25 <lambdabot> Maybe you meant: wiki src ask
+05:35:25 <ski> (imho it helps to set aside what you know abour programming, so far. you can compare later, when you have some more solid foundations under your belt. unlearning old habits and trains of thought can take time / be tricky)
+05:36:37 <ski> iMonad : no problem :)
+05:36:41 <iMonad> but why we need to instance other types here ? it is not enouth to just instance a monad ?
+05:36:56 <ixlun> ski: agreed - that's why I think so far I've enjoyed learning Haskell more than another language.  It's a completely new way to think about things
+05:37:20 <ski> because the type class `Monad' was changed to have `Applicative' as superclass. so every instance of `Monad' is required to already be an instance of `Applicative' (which in turn requires `Functor')
+05:37:47 <ski> however (as you saw), it's possible to use default implementations of `Applicative' (and `Functor') in terms of the `Monad' instance you're writing
+05:38:38 <ski> (if one only wants to write an `Applicative' instance, where `Monad' is undesirable or not sensible, one can use `fmap = liftA' for the `Functor' instance, to make it defer to the `Applicative' instance, instead)
+05:40:52 <ixlun> I've always found that the best way to learn something new is to write it too, I'm not one for reading a whole book and then diving in.
+05:41:03 <ixlun> I like to learn as I go
+05:41:40 <ski> iMonad : btw, fwiw, it's not IRC convention/custom to adorn nicknames by sigils (like `@'). if you want to refer to, or address, someone, simply mention their nickname. in the latter case, e.g. by starting the message with the nickname, followed by a comma or a colon, and then the bulk of the message
+05:42:40 <iMonad> oh, sorry about that
+05:42:46 <iMonad> I am every new to irc
+05:42:55 <iMonad> *very*
+05:43:18 <ski> many IRC clients will highlight/alert the user, in case their nickname is mentioned, first thing in a message. (not as many will, i think, highlight when it's mentioned anywhere else in a message). so, if you place `@' in front, then the nickname is not the first thing, and highlight might not happen
+05:44:01 <ski> (also, `@' means something else, on IRC, namely that someone is a channel operator. however, i'd not suggest referring to operators by prefixing their names by `@', either)
+05:44:10 <ski> iMonad : no worry, just informing you
+05:45:40 <ixlun> Where would people suggest is the best place to look for critique on a project that I'm writing?
+05:47:03 <[exa]> ixlun: users! :D
+05:47:57 <[exa]> ixlun: nevermind users, if you can extract something short enough, kindof self-contained, and pastebin it, you can get a lot of feedback from #haskell
+06:12:16 <hyperisco> wher am I supposed to put my cradle config? I have it in the root of my project and the IDE does not find it
+06:13:25 <Uniaika> ah well that's a proble
+06:13:28 <Uniaika> *problem
+06:13:47 <Uniaika> hyperisco: note that if you don't require anything fancy/weird, the new HLS uses implicit-hie to generate a cradle config for you
+06:14:33 <hyperisco> I keep getting warnings over and over that it is using implicit cradle
+06:14:37 <hyperisco> I just want those warnings to go away
+06:22:52 <ixlun> [exa]: Yeah I may paste it on here at some point when it's ready.  It probably won't fit into a paste bin though; I've got it up on GitHub
+06:25:01 <[exa]> even links to github projects got good comments (biased by the readme&docs though :] )
+06:25:15 <[exa]> btw what's the project about?
+06:25:56 <ixlun> It's a chess engine - I've been working on it for about a month
+06:26:20 <ixlun> I've just got it to the point where I can now play against it
+06:26:40 <ixlun> I'm now looking at trying to improve it's strength
+06:28:40 <hyperisco> just had the thought this morning that programs have more interesting terms than types because programs are more interested in how than what
+06:29:08 <[exa]> hyperisco: you need how-types
+06:29:30 <[exa]> ixlun: that's cool, what kind of AI is there?
+06:30:01 <[exa]> (need to disappear for ~2 hours, teaching)
+06:30:21 <ixlun> For now just alpha-beta search
+06:30:30 <ixlun> cool, have fun!
+06:31:49 <hyperisco> we need what-programs
+06:32:09 <hyperisco> though they wouldn't really be programs
+06:49:55 <jophish> Why doesn't Setup.hs seem to support v2 commands?
+06:50:35 <jophish> (using defaultMain from Distribution.Simple)
+06:50:50 <merijn> jophish: Because v2- is part of cabal-install, Setup.hs is not
+06:50:57 <merijn> Setup.hs is part of Cabal
+06:51:35 <merijn> IOW, that's "working as intended"
+06:51:59 <merijn> jophish: Setup.hs commands don't do the same thing as the (pre-v2) cabal-install commands either
+06:57:19 * hackage effet 0.3.0.2 - An Effect System based on Type Classes  https://hackage.haskell.org/package/effet-0.3.0.2 (MichaelSzvetits)
+07:02:21 <jophish> so I'm finding out!
+07:02:25 <jophish> thanks, merijn 
+07:05:29 <merijn> jophish: You should probably just use cabal-install unless you have a very good reason not too :p
+07:07:43 <jophish> merijn: this is taking place inside a nix derivation, where cabal-install is not available
+07:09:37 <merijn> ah
+07:10:14 <merijn> You'd have to reverse engineer how v2-build calls Setup.hs
+07:10:20 <merijn> (because that's what's happening)
+07:10:28 <merijn> But...uh...good luck with that :p
+07:11:14 <jophish> yeah :) O
+07:11:27 <jophish> I'm not gonna do that, I'll make do with the commands here :)
+07:12:49 <merijn> jophish: Naah, my point was that (eventually) v2- commands end up just calling into the Setup.hs with specific arguments
+07:13:02 <merijn> So you should be able to mimic the v2- commands
+07:32:42 <texasmyn_> Maybe I am misremembering or perhaps wishful thinking, but I thought there was a way to tell hlint to give more advice. Is there?
+07:35:33 <texasmynsted> Hmm I think my message was killed by the server because of my nick.
+07:36:07 <texasmynsted> Is there a way to get more help from hlint? Example: Maybe somebody has a list of extra rules the apply?
+07:37:02 <texasmynsted> I would like it to say "snd <$> is the same as snds", if it actually is. Heh
+08:10:30 <z0> does haskell optimize something like (last . takeWhile) not to traverse a list twice?
+08:14:25 <merijn> z0: That's not even really optimisation, that happens automatically from laziness
+08:15:21 <z0> thanks. just making sure
+08:23:04 <Cheery> Realising monads are constructing some sort of linear logic.
+08:23:13 <sarahzrf> how so?
+08:26:21 <Cheery> sarahzrf: how to explain it depends a bit on how you view at linear logic and linear types.
+08:27:38 <sarahzrf> i view them in many different ways
+08:28:39 <Cheery> well lets say you consider that you look it from linear logic, and think that intuitionistic types are represented through !x, a construct that explicitly represents discarding/copying/instantiation.
+08:29:27 <Cheery> then if you look at monads, they do prevent you from copying things in arbitrary ways.
+08:29:35 <merijn> They do?
+08:29:38 <merijn> How so?
+08:32:15 <Cheery> Well you can supply some monad m, or then bind to it. Given that the linear parts stay inside the monad, then it stays "linear".
+08:32:37 <sarahzrf> what if i `fmap (\x -> (x, x))'
+08:32:55 <Cheery> the 'x' is never a linear type in such construct.
+08:33:04 <Cheery> You can make this obvious with indexed monads.
+08:33:26 <Cheery> But I think the property is already present in the use of IO monad.
+08:33:33 <[exa]> Cheery: what if someone copies the whole monad and continues it in 2 different places?
+08:34:27 <Cheery> [exa]: as long as you can copy it, it's more like a plan to do something.
+08:36:44 <[exa]> well that's kinda "linearity by being very careful", you'd ideally want that typechecked
+08:37:24 <Cheery> I think you can model linear logic with indexed monads and it's just equivalent to other implementations.
+08:37:31 <Cheery> at least right now I think so.
+08:38:20 <Cheery> I can try to illustrate this a bit.. so if you take the ireturn and ibind
+08:38:29 <Cheery> ireturn :: a -> m i i a
+08:38:36 <Cheery> ibind :: (a -> m j k b) -> m i j a -> m i k b
+08:38:59 <Cheery> I dunno why they've flipped that one.
+08:40:15 <Cheery> for an example, lets take additive product, this is kind of a construct that provides two options, and then later either one can be selected.
+08:41:20 <Cheery> opt :: m c a _ -> m c b _ -> m c (a & b) _
+08:41:37 <Cheery> exl :: m (a & b) a _
+08:41:43 <Cheery> exr :: m (a & b) b
+08:42:04 <Cheery> now I'm wondering what would go to the _, the place of parameter.
+08:43:50 <Cheery> You can do the same thing with multiplicatives, the multiplicative disjunction (that ear symbol) is a bit like function but you can choose which side you treat as a parameter.
+08:44:48 <Cheery> the conjunction resembles a pair, but you can't do fst/snd on it unless the item on another side is exponential.
+08:50:18 <[exa]> Cheery: would some kind of Either work as _ there? (also kindof provides a way to do the final choice)
+08:54:51 <Cheery> [exa]: well I think it's bit of confusing because it is maybe not needed, indexed monoid might be enough as well.
+08:55:12 <Cheery> or category
+08:56:06 <Cheery> but since the parts that can be duplicated behave the same way as haskell, it'd remain as a language around these constructs.
+08:57:26 <Cheery> the "linear" parts would remain in the place where the IO monad is these days.
+09:06:23 <Cheery> If you like to give it some sort of linear lambda vibes, you turn the "input" into a scope.
+09:08:28 <Cheery> exl :: m (C r (a&b)) a, and likewise you'd get vs/vz to access and "pull" an item down.. oh moment I think I'll try to model those.
+09:10:04 <sarahzrf> it sounds like youre really just talking about categories, not monads
+09:10:30 <sarahzrf> and yes, closed monoidal categories model multiplicative intuitionistic linear logic iirc
+09:10:56 <Cheery> vs :: m x (C y z) -> m (C x w) (C (C y w) z)
+09:11:17 <Cheery> vz :: m (C x y) (C x y) 
+09:11:57 <sarahzrf> i suppose that in fairness a category is a kind of monad, if you pick the right bicategory—but i assumed you meant monads in the bicategory Cat :p
+09:12:53 <Cheery> Yeah I think it's just categories. I'm just thinking of how these things fit together.
+09:13:20 <sarahzrf> also sorry i misspoke, you want closed *symmetric* monoidal categories, for MILL
+09:15:03 <sarahzrf> for the record, the categorical semantics of linear logic's additives are usually ordinary products and coproducts
+09:15:46 <Cheery> yup. the linear logic builds linear implication around the tensor product.
+09:16:01 <sarahzrf> the opt, exl, exr you wrote above are exactly the data of a product
+09:16:19 <sarahzrf> assuming they satisfy the right equations
+09:16:30 <sarahzrf> and are natural
+09:17:06 <sarahzrf> actually sorry naturality is only a concern for opt and it drops out of satisfying the right equations with exl and exr
+09:20:46 <Cale> Over the last couple decades, I've run into a few too many cases where the symmetric monoidal category abstraction was appropriate for being able to get control over whether substructural operations are present and how they're implemented. It's too bad that I don't think Linear Haskell solves any of the same problems (because it restricts you to something which is a restriction of (->))
+09:21:10 <Cale> Conal's constrained categories thing gives you a really general view of it though.
+09:21:52 <sarahzrf> oh? whats constrained categories
+09:22:10 <Cale> https://github.com/conal/concat
+09:22:17 <Cale> http://conal.net/papers/compiling-to-categories/
+09:22:18 <sarahzrf> i thought that was "compiling to categories"
+09:22:20 <sarahzrf> oh
+09:22:27 <Cheery> is this conal's recent stuff he talked about on summer?
+09:22:42 <Cheery> well the compiling to categories is older.
+09:22:43 <sarahzrf> you know i probably shouldve questioned why it was "con" and not "com" in the repo name
+09:22:48 <sarahzrf> lol
+09:23:09 <Cheery> yeah maybe I should look at that a bit.
+09:23:31 <Cheery> He's been progressing on that though.
+09:24:28 <sarahzrf> im on record as wanting "basically like concat, but baked into the language in a principled and typed way"
+09:25:04 <sarahzrf> also for my foundations of math
+09:25:08 <Cale> sarahzrf: If you have ideas about how to make the user experience of that language good, I'd really like to hear about it
+09:25:25 <sarahzrf> haha i wish!
+09:25:44 <sarahzrf> mostly i start daydreaming about being able to have something like that every so often when i get mad at setoid hell
+09:26:04 <sarahzrf> or whatever other "why the fuck cant i just work internally" thing comes up
+09:26:16 <sarahzrf> have you seen beluga and/or the work on cocon
+09:26:23 <Cale> No, I haven't
+09:26:23 <sarahzrf> i think that's a promising direction for that sort of thing
+09:26:32 <sarahzrf> it's only half related, but
+09:26:46 <sarahzrf> umm let's take this to ##dependent or sth
+09:27:24 <Cheery> Ok. :) it started as haskell, now this is going..
+10:15:40 --- mode: ChanServ set +o Sigyn
+10:24:40 <texasmynsted> how do I know what "base" to use? 
+10:25:55 <texasmynsted> Example: I did cabal init, and got "build-depends:       base ^>=4.12.0.0". I do not recall why I thought that was the right base. I also do not recall what the ^ is for.
+10:26:37 <koz_> ^>= says 'at least this version works, but a higher minor version might too'.
+10:26:50 <koz_> What's your GHC version?
+10:26:58 <koz_> Base version and GHC version are closely connected.
+10:27:07 <texasmynsted> 8.8.4
+10:27:20 <koz_> I think you want 4.13 then?
+10:27:23 <texasmynsted> I just upgraded it today.
+10:27:27 <texasmynsted> okay
+10:27:35 <texasmynsted> how would I know that?
+10:27:46 <koz_> Because each GHC version comes with a base version.
+10:27:51 <koz_> There's a list somewhere.
+10:27:56 * koz_ can't remember where.
+10:28:03 <merijn> https://wiki.haskell.org/Base_package
+10:28:44 <koz_> Yeah, that one.
+10:29:17 <texasmynsted> Nice! thank you
+10:29:19 <koz_> Pity we're not getting base 5 to go with GHC 9.
+10:29:30 <koz_> (although the degree of breakage that would induce would be legendary)
+10:29:46 <merijn> Well, technically that wouldn't break anything
+10:29:47 <texasmynsted> too bad ghc does not have a flag for "--base"
+10:30:06 <merijn> It'd require manual intervention to get things to compile with the new GHC, but that's different from "breaking things"
+10:30:08 <monochrom> You can use "cabal gen-bounds"
+10:30:23 <merijn> The entire point of upperbounds is that new releases can't break things >.>
+10:30:52 <texasmynsted> ist that what ^ does?
+10:31:15 <texasmynsted> oh
+10:31:19 <texasmynsted>  /me facepalm 
+10:31:21 <monochrom> No, merijn means that GHC new versions also changes language syntax and semantics and type checking.
+10:31:27 <texasmynsted> I see that answered above
+10:32:07 <merijn> "break" implies "used to work", but that's not the case for new versions
+10:32:33 <merijn> texasmynsted: "^>= 4.12" says "this is compatible with everything that is PVP compatible with version 4.12"
+10:32:49 <merijn> texasmynsted: Where "PVP compatible" is explained here: https://pvp.haskell.org/
+10:39:40 <texasmynsted> :-) 
+10:39:44 <texasmynsted> Thank you
+11:13:30 <hyperisco> tsc: createProcess: does not exist (No such file or directory)  I know tsc is on my PATH, why might it not be found? Other executables are found… I am on Windows
+11:14:06 <hyperisco> or am I reading this error wrong? I am reading it as tsc does not exist
+11:16:31 <geekosaur> does createProcess search %PATH% as you are invoking it? (there are two modes, one searches the PATH and the other wants a full pathname)
+11:19:16 <geekosaur> nemmind, I see it currently does PATH search if there's no slash in the name
+11:20:21 <geekosaur> proc on windows has some extra behaviors but it should try %PATH% eventually
+11:20:44 <hyperisco> it says it uses whatever the system's resolution is
+11:21:27 <hyperisco> "on Windows systems the Win32 CreateProcess semantics is used"
+11:21:57 <hyperisco> wait... " An .exe extension is added if the filename does not already have an extension. " what?!
+11:22:12 <koz_> hyperisco: Gotta love dem Windows conventions.
+11:22:17 <monochrom> That should be harmless IME.
+11:22:27 <koz_> Although I think your Windows executable already has a .exe?
+11:22:30 <hyperisco> but  tsc.exe  does not exist
+11:22:35 <hyperisco> no it is called  tsc  lol
+11:22:39 <hyperisco> it works fine in  cmd.exe
+11:22:41 <geekosaur> glwt
+11:23:08 <hyperisco> shoot me
+11:23:11 <monochrom> Oh, then make your own alias tsc.exe
+11:23:26 <hyperisco> it isn't that simple…
+11:23:35 <monochrom> Or make the builder of tsc name it tsc.exe in the first place.
+11:24:07 <monochrom> Windows symlink is different from Linux symlink, but such a thing exists since 15 years go, no?
+11:24:10 <hyperisco> is it because cmd.exe will look for tsc.cmd
+11:24:43 <hyperisco> well whatever this stopped being a Haskell question
+11:24:59 <hyperisco> unless it is Haskell that is adding ".exe"
+11:25:05 <hyperisco> in which case… why… why do this
+11:26:12 <monochrom> I don't know but I'm sure it's explained in some changelog or commit/PR comment.
+11:26:16 <monochrom> or source code
+11:26:52 <monochrom> and most likely it's "breaks some other vocal minority if not added"
+11:27:34 <geekosaur> for grins and giggles, try it as "tsc."
+11:28:18 <hyperisco> I am attempting to not create this twice because I need a dot on one platform and not another
+11:28:39 <geekosaur> this is not going to end well, I suspect
+11:28:50 <hyperisco> I stopped using shelly because of this weirdness lol
+11:28:56 <hyperisco> apparently it goes deeper than I expected
+11:30:00 <geekosaur> windows likes its extensions. but in this case I did not mean naming the file with a dot, just specifying the filepath that way. then again, depending on what you're doing, that may still not be what you intend
+11:31:03 <geekosaur> you may just have to call it "tsc." everywhere to make both platforms happy
+11:31:29 <hyperisco> stop making me cry
+11:31:30 <geekosaur> (unix won't care if the name happens to contain a dot)
+11:31:51 <geekosaur> you're trying to do crossplatform, you _will_ cry
+11:31:52 <hyperisco> why wouldn't it?
+11:40:52 <hyperisco> it seems like it is Haskell that adds this "exe" thing
+11:41:13 <hyperisco> though I can't trace down where in the source it does it
+11:41:52 <hyperisco> I am floored… that seems pretty ridiculous
+11:47:11 <monochrom> unix has the executable bit already.
+11:49:31 <hyperisco> it doesn't say  tsc. = tsc  though
+11:49:44 <monochrom> Oh, no.
+11:50:06 <monochrom> The hope is that "tsc." helps Windows.
+11:52:24 <hyperisco> I don't know what I missed in the code repo for process but I cannot see anywhere it adds on ".exe"
+11:52:48 <hyperisco> and CreateProcess in win32 makes no mention of adding this implicitly, in fact it features optional extension
+11:53:36 <hyperisco> and the call to CreateProcess leaves the extension arg NULL, so it could only be part of the command path
+11:53:41 <hyperisco> but nowhere do I see .exe being added to that path
+12:02:56 <hyperisco> the original issue seems to be gone https://github.com/haskell/process/commit/270e43a2138898967da904e3d61a6e2589cb7b1a
+12:04:24 <hyperisco> adding .exe is part of https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessa ie CreateProcessA not CreateProcess
+12:05:49 <monochrom> Does "documentation for the Windows SearchPath API" say something about this?
+12:06:02 <hyperisco> I mean not part of SearchPathA https://docs.microsoft.com/en-us/windows/win32/api/processenv/nf-processenv-searchpatha which is what the process docs link to
+12:08:02 <monochrom> I still think it's simplest to find a way to ensure that "tsc.exe" exists.
+12:08:27 <hyperisco> it really isn't
+12:08:56 <hyperisco> tsc.cmd exists and I can use that if createProcess on tsc throws
+12:09:11 <hyperisco> I just wanted to know where this .exe thing is coming from
+12:09:37 <hyperisco> sstill unclear because process called CreateProcess I assume from windows.h but why do the docs call it CreateProcessA
+12:10:09 <monochrom> Does Windows have some kind of strace? That can speed up the search.
+12:10:15 <hyperisco> https://stackoverflow.com/questions/3060991/what-is-the-difference-between-createprocess-and-createprocessa it is just a macro for unicode vs ascii
+12:10:41 <hyperisco> so that's the end of that… Windows just puts .exe on if there is no extension, thanks Windows… I absolve you process package
+12:11:06 * geekosaur suspected as much, because windows
+12:11:37 <hyperisco> I guess that is why npm gives you both tsc and tsc.cmd lol
+12:12:13 <monochrom> It is a legacy thing that traces all the day back to DOS.
+12:13:22 <monochrom> and CP/M. DOS took this idea from CP/M
+12:13:24 <Chousuke> Meaningful file extensions are probably one of those "eh, good enough" choices made way back in the past that you just can't undo.
+12:13:25 <hyperisco> the docs really are linking to the wrong doc page though
+12:14:25 <monochrom> On this note actually we suffer a bit from "the victor wrote the history".
+12:16:25 <monochrom> There was two viable philosophies back then. Unix philosophy was "a file is a sequence of bytes, minimal metadata and semantics from the OS's POV". That was a singular, minority philosophy actually, all other OSes at the time said "a file is the bytes plus a lot of metadata to tell the OS what the file is intended for".
+12:16:53 <monochrom> Then all other OSes lost and Unix won.
+12:17:11 <geekosaur> tell that to Windows
+12:17:14 <Chousuke> the latter turned out to be a bad idea because you can lie to the OS and it can't trust the metadata anyway.
+12:17:19 <hyperisco> sigh but the .cmd depends on knowing its own directory which doesn't seem to work with CreateProcess
+12:17:23 <Chousuke> so the sane thing to do is to ignore it entirely.
+12:18:20 <monochrom> geekosaur, I mean the philosophy won, even Windows programmers now assume the Unix philosophy and consider extensions to be merely UI.
+12:19:01 <geekosaur> but the OS doesn't quite, as witness it adding ".exe" here. plus the hack I suggested which should have told it to use a null extension
+12:19:26 <geekosaur> (and "tsc" should have matched it as a result)
+12:19:44 <monochrom> And yet we actually know, when we're honest, that the Unix philosophy is wrong. Look at how Linux desktop systems have to add back an MIME type system, confessing that metadata about "file types" is right.
+12:20:15 <geekosaur> ^
+12:20:51 <hyperisco> tsc.: createProcess: invalid argument (Exec format error)
+12:21:21 <geekosaur> lovely. so it found it and tried to treat it as something other than an exe?
+12:23:14 <hyperisco>  If the file name ends in a period (.) with no extension, or if the file name contains a path, .exe is not appended.
+12:23:31 <Chousuke> monochrom: isn't MIME mostly about giving names to file types rather than accompanying each file with a declared type? Unless you're encoding it somehow, I suppose.
+12:23:51 <hyperisco> I don't know what the problem is
+12:24:08 <Chousuke> but even if something claims to be a jpeg image you'd still best not treat it as one until it's been successfully parsed and verified :P
+12:24:14 <hyperisco> SearchPathA doesn't seem to care about trailing periods
+12:24:54 <geekosaur> Chousuke, it's a mapping from extension to file type and utilities that can operate on files of that type. It can also include or work with magic(5) data (that is, identofying files by contents; see the "file" command)
+12:26:25 <hyperisco> geekosaur, oh, I see, it is saying the exe is not recognised by Windows, it did find it… ah ha… so presumably the extensionless file is intended for unix systems
+12:26:48 <geekosaur> possibly, yes. that is what I was getting at earlier
+12:26:54 <hyperisco> your hack works, and on Windows it is illegal to end a file with a dot iirc
+12:26:55 <geekosaur> it found it and didn't like its contents
+12:29:09 <geekosaur> ilegal to create such a file but if you specify one for an existing file it means "no extension". extensions are baked in pretty deep
+12:29:19 <Chousuke> geekosaur: right, so it's a mechanism for mapping identified types to applications that can work with those types, and you can use the filename extension to "identify" a file type if you want to. I suppose you'd need such a mapping even if you had the type built-in to the data.
+12:29:32 <monochrom> I don't know and won't be pedantic about whether the MIME RFCs are only about naming file types or more ambitiously promoting attaching such named file types to files.
+12:30:33 <monochrom> But the way Linux desktops do it is in lieu of an OS-sanctioned metadata system, let's look at filenames and a prefix of file contents to reverse-engineer-guess-approximate the real thing.
+12:31:16 <monochrom> And certainly naming/IDing file types is a prerequisite of attaching file types to files in an organized way.
+12:31:31 <geekosaur> also Macs, with an OS-sanctioned way but it's a layer above the core OS
+12:31:44 <geekosaur> and not available to e.g. ghc if it wanted to use it
+12:31:46 <monochrom> The other, most popular file system illustrates what I mean. That file system is widely known as HTTP.
+12:32:05 <hyperisco> okay, so if I use a shell process the .cmd works right… the puzzle pieces are coming together
+12:32:08 <geekosaur> (it's part of the Cocoa API)
+12:32:24 <hyperisco> annoyingly though I have to construct a shell expression instead of just passing an array of arguments
+12:32:41 <hyperisco> and last I checked that is nigh impossible to do correctly
+12:32:48 <monochrom> I can have an URL that goes "http://foo.com/xyz.pdf", and if the HTTP response header says that the file type of that file is text/html, then it's HTML, not PDF.
+12:33:25 <geekosaur> hyperisco: or portably
+12:33:43 <hyperisco> well it should work on unix because I try calling the executable directly first
+12:33:55 <hyperisco> doesn't have to go through a shell
+12:37:57 <hololeap> % import Control.Monad.Logic
+12:37:57 <yahb> hololeap: ; <no location info>: error:; Could not find module `Control.Monad.Logic'; Perhaps you meant; Control.Monad.Co (from kan-extensions-5.2); Control.Monad.Cont (from mtl-2.2.2); Control.Monad.Fail (from base-4.14.0.0)
+12:38:24 <[exa]> no prolog today
+12:38:43 <monochrom> yahb probably doesn't have logict installed
+12:38:58 <Chousuke> monochrom: I guess I'm more a fan of the simple and stupid approach of just treating everything as bytes. for HTTP, the header is a type hint, but you still can't trust that the data is anything other than a stream of bytes.
+12:39:14 <monochrom> "become a galaxy-level patron so you can instruct yahb to install one more package!"
+12:39:27 <geekosaur> but you have to have some idea of what parser to use to validate it, at minimum
+12:39:39 <Chousuke> yeah
+12:39:50 <Chousuke> I'm not sure that that's useful on the filesystem level though
+12:40:07 <geekosaur> it's useful at the level of apps getting data from the filesystem
+12:40:12 <monochrom> You are right that a receiver still has to parse, and to expect parse error. But the receiver also expects to not bother trying other parsers.
+12:40:45 <monochrom> If you say "text/html" I'm not going to try gunzip it.
+12:41:08 <geekosaur> unless the compression header says to
+12:41:12 <monochrom> even if the bytes scream "I'm gzip"
+12:41:20 <monochrom> Yeah, that.
+12:42:00 <monochrom> If you say "text/html" I'm not going to run objdump on it, even if the bytes scream "ELF"
+12:42:11 <hololeap> i'm confused as to how you use ListT
+12:42:18 <hololeap> *LogicT
+12:42:38 <[exa]> hololeap: any short example / confusing snippet?
+12:42:40 <monochrom> For the most part you can use it like you use a list monad.
+12:42:46 <hololeap> i know it has some kind of similarities to ListT, but i don't see how
+12:43:11 <monochrom> There is just one addition command to learn if you want the search to be BFS instead of DFS.
+12:43:33 <monochrom> Perhaps start with Logic instead of LogicT?
+12:44:20 <hololeap> i've played around with Logic a bit, but simply constructing a `Logic a` value is weird
+12:45:08 <[exa]> hololeap: how weird? (can't you construct `Logic a` using just `pure` ?
+12:45:19 * hackage ukrainian-phonetics-basic 0.1.0.0 - A library to work with the basic Ukrainian phonetics and syllable segmentation.  https://hackage.haskell.org/package/ukrainian-phonetics-basic-0.1.0.0 (OleksandrZhabenko)
+12:45:20 <Chousuke> monochrom: the other side of the coin is that if the metadata claims the file to be something and it looks like something else, it might get opened by an application you didn't expect which has a long history of causing problems. So I guess file extensions aren't completely awful for deciding the application to open, as long as they're visible to the user.
+12:46:07 <hololeap> odds = pure 1 `mplus` (odds >>= \i -> if i >= 100 then mzero else pure (i+2))
+12:46:23 <hololeap> is this roughly equivalent to [1,3..100]?
+12:46:28 <Chousuke> come to think of it, hashbangs are basically file metadata to decide the opening program. :P
+12:47:47 <[exa]> monochrom, Chousuke: btw sorry to jump into discussion, but the golden rule says that if the user/operator/etc is unable to instruct the programs to use correct data access methods, so he will fail at maintaining the metadata...unless the metadata becomes inseparable part of data, as it once had already, with file magic numbers
+12:47:49 <geekosaur> to decide the interpreter, to be specific (and the dynamic loader is treated as an interpreter)
+12:48:04 <monochrom> You can instantiate that to [] and get: odds = [1] ++ (odds >>= \i -> if i>=100 then [] else [i+2])
+12:50:04 <hololeap> ok, but i'm trying to construct something similar to [1,3..100], except i want it to be `Logic Int`
+12:50:16 <[exa]> (that said, I'd welcome if all file formats would have extensible magic, just like #!)
+12:50:22 <Chousuke> geekosaur: yeah. and if you're putting +x on any random file and running it, I don't think you can expect to stay secure. :P
+12:50:25 <hololeap> `observeAll odds` doesn't terminate
+12:50:30 <monochrom> Just add "odds :: Logic Int"
+12:51:40 <geekosaur> because if you try to observe all of it, it just keeps going through values after it hits the limit (empty list doesn't mean "stop", any more than it does for the list comprehension example)
+12:51:45 <monochrom> Probably the [] instantiation won't either.
+12:52:02 <geekosaur> Chousuke, yet it's common for scripts to work that way
+12:52:09 <monochrom> > let odds = pure 1 `mplus` (odds >>= \i -> if i >= 100 then mzero else pure (i+2)) in odds :: [Int]
+12:52:12 <lambdabot>  [1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53...
+12:52:16 <hololeap> your right, it doesn't
+12:52:19 <monochrom> actually need a smaller test
+12:52:23 <monochrom> > let odds = pure 1 `mplus` (odds >>= \i -> if i >= 10 then mzero else pure (i+2)) in odds :: [Int]
+12:52:26 <lambdabot>  [1,3,5,7,9,11*Exception: <<loop>>
+12:52:44 <monochrom> Not a good program in the first place IMO
+12:52:52 <geekosaur> huh, I expected a timeout, not <<loop>>
+12:53:15 <monochrom> You don't do left recursion like that (odds = odds >>= ...)
+12:53:36 <geekosaur> oh, hm, I guess it does do that, yeh
+12:54:18 <hololeap> so, does a Logic computation by default not terminate, but requires observeMany to terminate it?
+12:54:36 <geekosaur> it's just the way this one was constructed
+12:54:37 <Chousuke> geekosaur: it is. I read most scripts before I run them, though of course I have to trust some things. Generally whatever is installed from OS package management is auto-trusted.
+12:54:56 <monochrom> I would rather code up a forward constraint propagation algorithm for learning logict.
+12:55:19 <Chousuke> geekosaur: I am very uncomfortable every time I have to use pip or gem or whatnot for whatever purpose.
+12:55:33 <hololeap> well, how would i write a `Logic Int` computation that would evaluate to [1,3,5,7,9] when used with observeAll?
+12:56:58 <monochrom> odds i | i < 100 = pure i <|> odds (i+2)
+12:57:11 <monochrom> | otherwise = empty
+12:57:33 <monochrom> change to mplus/mzero if Logic doesn't support Applicative
+12:58:47 <monochrom> May the odds be ever in your favour.
+12:58:52 <hololeap> hold on, i thought mzero/empty wouldn't stop the computation
+12:59:52 <hololeap> oh, i see. it never calls `odds` on the second branch. in my original example it calls it no matter what.
+13:00:18 * hackage ordinal 0.3.0.0 - Convert numbers to words in different languages.  https://hackage.haskell.org/package/ordinal-0.3.0.0 (wvanonsem90)
+13:01:44 <monochrom> Oddly enough, "odds = pure 1 <|> fmap (+ 2) odds" is much more well defined that adding "if i>=100 then empty"
+13:02:30 <hololeap> ok, i see now. it looks like i was over-complicating things, although i still don't have an intuition for this. the type signature `forall r. (a -> r -> r) -> r -> r` is not intuitive to me
+13:02:40 <hololeap> monochrom: how is it more well defined?
+13:03:28 <tabaqui> Allright, I'm using simple recusion to implement my dsl
+13:03:37 <tabaqui> Now I have another issue
+13:04:08 <tabaqui> type family VarType (a :: Symbol) :: *
+13:04:11 <monochrom> The different between "an infinite 'loop' that actually is productive in giving you an infinite list" and "an infinite loop that doesn't accomplish anything"
+13:04:33 <tabaqui> f :: Sing a -> VarType a
+13:04:51 <tabaqui> How can I write any function with such signature?
+13:05:10 <hololeap> monochrom: oh, i see what you mean
+13:05:34 <monochrom> If you're going to do an infinite "x0 ++ x1 ++ x2 ++ x3 ++ ...", you would rather each xi be a non-empty list, so that the whole thing is an infinite list, rather than...
+13:05:38 <tabaqui> I've tried to compare singletons with %==, but Haskell doesn't accept it as a proof
+13:06:14 <monochrom> rather than from x50 onwards it's all xi=[] so the list should end but the computer doesn't know and chases gooses.
+13:09:15 <tabaqui> Oh, probably I could replace TypeFamilies
+13:10:03 <ski> (or at least, infinitely many of them being non-empty)
+13:11:11 <ski> hololeap : `forall r. (a -> r -> r) -> r -> r' is (doubly) CPS (success, and failure, continuation)
+13:12:28 <hololeap> ski: i don't have much of an intuition for cps, so that doesn't help much
+13:13:02 <hololeap> i can see how (a -> r -> r) is roughly equal to (:) and r is roughly equal to []
+13:14:18 <hololeap> % :t runContT
+13:14:18 <yahb> hololeap: ContT r m a -> (a -> m r) -> m r
+13:14:45 <hololeap> % :t ContT
+13:14:45 <yahb> hololeap: ((a -> m r) -> m r) -> ContT r m a
+13:26:54 <ski> @unmtl ContT () (Cont r) a
+13:26:54 <lambdabot> (a -> (() -> r) -> r) -> (() -> r) -> r
+13:26:58 <ski> hololeap ^
+13:27:59 <hololeap> huh, ok
+13:29:06 <ski> (that's what i meant by "doubly". there's two CPS "levels", one on top of the other one)
+13:29:22 <ski> hololeap : happen to know any Prolog ?
+13:30:22 <hololeap> unfortunately, no. and i don't have a specific use-case needing Logic(T). i was just trying to understand another tool
+13:30:48 * hackage ordinal 0.3.1.0 - Convert numbers to words in different languages.  https://hackage.haskell.org/package/ordinal-0.3.1.0 (wvanonsem90)
+13:31:46 <ski> well, consider using lists as "multiple alternative successes"
+13:32:03 <ski> what the `Applicative' and `Monad' instance of `[]' gives you
+13:33:42 <ski> you can think of `child :: Person -> [] Person' as computing for you "an arbitrary child" of a person (given some family relations database / knowledge base that this queries)
+13:34:19 <ski> (well, let's rename that function to `childOf')
+13:34:49 <hololeap> interesting that you're not naming it "childrenOf", but i think i see where you're going
+13:35:09 <ski> then you could define `grandChildOf :: Person -> [] Person; grandChild person = do child <- childOf person; grandChild <- childOf child; return grandChild'
+13:35:20 <ski> the point is to "think in the singular", so to speak
+13:35:49 <ski> it just so happens that it'll actually try all the children, so sequencing `;' here in `do' acts like nested loops
+13:37:27 <hololeap> grandChildOf = childOf >=> childOf
+13:37:35 <ski> in Prolog, you'd write this as `grand_child_of(Person,GrandChild) :- child_of(Person,Child),child_of(Child,GrandChild).' (where you can read `:-' as "if")
+13:38:54 <ski> ("`GrandChild' is a grand-child of `Person', if `Child' is a child of `Person', and `GrandChild' is a child of `Child'." is how you could read it out aloud)
+13:40:55 <ski> consider `between(1,5,N),N > 2,M is N*N,M < 10'
+13:41:22 <ski> `between(1,5,N)' will have five solutions for `N', being the integers between `1' and `5' (inclusive)
+13:42:40 <ski> at first, `N = 1' is tried (first solution of that between/3 call). then `N > 1' is tried, but this fails (no solutions / "empty list of solutions"). this causes "backtracking" (the program "executing backwards"), going back to the last point where we had an alternative choice, which here was the between/3 call
+13:43:52 <ski> so, the next solution of that call is tries, which is `N = 2', so execution resumes going forward again. but this solution also fails the test `N > 2', so we backtrack again, getting `N = 3' as solution from between/3, this time, finally passing the `N > 2' test
+13:44:46 <ski> next, we compute `M' to be the square of `N', so now `M = 9'. and this passes `M < 10', so we have an overall solution to the whole query : `N = 3,M = 9' (`,' means "and")
+13:44:52 <ski> hololeap : making any sense ?
+13:45:22 <ski> > [(m,n) | n <- [1 .. 5],n > 2,let m = n*n,m < 10]
+13:45:24 <lambdabot>  [(9,3)]
+13:45:26 <ski> is the Haskell version of this
+13:45:59 <ski> > do n <- [1 .. 5]; guard (n > 2); let {m = n*n}; guard (m < 10); return (m,n)  -- or, with `do'-notation
+13:46:01 <lambdabot>  [(9,3)]
+13:47:45 <dminuoso> phadej: Hi! I recall you had a nice diagram of profunctor optics and their hierarchy, along with their profunctor constraints (Strong, Choice, etc). Was that up on the Glassery.md? If so, the images there are broken. :(
+13:48:14 <ski> anyway ..
+13:49:29 <hololeap> dminuoso: this? http://i.imgur.com/ALlbPRa.png
+13:49:37 <ski> .. after getting the first solution `N = 3,M = 9', we can ask the Prolog interactor to check if it can find any other/more. (usually by pressing `;', which means "or"). conceptually, this acts as we telling Prolog we're not satisfied with the solution it found, so that it should try to find another
+13:49:53 <hololeap> dminuoso: sorry, that's lens not profunctors
+13:50:28 <ski> (similar to how the `N > 2' test "told" the between/3 call that the first two solutions of it were no good, by starting backtracking ("backward execution"), so control returned back, "unreturned into", that between/3 call)
+13:51:47 <ski> in this case, the last choice-point was still in between/3 (none of the other goals after it had alternative solutions). so we'll then try `N = 4', which passes the `N > 2' test, but then the `M < 10' test fails (since `M = 16' then). and similarly the `N = 5' solution also fails, so we try to backtrack to the left of the first call (to between/3), and "hit the wall"
+13:51:54 <ski> meaning, there are no (more) solutions
+13:52:24 <ski> hololeap : that's a very quick intro to backtracking in Prolog
+13:52:48 <hololeap> ski: so how would this look using the Logic monad?
+13:53:41 <ski> well
+13:53:47 <ski> first a little detour
+13:54:13 <ski> consider how ordinary functions or procedures, in a strict programming language (like e.g. C) can be implemented
+13:54:39 <ski> when calling a function, we will need to tell it where execution is to continue, after it has done its work
+13:55:59 <ski> in assembler, there's commonly an `rts' instruction, for returning, and a `jsr' or `call' instruction, for calling. the latter will e.g. put the address of the next instruction in a register, or on the stack. and the former will jump to that address, resuming control to the caller
+13:56:13 <ski> the return address is a continuation
+13:57:15 <ski> conceptually, it's an extra parameter that we pass, when calling a "function" (really, jumping to a memory address, with the expectation that parameters are passed in some standard locations, usually either in registers, or at some position relative to a current stack pointer)
+13:58:46 <ski> in Haskell, a type `T' is equivalent to `forall o. (T -> o) -> o' (aka `forall o. Cont o T'). here the callback argument of type `T -> o' plays the same role as "what to do after"
+13:59:37 <ski> but, to (efficiently) implement the Prolog execution, we need some way to be able to resume execution inside a call, e.g. to between/3, after it has already returned successfully !
+14:00:40 <ski> so, when between/3 returns, having succeeded in finding a solution, it will tell us a "redo" address, which we can jump to, if/when we're not satisfied with the current solution, would like the call to try to find another one, the next one
+14:01:35 <ski> similarly, since a call may fail to have any solutions, and we may also run out of all the solutions it has, we need some way to tell it what to do (where to jump), if case it fails to find any (more) solutions. this is the "failure continuation"
+14:02:16 <ski> so, instead of passing a single "return address", when calling a function, we're to pass two addresses. one being a "success continuation", and one being a "failure continuation"
+14:02:39 <ski> in case there's no (more) solutions, it'll continue using the latter
+14:03:35 <ski> in case there's one (more) solution, it'll continue, using the former. also passing to the former the "redo", which is what we'll pass as "failure continuation" to the next call, so it knows where to "backtrack to", if it fails (runs out of solutions)
+14:03:58 <ski> so, consider a function of type `T -> [] U'
+14:04:13 <ski> we'll replace `[] U' by continuation-passing
+14:05:04 <ski> first we'll say `T -> (U -> ...) -> ...', where `U -> ...' is the (type of the) success continuation, that will be passed an `U' result/solution (if any is found)
+14:05:42 <ski> but we also need a failure continuation, a separate parameter, so `T -> (U -> ...) -> (...) -> (...)'
+14:06:19 <ski> if we were in a strict language, we'd need to model the failure continuation as a function (to delay computation of it)
+14:06:47 <ski> we'd have `T -> (U -> ...) -> (() -> o) -> o'
+14:08:22 <ski> e.g. consider a definition of `between :: Integer -> Integer -> Logic Integer', where `Logic a' means something like `(a -> ...) -> (() -> o) -> o'
+14:08:26 <ski> base case is
+14:08:59 <ski>   between lo hi succeess failure | lo > hi = failure ()
+14:09:43 <ski> so, if there's no integers within the given bounds, we (tail-)call the failure continuation
+14:10:12 <ski> (and this forces the return type of the failure continuation to be the same as the overall return type. the "final result/answer" type `o')
+14:10:42 <ski> next, we need to elaborate the type of the success continuation
+14:11:17 <ski> i said that it should be passed (by `between', in this case), a "redo", where to continue, if we want to search for more solutions
+14:12:04 <ski> and i mentioned that that "redo" is actually also a failure continuation (which could be passed to further calls, down the line, to let them know where to go (back, where to backtrack to), if they fail to find any solution)
+14:13:03 <ski> so, we refine `T -> (U -> ...) -> (() -> o) -> o' further to `T -> (U -> (() -> o) -> o) -> (() -> o) -> o' (so `Logic a' is `(a -> (() -> o) -> o) -> (() -> o) -> o', or actually `forall o. (a -> (() -> o) -> o) -> (() -> o) -> o')
+14:13:30 <ski> so, the successful case of `between' now becomes
+14:14:15 <ski>   between lo hi success failure = success lo redo
+14:14:17 <ski>     where
+14:14:36 <ski>     redo () = between (lo + 1) hi success failure
+14:15:07 <ski> however, in a non-strict language, we can drop the `()' argument types, so we have just
+14:15:35 <ski>   between :: Integer -> Integer -> ((Integer -> o -> o) -> o -> o)
+14:16:58 <ski> hololeap : so .. this is more or less what `Logic' does. next, you'd go on to define conjunction (which is basically `(>>=)'), and also disjunction
+14:17:58 <ski> what the CPS does, in Haskell, is it makes the "list of successes/solutions" virtual, passed directly to consumers
+14:25:38 <hololeap> but we also need a continuation of sorts, that ignores its argument, to be used in the case of failure
+14:25:43 <hololeap> i'm with you so far
+14:26:53 <ski> (some of that may have been a bit unclear. do yell if you wonder about something)
+14:28:32 <ski> (btw, `between' is just a version of `enumFromTo', which is what `\lo hi -> [lo .. hi]' amounts to)
+14:31:01 <tomsmeding> this is a new one:  'variance introduced by outliers: -9223372036854775808% (severely inflated)'
+14:31:57 <koz_> Uhh...
+14:32:09 <koz_> That's an oddly specific number there.
+14:32:22 <ski> negative variance ?
+14:32:46 <tomsmeding> unsure
+14:32:52 <tomsmeding> it _is_ an oddly specific number
+14:33:19 <ski> criterion ?
+14:33:23 <tomsmeding> yeah
+14:33:42 <tomsmeding> > printf "%x" 9223372036854775808
+14:33:44 <lambdabot>  error:
+14:33:44 <lambdabot>      • Ambiguous type variable ‘a0’ arising from a use of ‘show_M315352001722...
+14:33:44 <lambdabot>        prevents the constraint ‘(Show a0)’ from being solved.
+14:33:51 <tomsmeding> > printf "%x" (9223372036854775808 :: Integer)
+14:33:53 <lambdabot>  error:
+14:33:53 <lambdabot>      • Ambiguous type variable ‘a0’ arising from a use of ‘show_M830512809473...
+14:33:53 <lambdabot>        prevents the constraint ‘(Show a0)’ from being solved.
+14:34:00 <ski> > printf "%x" 9223372036854775808 :: String
+14:34:02 <lambdabot>  "8000000000000000"
+14:34:08 <ski> ooh
+14:34:09 <tomsmeding> OverloadedStrings?
+14:34:18 <tomsmeding> but yeah INT64_MIN
+14:34:36 <ski> @type "abc"
+14:34:37 <lambdabot> [Char]
+14:34:38 <ski> @type printf
+14:34:39 <lambdabot> PrintfType r => String -> r
+14:34:46 * tomsmeding is confused
+14:35:13 <tomsmeding> oh PrintfType is the thing as always with printf
+14:35:27 <ski> it's the vararg trick thing, yea
+14:35:45 <tomsmeding> the only reason I used printf is that I failed to remember showIntAtBase
+14:35:55 <tomsmeding> I floundered between showBase, showAtBase, showIntBase
+14:36:46 <tomsmeding> but I'm not sure what criterion is up to
+14:39:27 <monochrom> 9223372036854775808 looks like an invalid file descriptor we ran into a week or two ago.
+14:39:42 <monochrom> Now it is negated and presented as an illegal variance? :)
+14:44:40 <tomsmeding> well an invalid file descriptor it certainly is, though I'm curious how you got a file descriptor in a 64-bit int
+14:47:04 <dolio> > minBound :: Int
+14:47:06 <lambdabot>  -9223372036854775808
+14:52:21 <tomsmeding> ah apparently criterion gets confused when you pass it a benchmark that takes <1ms until you repeat it 14 times, then it takes 3 seconds
+14:52:37 <monochrom> Oddly enough, -9223372036854775808 is an even number, not an odd number. >:)
+14:52:42 <tomsmeding> how my function gets that behaviour is yet unknown, but at least that's an interesting factoid
+14:52:56 <tomsmeding> monochrom: is that odd?
+15:03:04 <AWizzArd> Are there implementations of `sequence` that are not `sequence = sequenceA`?
+15:04:39 <ghoulguy> There are two trivial cases of that in http://hackage.haskell.org/package/base-4.14.0.0/docs/src/Data.Traversable.html#sequence
+15:04:50 <ghoulguy> I don't know of any interesting cases off the top of my head though
+15:07:49 <crestfallen> hi does each line of a do block (after the first line) end up initially with essentially m(m a) .. thus requiring join   ? i.e. is (>>= id) applied on each line?
+15:12:19 * hackage b9 3.2.0 - A tool and library for building virtual machine images.  https://hackage.haskell.org/package/b9-3.2.0 (SvenHeyll)
+15:14:24 <crestfallen> because in kleisli composition we have this:     https://termbin.com/xnxfu      where the result is m(m c) , requiring join to make it behave like bind
+15:14:57 <crestfallen> if I understand correctly
+15:17:44 <dolio> AWizzArd: There is an implementation that is operationally different in ways that usually wouldn't matter much.
+15:18:38 <dolio> Although it used to matter more when GHC treated stack as a more limited resource than heap.
+15:18:56 <texasmynsted> hello
+15:21:35 <crestfallen> I ask because I saw this notation     do; ma <- mma      so that must indicate join is applied. is that correct?
+15:22:42 <koz_> texasmynsted: Sup?
+15:23:43 <crestfallen> koz_, hi are my ramblings above correct?
+15:23:51 <koz_> crestfallen: Your ramblings above are unclear.
+15:24:01 <crestfallen> hmm
+15:24:05 <koz_> At this point, I would say 'just write the do-notation desugaring by hand'.
+15:24:11 <koz_> And also 'stop getting hung up on syntax'.
+15:24:16 <koz_> There is nothing special about that naming.
+15:24:28 <koz_> I could have written the above snippet as do; foo <- bar.
+15:24:38 <koz_> How you name variables doesn't change semantics.
+15:25:37 <crestfallen> yeah, I was thinking about join and (>>= id) if that operates for every action in a do block.
+15:26:06 <koz_> If you are unclear how any given do-block operates, seriously, break out a whiteboard (or pen and paper, or whatever), and do the desugaring by hand.
+15:26:29 <crestfallen> for purposes of flattening the left side of bar <- foo
+15:26:33 <koz_> Do this a few times, and you'll see it without having to do that step.
+15:27:18 * hackage ukrainian-phonetics-basic 0.1.1.0 - A library to work with the basic Ukrainian phonetics and syllable segmentation.  https://hackage.haskell.org/package/ukrainian-phonetics-basic-0.1.1.0 (OleksandrZhabenko)
+15:28:08 <texasmynsted> not much
+15:29:34 <crestfallen> koz_, thank you - the thing is I believe I understand bind best from understand the type unification of (<<= id). so I'm thinking in those terms (yes, at the type level :/   )
+15:29:45 <crestfallen> from understanding*
+15:29:57 <koz_> crestfallen: I would argue that, for understanding do-notation, this is a _terrible_ plan.
+15:30:05 <koz_> Do-notation is syntactic sugar.
+15:30:17 <koz_> If you want the semantics of a particular piece of do-notation, desugar it.
+15:30:34 <koz_> That is 100% of the issue, and tying yourself in knots about it like this impedes your own understanding.
+15:32:52 <crestfallen> wow, ok thanks. like this I get: Just (Just a) >>= id  ==> Just a 
+15:33:10 <texasmynsted> wow. stan is working for me now. :-) It is really helpful
+15:33:24 <koz_> OK, then your only issue is that you have to stop thinking about do-notation as _anything_ other than syntactic sugar.
+15:33:38 <koz_> Literally, just go 'right, this is do-notation, let's manually desugar'.
+15:33:42 <koz_> And do this until it sticks.
+15:35:00 <crestfallen> koz_, while learning, I need to take any angle I can get. (>>= id) brought a lot of insight. so yeah I'm hung up on it presently :)
+15:35:26 <koz_> crestfallen: And I'm telling you that your attempt at angling is getting you _more_ confused.
+15:35:41 <koz_> Literally, do-notation is syntax sugar. Nothing more, nothing less. Approach it as such, nothing else.
+15:36:02 <monochrom> do-notation doesn't desugar to join or >>=id.
+15:36:37 <crestfallen> someone on the channel told me to use >>= instead. not sure of the context of that chat, but I do prefer it somehow.
+15:37:01 <koz_> crestfallen: Nobody's holding a gun to your head and forcing you to use do-notation.
+15:37:13 <crestfallen> !! thanks
+15:37:30 <monochrom> Preference is irrelevant. do-notation desugars to >>=. Not join, not >>=id.
+15:38:42 <crestfallen> well, if I could ask differently: is (>=>) just like bind, sans join?
+15:39:07 <davean> sans join?
+15:39:08 <crestfallen> meaning >=> sans join
+15:39:32 <crestfallen> >=> doesn't implement join
+15:39:33 <monochrom> I refuse to talk about "like". Everything is like everything. Everything is also unlike everything else.
+15:41:18 <davean> Hum, in this case we're talking about something precise. We can say "A can be implimented with the same code as B, except lacking exactly the inclusion of a join"
+15:41:51 <koz_> monochrom is like koz_.
+15:42:11 <monochrom> http://www.vex.net/~trebla/humour/tautologies.html #0
+15:42:55 <crestfallen> for example, this is lost on me:
+15:43:21 <crestfallen> λ > :t (>=> join)
+15:43:24 <crestfallen> (>=> join) :: Monad m => (a -> m (m (m c))) -> a -> m c
+15:43:41 <davean> monochrom: perhaps you'd prefer the question "What is the relation of (>>=) and (>=>) in regards to 'join'?"?
+15:43:49 <monochrom> Fortunately (>=> join) seldom comes up at all.
+15:44:06 <davean> I don't know why that would come up - thats a weird structure
+15:44:07 <crestfallen> davean thanks I need that terminology!
+15:47:44 <crestfallen> davean, if you care to look, this is from a bartosz tutorial: https://termbin.com/xnxfu
+15:48:12 <crestfallen> https://www.schoolofhaskell.com/user/Lkey/kleisli
+15:48:28 <davean> crestfallen: right and join takes 'm (m a) -> m a'
+15:49:19 <crestfallen> yeah that was helpful, I thought anyway :)
+15:49:22 <davean> Because of a property of m
+15:49:39 <davean> Its not helpful for me, and I'm unclear why its helpful for you which worries me but :)
+15:49:39 <koz_> Is there such a thing as mapMaybeM?
+15:49:56 <davean> koz_: yes?
+15:50:03 <davean> in a few packages
+15:50:11 <koz_> @hoogle mapMaybeM
+15:50:11 <lambdabot> Data.Conduit.List mapMaybeM :: Monad m => (a -> m (Maybe b)) -> ConduitT a b m ()
+15:50:11 <lambdabot> Control.Monad.Extra mapMaybeM :: Monad m => (a -> m (Maybe b)) -> [a] -> m [b]
+15:50:11 <lambdabot> Extra mapMaybeM :: Monad m => (a -> m (Maybe b)) -> [a] -> m [b]
+15:50:35 <davean> You can easily compose it from base with catMaybes and mapM of course
+15:50:49 <davean> Which is generally what I do ... repeatedly
+15:50:55 <koz_> davean: Rofl.
+15:52:13 <koz_> :t catMaybes
+15:52:14 <lambdabot> [Maybe a] -> [a]
+15:52:19 <koz_> (miaow)
+15:52:37 <davean> I just grepped, the occurencies of the obvious definition currently in my projects on this computer is depressing.
+15:52:41 <crestfallen> davean, helpful because m(m a) needs a flatten. so it led me to think if flatten is implicit in >>= alone. also because of seeing this notation which implies that:     do; ma <- mma
+15:53:51 <davean> er ...
+15:54:04 <davean> So try desuggering what actually happens there.
+15:54:30 <crestfallen> thanks ko*z suggested that but I'm not sure what to do..
+15:54:44 <davean> Also, if you think of it as "flattening" its one *very* specific notion of that at best.
+15:55:10 <crestfallen> thanks that's helpful
+15:55:12 <davean> Not saying you're entirely off base, but I think that conceptualization will lead you astray
+15:55:44 <davean> crestfallen: so you've never seen how "do" desugars?
+15:56:30 <crestfallen> davean I'm reviewing some stuff after a long and difficult absence from learning. not sure
+15:57:09 <crestfallen> pretty straightforward, I guess?
+15:57:13 <davean> EXTREMELY
+15:57:19 <davean> crestfallen: you might want to look at the Haskell Report
+15:57:26 <davean> it isn't very long and its very clear and covers all the sugar
+15:57:34 <davean> which is *just* sugar and really only has one rule.
+15:57:47 <crestfallen> excellent thanks.. looking now
+15:58:07 <monochrom> Nah, the whole Haskell Report is pretty long. But don't worry, the section on do-notation is short, as promised.
+15:59:05 <davean> Ok, right
+15:59:20 <crestfallen> cool
+15:59:51 <MarcelineVQ> monochrom: I saw a tutorial once by some unknown author that covered the sugar quite well, also covered IO at the same time amazingly
+15:59:55 <davean> It has a lot of (mostly irrelivent) code also, for the basic libraries for example - ignore all that of course
+16:00:06 <monochrom> haha
+16:01:04 <davean> "do" is less than a page
+16:01:16 <davean> (and most of it is the grammar for it)
+16:01:52 <monochrom> Oh, right, the Haskell Report includes treating "general_pattern <- foo" using "fail", that's going to be distracting.
+16:02:13 <davean> Oh damn it is out of date on that
+16:02:45 <MarcelineVQ> fret not
+16:02:58 <crestfallen> yeah I get that pretty much
+16:03:07 <davean> Its MonadFail instead of Monad, but thats kinda minor
+16:03:10 <davean> still, annoying.
+16:05:10 <crestfallen> but id changes things in far more interesting ways than I would have expected
+16:05:25 <davean> id changes things? What do you mean?
+16:05:40 <crestfallen> one moment
+16:09:41 <crestfallen> davean, I'm still looking for a study I did, but i.e. when it's determined the g :: id   here    https://termbin.com/m3z6
+16:10:49 <crestfallen> finding the type of f
+16:10:51 <crestfallen> f g h x y = g (g x) (h y)
+16:12:18 <davean> What do you tihnk 'id' is "changing" there?
+16:12:35 <davean> If g can only *be* 'id' in what sense has anything changed? 
+16:15:05 <crestfallen> in that case I meant that seeing how g resolves to id was quite surprising. davean 
+16:15:45 <davean> Ah, sure. Not sure the relation to 'do' notation, but ow I understand what you meant at least.
+16:16:00 <davean> f is a very weird function
+16:18:56 <ski> crestfallen : "does each line of a do block (after the first line) end up initially with essentially m(m a) .. thus requiring join" -- yes, essentially. that is, each implicit use of `(>>=)' (connecting lines, more or less) could be thought of as `fmap' and `join'
+16:19:40 <davean> Specificly we can implikent join and (>>=) via each other basicly.
+16:19:59 <crestfallen> ski thanks! you have an uncanny ability to decipher my rambling!
+16:20:52 <ski> (you could think of the collapsing of `m (m (m (..(m (m a))..)))' (as many `m's, as there's commands in the `do', minus one) into `m a', as effecting the (dynamic) sequencing of effects)
+16:21:21 <crestfallen> I thought so ski , because of this little ditty from kleisli composition: https://termbin.com/xnxfu
+16:21:33 <ski> yes
+16:22:16 <crestfallen> yeah that's what I thought. each action would produce a nested layer
+16:23:20 <ski> (for an idiom `i' (that is `i' an instance of `Applicative'), you instead collapse `(i a,i b,i c,...,i y,i z)' to `i (a,b,c,...,y,z)', the combination of the multiple `i's here into a single one is what i sometimes refer to as "static sequencing")
+16:25:41 <crestfallen> is that why the monad keeps the nested function 'pure' ? because the structure of the 'outer' monad is immutable? ski
+16:25:45 <ski> for a monad `m', you can decide what to do next, depending on the results of the effect interaction you do first. so, to read a line in `IO', and then to output that line, you can do `fmap putStrLn getLine', which has type `IO (IO ())'. but to get this into a single `IO ()' that will first input a line, then output it, you use `join'
+16:26:02 <ski> (the "first .., then .." is the (dynamic) sequencing here)
+16:26:22 <ski> i don't understand the question
+16:27:05 <sshine> crestfallen, "the monad keeps the nested function 'pure'" does not parse here, either.
+16:27:13 <ski> `join' can be thought of as combining the effects described by two `m'-layers, one nested inside the other. combining them into a single `m'-layer, that does the effects of both the original layers
+16:27:19 <sshine> crestfallen, maybe you could simplify
+16:27:42 <ski> `pure'/`return', on the other hand, introduces a "dummy" layer, which doesn't actually do any effect
+16:28:12 <crestfallen> ski yeah the single 'm' layer gains complexity as you go through each action
+16:28:29 <ski> (hm .. but on second reading, possibly you weren't talking about the operation `pure', belonging to the type class `Applicative' ..)
+16:29:02 <crestfallen> ski is my last post correct?
+16:29:32 <ski> i don't know what you mean by ".. layer gains complexity"
+16:29:42 <ski> (also "each action" -- each of which actions ?)
+16:29:53 <davean> waht is complexity?
+16:30:08 <crestfallen> there are more effects in the single m (a) layer ultimately I guess?
+16:30:25 <ski> after you've used `join', yes
+16:30:32 <davean> I'm weirded out here crestfallen because you seem to be taking a rigorous approach with some things, yet your thinking seems entirely fuzzy so I feel like I'm missing something large in this convesation
+16:30:39 <crestfallen> that's what I meant by complexity
+16:31:01 <crestfallen> davean, I have a screw loose :)
+16:31:54 <sshine> > join [[1,2,3],[4,5,6],[7,8,9]]
+16:31:56 <lambdabot>  [1,2,3,4,5,6,7,8,9]
+16:32:01 <sshine> > join (Just (Just 5))
+16:32:04 <lambdabot>  Just 5
+16:32:30 <crestfallen> a monad gains complexity because structure is added every time >>= is applied.
+16:32:58 <davean> Uh, "cocks head for a different view of that statement"
+16:32:58 <ski> > [join actionYieldingAction | actionYieldingAction <- [Nothing,Just Nothing,Just (Just 5)]]
+16:33:01 <lambdabot>  [Nothing,Nothing,Just 5]
+16:33:18 <ski> crestfallen : "a monad" -- no, a monadic action. not a monad
+16:34:14 <sshine> > Just 42 >>= pure >>= pure >>= pure -- more complex?
+16:34:17 <lambdabot>  Just 42
+16:34:20 <crestfallen> so at the math level, the object is gaining complexity from each morphism that is applied
+16:34:35 <ski> yes, "more" in the lax sense, as `>=', not as `>'
+16:35:23 <crestfallen> isn't that what it is in the math?
+16:35:41 <sshine> > (2 + 2) `mod` 3 -- more complex at the math level?
+16:35:43 <lambdabot>  1
+16:35:46 <ski> crestfallen : consider `[0,1,2] >>= \x -> [x^2,-x^2] >>= \y -> []'
+16:37:22 <ski> (aka `map (\x -> map (\y -> []) [x^2,-x^2]) [0,1,2]'. or `[z | x <- [0,1,2],y <- [x^2,-x^2],z <- []')
+16:37:29 <sshine> crestfallen, I'm not really an expert at the math level, but I'd think that monoidal composition just yields another member. so if there's any complexity added, it's at the computational level, since you have a bigger expression that needs to be resolved.
+16:38:19 <ski> crestfallen : after we've added the `>>= \y -> []' at the end, we get an empty list. if we add some further `>>= \z -> ..z..', we'll still have an empty list
+16:38:31 <crestfallen> sshine but I thought that the object.. the monad structure, is increased upon, but ski just illustrated that it's not always the case    [0,1,2] >>= \x -> [x^2,-x^2] >>= \y -> []
+16:39:11 <ski> so, in this case, adding `>>= \y -> []' makes things "simple" in the sense of getting a plain empty list (that no further use of `>>=' can change to a non-empty list)
+16:39:21 <sshine> crestfallen, at the syntactic level, many >>=s chained together is more complex. upon evaluation, it really depends.
+16:39:28 <crestfallen> the list is unchanged.. but in the intermediary steps, it "takes on" complexity, I thought
+16:39:52 <ski> compare with multiplying numbers. if you have `a * b * c * ... * y * z'
+16:40:16 <ski> as you multiply `a' by `b', then the result of that by `c', and so on, you'd generally say you get something more complex
+16:40:48 <ski> but if one of the factors happen to be zero, then regardless of what the latter factors you multiply in are, you'll still always get zero
+16:41:07 <crestfallen> exactly. adding 2 + 3 gives us five, which has unique properties
+16:41:23 <crestfallen> exactly two posts back ski
+16:41:48 <crestfallen> compare with multiplying numbers ....
+16:42:08 <ski> so, you could say, that in general, you get more complexity (where "more" really means "more, or else the same" (that is "not less")). but in special cases, you could get something simpler
+16:45:11 <crestfallen> yeah. so ski in category theory, I've read that the object can literally expand, change dimension, once morphisms are applied. isn't what this is about?
+16:45:32 <ski> i don't know what you mean by that
+16:45:33 <crestfallen> in the case where they become more complex..
+16:45:48 <ski> in category theory, morphisms are not applied to objects
+16:46:01 <crestfallen> they are applied to sets, right?
+16:46:09 <ski> what's called "objects", there, is the possible domains and codomains of morphisms
+16:46:13 <ski> no
+16:46:16 <ski> they aren't applied at all
+16:46:19 <ski> they're composed
+16:46:30 <crestfallen> right, actually I meant that..
+16:46:52 <crestfallen> so monad is a composition, because the structure changes
+16:47:01 <ski> in category theory, if you have `f : A >---> B' and `g : B >---> C', you can compose them as `g . f : A >---> C'
+16:47:13 <ski> but there is no application like `f(x)'/`f x'
+16:47:26 <ski> objects, like `A', doesn't have "elements"
+16:47:44 <crestfallen> no, but 'A' has structure, right?
+16:47:52 <ski> "so monad is a composition, because the structure changes" -- sorry, dunno what this means
+16:48:15 <crestfallen> (>>=) is a form of composition is what I meant
+16:48:50 <ski> from the point of view of category theory, the "structure" of an object like `A' is given in terms of knowing which morphisms compose to which morphisms
+16:49:08 <crestfallen> yes!
+16:49:49 <ski> but when you "implement" a category, you can choose to implement the objects as some sort of set/type, commonly with some extra "structure" (like having a binary operation, and a neutral element, which could give us a monoid)
+16:49:53 <crestfallen> category theory applies to monadic actions, because the object is changing
+16:50:18 <crestfallen> the structure of the object, is what I was led to believe.
+16:50:24 <ski> `(>=>)' corresponds to composition (in "the Kleisli category"), `(>>=)' does not
+16:50:51 <crestfallen> one moment pls
+16:50:56 <ski> i don't understand "category theory applies to monadic actions, because the object is changing" either
+16:51:31 <monochrom> I'm pretty sure this word game is getting nowhere.
+16:51:56 <MarcelineVQ> lol deadk
+16:52:29 <MarcelineVQ> ghoulguy: your good natured antics have gone too far!
+16:52:33 <crestfallen> buzz wreckers enter
+16:53:05 <ski> crestfallen : fancy moving to #haskell-overflow ?
+16:53:06 <ghoulguy> MarcelineVQ: I'm just a willing participant; edk got me into it
+16:53:36 <MarcelineVQ> man, what am I supposed to do, I'm intrinsicly themed already
+16:53:56 <monochrom> I want to participate too, but can't think of a spooky mutation of my nick.
+16:54:11 <MarcelineVQ> spookochrom
+16:54:37 <crestfallen> sure ski. 
+16:54:37 <MarcelineVQ> monomoooaaannnn
+16:54:45 <monochrom> Apart from "joseph" which is an obscure reference to "joseph and the technocolor dream coat" which is the opposite of "monochrome".
+16:56:06 <MarcelineVQ> heartbreak boy, you can just type /join #haskell-overflow :(
+16:56:21 <monochrom> or "monodome" or "thunderchrom" in reference to "mad max ... thunderdome"
+16:56:35 <MarcelineVQ> monomax: beyond the thunderchrome
+17:06:51 <sshine> is this a halloween thing?
+17:07:13 <monochrom> yes
+17:08:55 <morphochrom> I think this will do this year. :)
+17:09:59 <morphochrom> Too many morphisms lately as I learn the Yoneda lemma.
+17:10:17 <ghoulguy> sshine: yeah
+17:11:25 <ghoulguy> monsterchrom
+17:11:48 <sshine> I'm trying to determine this type of morphism. https://staticdelivery.nexusmods.com/mods/110/images/42586-1-1379644403.jpg
+17:12:08 <morphochrom> That's a better one, I'll use it! Thanks.
+17:13:03 <sshine> whenever I see movies with that type of monsters, I always imagine that since they come from outer space, they could just be super tiny.
+17:14:45 <ghoulguy> ski: spooki  :)
+17:15:12 <monsterchrom> Romula d'deridex class warbid
+17:23:25 <Squarism> Maybe a weird question, but i'll try. Given data D a = D a ; class C a b where ;  get :: a -> Maybe b. Can I write an instance of C that matches the case when "a" is D <whatever> and "b" is D scopedVar. Somehow keep telling myself this should hold : appliedFkn :: forall b. b => Maybe (D b) ; appliedFkn = get (D Int). But I think I'm wrong there. 
+17:27:06 <Squarism> My intuition feels this should be possible, but my constant fighting with the compiler tells me I've fundamentally confused myself about scope variables arent "wildcards" in this sense. 
+18:03:58 <koz_> Is there such a thing as a free Alternative?
+18:05:43 <dolio> Certainly.
+18:06:10 <koz_> Lol... _just_ saw this: http://hackage.haskell.org/package/free-5.1.4/docs/Control-Alternative-Free.html
+18:19:19 * hackage aeson-gadt-th 0.2.3 - Derivation of Aeson instances for GADTs  https://hackage.haskell.org/package/aeson-gadt-th-0.2.3 (abrar)
+18:25:19 * hackage aeson-gadt-th 0.2.4 - Derivation of Aeson instances for GADTs  https://hackage.haskell.org/package/aeson-gadt-th-0.2.4 (abrar)
+18:36:33 <monsterchrom> Haskell is a free alternative to Miranda. :)
+18:39:02 <VirusCorona> hola
+18:40:11 <mshine> koz_, hehe.
+18:45:00 <Squarism> Not figuring this one out https://paste.ofcode.org/zV4YWsC9kWpaW6L7ZrVg9G
+18:46:04 <Squarism> It seems im not able to prioritize between the instances on row 10 and 16, even if that on 16 is more specific
+18:48:36 <Squarism> ...im on ghc 8.6.5 if that helps explaining it
+19:03:17 <monsterchrom> Haha great, I'm going to troll my students with the Yoneda lemma!
+19:05:15 <monsterchrom> I'll put this question about parametric polymorphism on the exam.  I have a mysterious function f :: (Int -> a) -> [a].  I tell you just one test case: f id = [1,2,3].  Now tell me what f does in general.
+19:10:20 <dolio> monsterchrom: https://www.cs.bham.ac.uk/~mhe/yoneda/yoneda.html
+19:20:51 <Squarism> monsterchrom, was that in reference to my post? Seems my problem overlaps a little. 
+19:24:16 <monsterchrom> No.
+19:39:12 <c_wraith> halloween names are contagious
+19:39:18 <c_wraith> wait, I've been a monster this whole time
+19:44:52 <justsomeguy> monsterchrom: Something like “f :: (Int -> a) -> [a]; f g = map ((\x -> undefined) . g) [undefined]”? (I'm a beginner, and thought I'd give this a shot.)
+19:45:37 <monsterchrom> c_wraith: Take on a human nick so it counts as a costume from your POV >:)
+19:46:37 <justsomeguy> No, wait, that doesn't match the test case. I just got focused on matching the type signature. :^p
+19:48:53 * justsomeguy would fail monsterchroms test
+19:49:22 <shafox> I have unicode in my code, and while building it gives error: error: parse error on input ‘⊥’ 
+19:49:46 <ghoulguy> > Data.Char.generalCategory '⊥'
+19:49:48 <lambdabot>  MathSymbol
+19:50:13 <ghoulguy> > let (⊥) = "bottom" in ( (⊥), (⊥) )
+19:50:15 <lambdabot>  ("bottom","bottom")
+19:50:44 <shafox> in emacs, undefined is change to ⊥
+19:50:57 <monsterchrom> Another test case would give f (\x -> 2 * x) = [2, 4, 6]
+19:51:20 <ghoulguy> shafox: In that case make sure you're actually writing 'undefined' and not '⊥'
+19:54:25 <shafox> ghoulguy, thanks. 
+19:54:54 <hololeap> (⊥) really does look like "bottom" lol
+19:55:22 <MarcelineVQ> opposite of ⊤
+19:58:12 <hololeap> am i the only one who sees it?
+20:00:53 <MarcelineVQ> no
+20:03:34 <hololeap> i must say, i am disappointed by the absense of giggles. use the 5-year-old part of your brain
+20:05:38 <MarcelineVQ> (⊤)
+20:05:58 <monsterchrom> It is the 70th time we have seen it.
+20:06:13 <MarcelineVQ> (.).(.)
+20:08:30 <justsomeguy> monsterchrom: “f g = map g [1,2,(3 :: Int)]”?
+20:08:49 <monsterchrom> yeah!
+20:08:53 <justsomeguy> :D
+20:09:50 <mshine> (.).(.) is the Total Recall operator?
+20:10:14 <monsterchrom> haha
+20:10:59 <MarcelineVQ> it's the has-a-birthmark combinator, the total recall combinator is (.)(.)(.)
+20:11:32 <MarcelineVQ> You might think there's no difference but that couldn't be farther from the truth
+20:11:42 <MarcelineVQ> The difference is ( )
+20:12:06 <MarcelineVQ> Now get your ass to mars.
+20:16:03 <koz_> Something something 'in Haskell we don't inspect each other's bottoms' something.
+20:40:53 <Squarism> is there a way to promote a value to a value that has a certain instance?   
+20:40:59 <Squarism> class instance
+20:43:11 <Squarism> almost like Data.Typeable's cast but for class instances
+20:47:19 <koz_> Squarism: What's the context?
+20:51:10 <Squarism> koz_, im working on a textual addressing mechanism for a class of data types i mention the other day. With risk of beeing TLDR : https://paste.ofcode.org/rbJug92hAXGxvAJVDdzAZu 
+20:51:36 <koz_> 13 lines of extensions. This is some Real World Haskell right there. :P
+20:52:49 <Squarism> I'm not too experianced in advanced type magic, so I play around a bit 
+20:53:08 <Squarism> im currently working on progress of mapLeaf2
+20:53:45 <Squarism> if " mapLeaf2 pr (a1 : a2 : rest) f" is set to undefined it should compile
+20:54:06 <Squarism> but its that function im trying to complete
+21:06:17 <ADG1089> Some company asked me to design & implement XYZ system for last round as a whole day task and they told they will show this to an investor at the end of the day. I'm thinking they are just trying to get free consulting. 
+21:12:39 <ADG1089> any comments?
+21:13:57 <Squarism> Tell them you hourly fee
+23:22:00 <hyiltiz> What would be a typical hourly fee as a factor of the local minimum wage?
+23:41:04 <pjb> hyiltiz: it depends on the country. Some country have a smaller difference between higher wages and lower wages, and some have no limit.

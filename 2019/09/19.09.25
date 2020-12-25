@@ -1,0 +1,2019 @@
+00:00:00 <dminuoso> 08:56:15 dminuoso | % case Nothing of ~(!(~(Just x))) -> (); _ -> "never"
+00:00:01 <dminuoso> :p
+00:00:08 <jle`> hah
+00:00:13 <dminuoso> Oh wait, not the same thing.
+00:00:16 <dminuoso> But still same mistake
+00:00:20 <jle`> so this is different from the desugaring i had expected
+00:00:37 <dminuoso> So I guess this is what this is about:
+00:00:38 <dminuoso> > case Nothing of !(~(Just x)) -> "sometimes"; _ -> "never"
+00:00:40 <lambdabot>  "sometimes"
+00:00:45 <dminuoso> > case undefined of !(~(Just x)) -> "sometimes"; _ -> "never"
+00:00:47 <lambdabot>  "*Exception: Prelude.undefined
+00:00:49 <jle`> > case Nothing of ~(Just x) -> Just x `seq` "sometimes"; _ -> "never"
+00:00:51 <lambdabot>  "sometimes"
+00:00:59 <jle`> ah actually this still matches the desugaring i expected
+00:01:01 <jle`> i just misunderstood seq
+00:01:05 <iqubic> what are we doing here?
+00:01:09 <jle`> this makes sense actually because Just is lazy
+00:01:23 <dminuoso> iqubic: Figuring out the fine line between pattern matching, strictness and ~/! annotations.
+00:01:40 <dminuoso> jle`: Though what does it mean to have something like:
+00:01:41 <dminuoso> ~(!apat)
+00:01:59 <jle`> i think it should be the same as ~apat -> apat `seq` ...
+00:02:07 <dminuoso> % case undefined of ~(!Just x) -> "just"; _ -> "never"
+00:02:07 <yahb> dminuoso: ; <interactive>:423:41: warning: [-Woverlapping-patterns]; Pattern match is redundant; In a case alternative: _ -> ...; "just"
+00:02:25 <iqubic> I have no idea how ! or ~ work in Haskell.
+00:02:28 <jle`> not that we can observe it in this example
+00:02:59 <dminuoso> iqubic: ~ is easy, it makes any pattern irrefutable (that is, it wont diverge when the value matched against is bottom)
+00:03:15 <iqubic> I don't understand it.
+00:03:19 <dminuoso> iqubic: (it defers pattern matching to when you actually force something bound to that match)
+00:03:40 <dminuoso> so `f ~(x:xs) = ...` doesn't force its argument until you actually force x or xs.
+00:03:42 <iqubic> Perhaps thinking about this at midnight is not a good idea.
+00:04:04 <ski> s/force its argument/match its argument/
+00:04:18 <ski> > let f ~_ = () in f undefined
+00:04:19 <lambdabot>  ()
+00:04:22 <dminuoso> (I suppose one main area where this is useful is certain types of mutual recursion)
+00:04:47 <monochrom> Actually "f _ = ()" does the same thing.
+00:05:12 <monochrom> However, "f () = ()" vs "f ~() = ()" shows the difference better.
+00:05:13 <iqubic> What?
+00:05:28 <iqubic> > let f _ = () in f undefined
+00:05:30 <lambdabot>  ()
+00:05:57 <dminuoso> jle`: Mmm, can it be observed at all?
+00:06:50 <dminuoso> iqubic: So the core idea is as follows: a pattern can be "refutable" or "irrefutable". By that we mean whether a pattern match occurs strict or non-strict. By using ~ you turn a pattern match into a non-strict one. In case of `f (x:xs) = ...` the pattern matching on its argument does not happen on application, but rather when you force x or xs.
+00:07:24 <dminuoso> ski: Though I have to ask. What exactly does "pattern matching a wildcard/variable to a value" mean semantically
+00:07:25 <iqubic> I see.
+00:07:50 <dminuoso> iqubic: Sorry, I was careless. In case of `f ~(x:xs) = ...` ....
+00:08:01 <dminuoso> iqubic: So `f (x:xs) = ...` matches strictly on function application.
+00:08:13 <ski> dminuoso : hm. it always succeeds. binding the variable to the value, in the latter case (no forcing)
+00:08:14 <dminuoso> % let f (x:xs) = () in f undefined
+00:08:15 <yahb> dminuoso: *** Exception: Prelude.undefined; CallStack (from HasCallStack):; error, called at libraries/base/GHC/Err.hs:78:14 in base:GHC.Err; undefined, called at <interactive>:424:24 in interactive:Ghci131
+00:08:23 * ski isn't sure whether that's what dminuoso was looking for
+00:08:44 <monochrom> Haskell2010 has a clause on that. It just does alpha substitution.  case expr of v -> ...v... = ...expr...
+00:09:28 <monochrom> Or you could think of that as binding v to expr.
+00:09:29 <jle`> the way i think of ~pat is basically that that branch is treated as a wildcard when choosing which branch to go down, and then only later are the actual variables 'extracted', if ever
+00:09:47 <jle`> > case [] of ~(x:xs) -> ()    -- is the same as case [] of _ -> ()
+00:09:49 <lambdabot>  ()
+00:10:21 <monochrom> There is a clause on that too :)
+00:10:30 <dminuoso> Well refutability means "If apat is matched against _|_, the match diverges" and irrefutability means "If apat is matched against _|_, the pattern matches still"
+00:10:38 <dminuoso> Perhaps I need to just let that sink in deeper.
+00:10:54 <monochrom> case expr of ~(x:xs) -> ...x...xs...  =  ...(head expr)...(tail expr)...
+00:11:23 <jle`> ah yeah, that's a nice mechanical way to look at it that doesn't involve any vague terms
+00:11:50 <monochrom> Aww I missed a pun opportunity.
+00:11:59 <jle`> `case blah of ~(x:xs) -> ...`, is the same as `case blah of ys -> let x:xs = ys in ...`
+00:12:03 <monochrom> case explode of ~(x:xs) -> ...x...xs...  =  ...(head explode)...(tail explode)...
+00:12:16 <jle`> hah
+00:14:06 <jle`> dminuoso: so this pretty much answers your ~(!Just x) example, because we have mechanical transformations for both ~ and !
+00:14:08 <ski> hm, i'm reminded of eta for `Either', like `case z of Left x -> f (Left x); Right y -> f (Right y)  =  f z' (though in Haskell, if `z' diverges, but `f' is not strict, that's not the same thing)
+00:14:27 <jle`> dminuoso: matching on ~(!Just x) -> ... is the same as matching on ys -> let !Just x = ys in ...
+00:15:00 <jle`> which is the same as matching on ys -> let Just x = ys in (Just x) `seq` ...
+00:15:36 <jle`> magic be-gone
+00:15:42 * ski . o O ( `ys -> ... where !(Just x) = ys' )
+00:16:04 <dminuoso> So operationally, ~ delays forcing the value and executing the match, and ~ forces the value.
+00:16:14 <dminuoso> Err, the second should be a bang.
+00:16:27 <jle`> to me the more interesting effect of ~ is that it chooses which branch to go down
+00:16:39 <jle`> so it eliminates uncertainty in branching
+00:17:06 <jle`> this was the relevant situation in your do-notation example
+00:17:11 <dminuoso> Right
+00:17:39 <dminuoso> ! ensured that the value was brought into WHNF, ~ ensured the match was taken (but actual pattern matching deferred)
+00:18:05 <dminuoso> So ! just "countered" the lazy evaluation to WHNF portion of ~, but not the other parts of it.
+00:18:28 <dminuoso> (or rather "lazy evaluation" than "lazy evaluation to WHNF")
+00:21:26 <atralheaven> Hi! 
+00:23:02 <atralheaven> as you dear haskell programmers always use pure functions when it's possible, I came here to ask a question
+00:23:19 <dminuoso> atralheaven: In Haskell all values are, by definition, pure.
+00:23:34 <dminuoso> atralheaven: And functions are equally as pure. You cannot have impure functions in Haskell. :)
+00:23:59 <atralheaven> I'm not writing haskell code, but I do like to use pure functions in my code, whenever it's possible
+00:24:33 <dminuoso> I see.
+00:24:53 <tdammers> given that all Haskell functions are pure, it's always possible (with a big fat disclaimer)
+00:25:55 <atralheaven> dminuoso: Haskell has very intresting features, I guess I will try to learn it in my free time :)
+00:26:12 <dminuoso> atralheaven: I'd say it's worthwhile learning even if you don't end up writing Haskell code.
+00:26:52 <tdammers> one word of warning though, your current home language is going to feel slightly dirtier after you've learned Haskell
+00:27:48 <dminuoso> atralheaven: Ultimately I dont think writing pure code is that useful if you don't have the notion of impurity baked into your type system.
+00:28:17 <dminuoso> I mean it improves how deterministic your code is, but it's very easy to violate this "this region of code is impure" invariant.
+00:28:31 <tdammers> the main benefit of writing pure code is that it is easier to reason about
+00:28:43 <tdammers> but that only works when you can trivially tell whether a given expression is actually pure
+00:28:45 <atralheaven> it already does feel like... not feature-rich enough
+00:28:47 <tdammers> in a reliable fashion
+00:29:23 <atralheaven> but anyway, I already done a lot of my work in python and there's not much left for this project
+00:29:30 <tdammers> you can write pure expressions in, say, Lisp, but nothing in the language makes it so that you can formally declare an expression as pure and then have the tooling prove it for you so that you can rely on it without additional reasoning
+00:29:43 <tdammers> oh. Python.
+00:29:58 <tdammers> I would argue that writing pure expressions (or pure functions) is practically impossible in Python
+00:30:19 <tdammers> mainly because effects can (and usually do) travel with values
+00:30:56 <tdammers> something as simple as adding two things can easily end up having side effects
+00:31:03 <dminuoso> atralheaven: another issue is that most languages lack the necessary toolbag to make pure code fun to write.
+00:31:11 <dminuoso> atralheaven: Most languages come with core libraries focused around mutation.
+00:31:14 <atralheaven> yeah, but I can try to have more pure functions, not completly pure, but better than what it is now
+00:31:25 <tdammers> dminuoso: clojure has the toolbag, but you still don't get most of the benefits
+00:31:33 <jle`> at the very least it can help you organize your thoughts, before you commit your code to python
+00:31:41 <tdammers> that it can
+00:31:44 <dminuoso> And mutation is frequently baked into langauge semantics as well, making it very hard to avoid mistakes.
+00:31:51 <jle`> plan your code purely, and then 'compile' it into python 
+00:33:47 <atralheaven> I'm actually reconsidering my current code, I should make functions smaller and more specific, so I can write tests for them, because the code is getting comlicated and I need to have tests for it
+00:33:49 <dminuoso> tdammers: sure, I mean having the toolbag is not sufficient, but its most certainly necessary.
+00:34:04 <dminuoso> atralheaven: Haskell has taught me the beauty of miniature modular code.
+00:34:17 <dminuoso> Starting at 3 lines I usually consider breaking into more bindings..
+00:34:18 <tdammers> dminuoso: true. although usually, a relatively small set of primitives should be enough to build the toolbag from
+00:35:41 <tdammers> atralheaven: IME, Haskell teaches you a way of designing and evolving code that naturally leads to orthogonal, testable code
+00:36:19 <atralheaven> I have lots of loggings in my code, I need those logs but I don't like how I currenly have put them in the functions
+00:36:47 <atralheaven> what's a better approach for that?
+00:38:05 <tdammers> well, logging is effectful, there's no way around that
+00:38:28 <tdammers> I think the sanest approach is to wrap all the logging functionality into an opaque object that you can pass around, and hand that to every function that needs to do logging
+00:38:33 <atralheaven> about haskell, I'm already sold :D but I need a little help to write better code with python on this current program
+00:39:26 <tdammers> in Haskell, you would probably make that object part of your monad stacks, and possibly have a MonadLogging typeclass with a method writeLog, that would automatically dispatch to whatever logging object is available in the current monad stack
+00:42:24 <tdammers> in Python, you would make the logger a class, create one instance at startup, and pass that around explicitly
+00:42:24 <tdammers> although you could probably reduce boilerplate considerably using decorators
+00:44:30 * hackage hw-uri 0.1.1.7 - Supports IO on URIs  https://hackage.haskell.org/package/hw-uri-0.1.1.7 (haskellworks)
+00:45:42 <atralheaven> would you give me an example? we can try a simple function like this: http://p.ip.fi/7gLU 
+00:47:20 <atralheaven> it has only one log message
+00:48:00 <tdammers> right, so that's as low-boilerplate as it gets, at the expense of having a global logger object
+00:48:31 <tdammers> which of course sucks, because now that logger object appears out of nowhere, and in order to be 100% certain where it comes from, you have to look at the entire codebase
+00:49:30 <tdammers> the problem is of course that once you make the sane refactoring of adding the logger as an argument, you now have to explicitly pass it along the entire call graph
+00:49:36 <tdammers> which sucks just as hard
+00:50:06 <atralheaven> yeah
+00:50:16 <atralheaven> how would you write this in haskell?
+00:52:25 <tdammers> something like: sendRequestWithRetry :: (MonadLogging m, MonadHTTP m) => URL -> m Response
+00:52:55 <tdammers> where MonadLogging provides a `log` method, and `MonadHTTP` gives access to HTTP networking
+00:53:12 <tdammers> e.g. with methods `get`, `post`, `put`
+00:53:39 <tdammers> you could then write instances of those typeclasses for, say, `IO`, but also for your own custom application monad stacks
+00:54:08 <tdammers> and the specific instance would determine how exactly the logging and the HTTP request sending and response receiving are implemented
+00:54:53 <tdammers> so, for example, you could have a monad stack that, instead of writing log entries directly to stdout, buffers them in a thread-safe stream (e.g. a TBChan), and writes them to stdout on a separate thread
+00:55:49 <atralheaven> what's a monad?
+00:56:14 <Axman6> A monoid in the category of endofunctors
+00:56:15 <Rembane> atralheaven: Something that lets you sequence operations in a deterministic way. 
+00:56:26 <Axman6> (You should disregard me though)
+00:56:30 * hackage regex-base 0.94.0.0 - Common "Text.Regex.*" API for Regex matching  https://hackage.haskell.org/package/regex-base-0.94.0.0 (HerbertValerioRiedel)
+00:56:34 * Rembane disregards Axman6 
+00:56:36 <MarcelineVQ> Axman6: bad
+00:56:45 <iqubic> Axman6: I actually understand that.
+00:56:48 <Rembane> Axman6: Well, you are not wrong, but not very pedagogical eiter. :)
+00:58:33 <tdammers> monad is a programming pattern that appears in a lot of places; in Haskell, we can make it explicit by using the Monad typeclass
+00:58:53 <tdammers> the pattern is fairly simple, but also very abstract, which makes it difficult to get a good intuition for it at first
+00:59:20 <tdammers> it's also difficult to explain without first covering what higher-order types and typeclasses are
+00:59:53 <Axman6> atralheaven: I find that https://codon.com/refactoring-ruby-with-monads gives quite a concise explanation of the intuition behind what they are
+00:59:55 <atralheaven> mmm so if request failed, the function output tells a logging function what happened and it produces a log for that?
+01:00:07 * ski smiles at "higher-order"
+01:00:11 <tdammers> atralheaven: no, the body of the function is still pretty much the same
+01:00:47 <tdammers> ski: "higher-kinded" better?
+01:01:07 <tdammers> atralheaven: the logging doesn't happen automatically, you almost never want that
+01:01:47 <tdammers> atralheaven: although if you like, you could write a wrapper that takes a function and a predicate (which is also a function), and injects logging before returning an error result
+01:02:00 <tdammers> atralheaven: or one that automatically catches exceptions, logs them, and then rethrows
+01:02:35 <ski> tdammers : no. i smiled because you didn't say that (before :/ )
+01:02:46 <atralheaven> the latter method seems nice
+01:03:36 <ski> atralheaven : <https://philipnilsson.github.io/Badness10k/escaping-hell-with-monads/>
+01:03:54 <atralheaven> and I think it can be done with decorators in python
+01:04:14 <tdammers> ski: I guess my brain has entered the slippery slope of dependently-typed thinking already
+01:05:31 <atralheaven> so there would be a function, which based on its input, which are exceptions, gives a log message 
+01:05:36 * ski doesn't really see what dependent types has got to do with it, but ok
+01:06:20 <tdammers> "functions, values, types - potatoe, potato"
+01:06:57 <ski> (i don't know who invented the term "higher-kinded", but i'd like to see it eradicated ..)
+01:07:29 <atralheaven> btw my english is not very good, if something was weird in my messages, that's probably the reason
+01:07:34 <ski> (we don't go about saying that `map' is "higher-typed" ..)
+01:08:08 <tdammers> true
+01:08:40 <tdammers> how about "n-ary"?
+01:08:42 * tdammers runs away
+01:09:17 <ski> (`map' is a higher-order (value) function. `MaybeT' is a higher-order type function. what's the problem with that ?)
+01:09:43 <tdammers> absolutely nothing
+01:10:48 <tdammers> although I guess higher-kinded generally refers to * -> * and up, not just (* -> *) -> (* -> *) (i.e., Maybe, not necessarily MaybeT)
+01:11:18 <tdammers> so the value equivalent of higher-kinded would just be a -> b and up, not necessarily (a -> b) -> c
+01:11:59 <tdammers> it's a good thing we have formal notations for these things so that we don't have to rely on natural languages
+01:13:32 <atralheaven> is it ok that I ask questions which are not related to haskell itself, but mainly are like "how would haskell do that, maybe I can use its method somehow"?
+01:14:17 <ski> tdammers : well, i'd just say "type function", if you want to include `* -> *'
+01:15:12 <ski> tdammers : or "non-concrete type", perhaps, if you want also types of e.g. kind `[* -> *]'
+01:16:11 <ski> atralheaven : sure
+01:16:32 <ski> (i'd say that would be Haskell-related, still, though ..)
+01:18:22 <atralheaven> on the "send_request_with_retry" function, if it failed even after its retryings, I thought I should write an error in row of that timestamp in db, but other functions get output from this function for parsing the response data, and they expect a valid response, not an error
+01:19:02 <atralheaven> so I thought I can return None if it couldn't get response, and then check if the output was None, and skip the parsing if it was
+01:19:29 <atralheaven> but I doubt if it's a good idea
+01:19:40 <atralheaven> what do you think?
+01:19:53 * ski thinks it sounds like atralheaven is inventing the `Maybe' monad
+01:20:12 <Axman6> Maybe indeed
+01:20:23 <Axman6> @src Maybe
+01:20:23 <lambdabot> data Maybe a = Nothing | Just a
+01:20:26 <ski> atralheaven : any impression from that "Escaping Hell with Monads" by Philip Nilsson in 2017-05-08, above ?
+01:21:55 <atralheaven> I've seen that "Maybe", I don't know what it actually is, I will check that now, but is it possible to use it in python?
+01:22:19 <jle`> it's possible, but it's not going to be pretty :)
+01:23:39 <Axman6> maybe is just null but not insane
+01:25:06 <dminuoso> 09:38:06    tdammers | I think the sanest approach is to wrap all the logging functionality into an opaque object that you can pass around, and hand that to every function that needs to do logging
+01:25:11 <dminuoso> monad-logger says hallo! :-)
+01:25:18 <dminuoso> Or, LoggingT rather.
+01:25:35 <ski> the most important difference between coding with the `Maybe' (aka `option') type, and coding with `NULL'/`null'/`None' is the presence of `Just' (aka `Some') in the former, and its absence in the latter
+01:26:42 <ski> with `Maybe', you can distinguing `Nothing',`Just Nothing', and `Just (Just 42)'. with `None' you just have `None' vs. `42', you typically don't make room for expressing "a doubly nullable value"
+01:27:43 <ski> the latter is called "domain contagion", so when you lookup a key in your table, and you get `None', you're not sure whether that's because nothing was found, or if `None' was the value associated with the key, in the table
+01:28:47 <no-n> :}
+01:28:55 <ski> (see the entry "Option types, optional parameters" at Riastradh's blag, in 2006-02-03, at <https://mumble.net/~campbell/blag.txt>,(RSS) <http://vrici.lojban.org/~cowan/blag.xml>)
+01:29:10 <Unhammer> Is there a more succinct way to say "I want the first day where amount < 0" than
+01:29:12 <Unhammer> headMay $dropWhile ((>0).snd) $ scanl (\(_,acc) (day,amount) -> (day, acc-amount)) (0,100) $ zip [1..] [13..]
+01:29:25 <jle`> Unhammer: 'find', maybe?
+01:29:28 <jle`> :t find
+01:29:30 <lambdabot> Foldable t => (a -> Bool) -> t a -> Maybe a
+01:29:36 <jle`> > find (> 3) [1..10]
+01:29:38 <lambdabot>  Just 4
+01:29:58 <Unhammer> that's not what the code above does :)
+01:30:14 <Unhammer> I'm using up my initial amount by some value every day
+01:30:16 <jle`> `headMay . dropWhile cond` seems to be `find (cond . not)`
+01:30:29 <jle`> er, not . cond
+01:30:32 <Unhammer> oh for the first part
+01:30:35 <jle`> if that is what you are asking about
+01:30:48 <Unhammer> I was more thinking about the scanl which seems a bit long
+01:30:52 <koz_> I never got scanl.
+01:31:19 <jle`> hm, it's tricky to see what your code actually does
+01:31:29 <koz_> :t scanl
+01:31:30 <lambdabot> (b -> a -> b) -> b -> [a] -> [b]
+01:31:38 <ski> finds first day when accumulator is non-positive ?
+01:31:39 <Unhammer> yeah, that's why I'm asking =P 
+01:31:41 <jle`> > scanl (\(_,acc) (day,amount) -> (day, acc-amount)) (0,100) $ zip [1..] [13..]
+01:31:43 <lambdabot>  [(0,100),(1,87),(2,73),(3,58),(4,42),(5,25),(6,7),(7,-12),(8,-32),(9,-53),(1...
+01:31:44 <Unhammer> ski exactly
+01:31:59 <jle`> oh it looks like you subtract the number from the accumulator at each point
+01:32:16 <ski> (where "day" is index number .. perversely starting from `1')
+01:32:33 <jle`> it looks like the zip [1..] is unnecessary then
+01:32:50 <Unhammer> ski,  in reality it's a Calendar Day
+01:32:54 <ski> you're trying to fit (or overflow) as large a prefix on the list `[13 ..]', into `100'
+01:33:13 <jle`> > scanl (\(day,acc) amount -> (day+1, acc-amount)) (0,100) $ [13..]
+01:33:15 <lambdabot>  [(0,100),(1,87),(2,73),(3,58),(4,42),(5,25),(6,7),(7,-12),(8,-32),(9,-53),(1...
+01:33:27 <jle`> there's no reason to zip with [0..] if the day is already a part of the accumulator
+01:33:36 <jle`> but also you can just find the length of the list, so keeping track of the day is not necessary
+01:33:53 <jle`> hm, i'd probably use something like unfoldr, then find the length
+01:34:09 <jle`> er, scanl actually is pretty natural for this
+01:34:20 <Unhammer> ok
+01:34:27 <jle`> > scanl (-) 100 [13..]
+01:34:29 <lambdabot>  [100,87,73,58,42,25,7,-12,-32,-53,-75,-98,-122,-147,-173,-200,-228,-257,-287...
+01:34:56 <Unhammer> (the "zip …" stuff is given as input, so I can't just -1)
+01:35:11 <jle`> ah, i see
+01:35:12 <Unhammer> (or, that was just to make it easy to work with in the repl …)
+01:35:19 <atralheaven> I can raise an exception if the response was not valid even after retries, then check for exceptions later, instead of cheking for None, got it from here: "https://stackoverflow.com/questions/8507200/maybe-kind-of-monad-in-python#comment10531502_8507334"
+01:35:22 <jle`> well then in that case the [1..] doesn't need to be zipped first either, since it can be zipped at the end
+01:35:24 <Unhammer> I'll just scanl then 
+01:35:31 <jle`> > zip [1..] (scanl (-) 100 [13..])
+01:35:33 <lambdabot>  [(1,100),(2,87),(3,73),(4,58),(5,42),(6,25),(7,7),(8,-12),(9,-32),(10,-53),(...
+01:35:36 <Unhammer> ooh, good idea
+01:35:43 <atralheaven> and I found this: https://pypi.org/project/PyMonad/
+01:35:44 <jle`> note that the days are slightly different, it's shifted up by one
+01:36:03 <jle`> and then yeah from then you can do 'find'
+01:36:33 <jle`> > find ((< 0) . snd) . zip [0..] . scanl (-) 100 $ [13..]
+01:36:35 <lambdabot>  Just (7,-12)
+01:36:59 <jle`> whoops, that gives you the first negative one but you want the onen right before, huh
+01:37:45 <Unhammer> well, close enough =P
+01:37:54 <merijn> atralheaven: tbh, I'm not convinced the various "Monad in dynamic language X" projects make a lot of sense, because without types/inference they lose a lot of their appeal
+01:38:24 <Rembane> They might give somekind of enlightenment if on a good day though
+01:39:49 <dminuoso> merijn: Not just types and inference, but the whole ecosystem surrounding. Monad without having things like traverse, fmap, >=>, filterM, msum, foldM, guard, etc. is quickly becoming very annoying to use.
+01:40:15 <dminuoso> You end up reimplenting the haskell eco system, and I guess then the lack of a type system really screws you over.
+01:40:50 <dminuoso> I think there'
+01:41:05 <dminuoso> I think most of the "Monad in language XYZ" are just artifacts of the same underlying issue of the monad tutorial fallacy.
+01:41:18 <dminuoso> Anyone who has really "understood Monad" wouldn't bother trying to implement it in Python.
+01:41:35 <whadevah> Good day. There is a one question about monads and applicative functors. What is the difference (in categorical terms) between them? Monad has a special natural transformation mu, where as an applicative has a product (f a) *&* (f b) == f (a, b). Aren't these the same thing? I see that monad can go from f (f a) to f a whereas an applicative can't,
+01:41:36 <whadevah> but I don't know how to show it in categorical terms
+01:41:53 <dminuoso> whadevah: The relationship can be observed via the Yoneda lemma
+01:41:55 <ski> (well, i think i saw some nontrivial example of doing a monad in C++ ?)
+01:41:56 <atralheaven> merijn: Do you think they help, if we need to use that language, or it's better to use other approaches which the language has natively?
+01:42:24 <merijn> atralheaven: I mean, personally I think we should just not use those languages :p
+01:42:27 <ski> atralheaven : depends
+01:42:33 <merijn> But sometimes your stuck
+01:42:36 <dminuoso> whadevah: https://cstheory.stackexchange.com/a/25627 covers it well.
+01:42:53 <ski> atralheaven : if you want an effect that the language doesn't support natively, a monad may be the best approach
+01:42:53 <merijn> ski: tbh, in C++ it makes *some* sense
+01:43:03 <whadevah> dminuoso thank you!
+01:43:20 <ski> C++ at least has templates, i suppose
+01:43:25 <atralheaven> merijn: I understand that :D
+01:43:26 <merijn> ski: Like, if you're willing to put up with the initial boilerplate and slightly more verbose syntax you could implement type-safe monads with some inference in C++
+01:43:39 <dminuoso> whadevah: Essentially Applicative and Monad are quite orthogonal.
+01:43:44 <merijn> It wouldn't be pretty and the errors if you mess up would be god awful
+01:44:06 <dminuoso> whadevah: You could say that "Applicative" coming out of "Monad" is rather an accident than a meaningful relationship like "Semigroup" has with "Monoid"
+01:44:34 <merijn> ski: In C++11 and later you can even get a limited amount of inference going if you're willing to create template boilerplate death machines
+01:45:13 <ski> merijn : with `auto',`decltype', or something else ?
+01:45:35 <merijn> ski: That and template deduction
+01:45:43 <ski> mhm
+01:46:01 <dminuoso> whadevah: The fact that we have Applicative as a superclass is to give better coherence between typeclasses, such that "weakening from Monad to Applicative" can be done without changing meaning of programs.
+01:46:10 <Axman6> just move all computation in the gooey warm function templates
+01:46:10 <merijn> ski: Template deduction is basically one-directional inference, so it's not as powerful as Haskell, but with deliberate use of auto and decltype you can get far
+01:46:59 * ski watched some Scott Meyers talks
+01:47:07 <merijn> ski: i.e., this function works via template deduction without annotation, but clearly it's...not Haskell elegance... https://github.com/merijn/GPU-benchmarks/blob/master/ImplementationTemplate.hpp#L806-L829
+01:48:17 <dminuoso> whadevah: There's an alternative way to look at them. Do you understand the old joke "A monad is just a monoid in the category of endofunctors" ?
+01:48:58 * ski somehow suspects whadevah doesn't really understand monads at all, that well, yet
+01:49:10 <merijn> ski: Not sure I'd recommend that sorta "template death machine" just to get monads in C++, though ;)
+01:49:18 <dminuoso> ski: Well they did ask about the difference in categorical terms...
+01:50:02 <ski> dminuoso : oh. just realized i confused whadevah with atralheaven, momentarily .. sorry about that :/
+01:50:32 <dminuoso> whadevah: The joke is pooly told, and should rather read: "A monad is a monoid in the monoidal category of endofunctors, equipped with endofunctor composition as its tensor". Now interestingly, you could say "An applicative functor is a monoid in the monoidal category of endofunctors, equipped with Day convolution as its tensor"
+01:50:45 <whadevah> dminuoso well, I mostly understand, but there are still something missing. I hoped that difference between monads and applicatives would help - both have some kind of a binary operation, and both have a unit, but they are still different 
+01:50:52 <whadevah> *is
+01:51:44 <dminuoso> whadevah: https://gist.github.com/dminuoso/d5ab4ba5d8a5142dde9f4d4c736e3ecb
+01:51:52 <ski> whadevah : hm .. this isn't really categorical, but i tend to say that idioms express "static sequencing", while monads express "dynamic sequencing"
+01:52:31 <dminuoso> whadevah: This is a sort of Haskellized diagram version of that joke. The monoidal structure lies in being able to "squash/combine" these layers with :.: together.
+01:52:40 <dminuoso> whadevah: And Applicative is that exact same thing, except you dont have :.: there but Day.
+01:53:07 <ski> whadevah : also, iirc, it's only under additional assumptions (valid in `Hask') that monads are automatically idioms
+01:54:34 <Axman6> Some people find seeing this relationship helpful:
+01:54:37 <Axman6> fmap  ::   (a -> b) -> f a -> f b
+01:54:37 <Axman6> (<*>) :: f (a -> b) -> f a -> f b
+01:54:38 <Axman6> (=<<) :: (a -> f b) -> f a -> f b
+01:55:44 <dminuoso> whadevah: So there's this cool notion of "what kind of monoids do you get from picking different tensors", and it turns out that Compose gives you sequentiality, wheras Day gives you rather a fork like a diamond.
+01:56:09 <dminuoso> whadevah: And the "Monad induced Applicative" is a fork where the branches are synchronized with each other.
+01:57:53 <dminuoso> ``(f a) *&* (f b) == f (a, b)` allows you to run two effects, say parsers, in parallel.
+01:58:26 <dminuoso> (Which might help visualize this branch/fork)
+02:00:30 <Taneb> (hmm, if you choose + as your tensor, you end up with something that's no more powerful than Functor, in Haskell, if I've done this right)
+02:18:59 <Bish> is there a flag to let something like this fail during compilation?
+02:19:00 <Bish>   putStrLn $ show $ (let Just x = lookup 'x' [('a',1)] in x) 
+02:19:45 <merijn> Bish: -Wall should already warn (-Wmissing-pattern or something like that), so then you just need to make that -Werror
+02:20:46 <Bish> no doesn't look like it, it complains about different things but not that
+02:21:55 <merijn> hmm
+02:23:00 <Bish> Wincomplete-patterns i guess
+02:23:09 <whadevah> dminuoso but doesn't this answer just shows that applicative can be defined in terms of monad. (We can get F (F D) with fmap and with join we can smash these two layers together)?
+02:23:14 <Bish> also no :(
+02:23:16 <merijn> Bish: That's part of -Wall though, so then it should already warn
+02:23:30 <Bish> but it not do :(
+02:24:31 <whadevah> For now I don't know very many tensors (just products and coproducts) that's why I think I can't really get it. But I'm sure I'll learn them someday
+02:24:51 <mniip> whadevah, composition is a monoidal structure on End(C)
+02:24:57 <Bish> merijn: Wincomplete-uni-patterns it is
+02:24:59 <mniip> and so is day convolution
+02:25:06 <Bish> looks like lambdas are special
+02:25:13 <merijn> Lambda's are special, yes
+02:25:19 <merijn> But that let shouldn't be
+02:25:38 <Bish> well docu says: ...except that it applies only to lambda-expressions and pattern bindings...
+02:27:53 <whadevah> mniip IIRC, composition is also strict where as (co)product is lax, yes? 
+02:28:26 <mniip> strict/lax in what sense
+02:28:33 <mniip> equality vs iso?
+02:28:47 <whadevah> yes 
+02:28:48 <mniip> (co)product can be strict
+02:28:57 <mniip> consider the simplicial category
+02:29:42 <mniip> in general any monoidal structure canonically extended to the skeleton
+03:02:16 <chesscipher> dmwit: ok, gonna look for deps that I may have missed
+03:53:52 <mniip> how do I use deriveJSON to derive an instance of the shape `FromJSON1 f => FromJSON (F f)`
+03:54:09 <mniip> if I can at all
+04:00:48 <mniip> quantified constraints to the rescue?
+04:06:55 <nwoob> are higher order function and partial functions only in functional programming
+04:07:27 <merijn> nwoob: Higher order functions exist in any language with first class functions
+04:07:46 <merijn> "partial functions" depends on what you mean by that
+04:09:13 <nwoob> how does partial functional definition depends
+04:09:17 <nwoob> is there more than one
+04:10:57 <merijn> nwoob: "partial function" generally means the opposite of a "total function" (i.e., one that always terminates). But for people who don't do Haskell/ML style functional programming you might be thinking of "partially applied functions" instead
+04:11:41 <nwoob> oh
+04:12:00 <nwoob> so is partially applied function only in functional programming style
+04:12:32 <merijn> In which case I'd say "no", because I'd argue that the idea of "partially applied functions" is non-sensical in Haskell and thus doesn't really exist
+04:13:35 <boxscape> Can it exist in non-functional programming?
+04:14:08 <boxscape> I guess it depends on what you count as "functional style"?
+04:15:05 <merijn> boxscape: Well, "functional" is a bit vague (which makes "non-functional" vague), but in languages that aren't like Haskell/ML, sure. In C++ or Python there is an obvious notion of "number of arguments of a function" and therefore a sensible notion of "only applying some of those arguments"
+04:15:42 <merijn> Consider: How many arguments does "const" have?
+04:15:43 <merijn> :t const
+04:15:45 <lambdabot> a -> b -> a
+04:15:47 <boxscape> uh, what would it mean to apply only some arguments in a C++ function?
+04:16:18 <merijn> boxscape: Wrapping the existing function with another, like the partial stuff you see in python's functools
+04:16:28 <boxscape> okay, that's what I would have guessed
+04:16:54 <merijn> If you say "const has 2 arguments", then logicall "const (+)" takes 1 more argument to be fully applied, but that's not something that seems sensible to say to me
+04:16:57 <merijn> :t const (+)
+04:16:59 <lambdabot> Num a => b -> a -> a -> a
+04:17:46 <merijn> Consequently, is "const (+) True" "partially applied" or is it "fully applied"? Does that question even make sense to ask? I'd say "no"
+04:18:56 <boxscape> it seems to me like the sort of thing that could be useful in practice even without a rigorous definition that covers all cases
+04:18:59 <merijn> "Functions take one argument and give a result, that result may or may not be another function" <- nicely consistent worldview with no confusion/edge cases
+04:19:03 <boxscape> s/thing/word
+04:19:43 <merijn> boxscape: Oh, sure, I still say "partially applied" when discussing things, but you need to first realise and grok that there's no such thing before you're allowed to say it :p
+04:19:52 <boxscape> yeah, that's fair
+04:20:17 <merijn> boxscape: The trick is to correctly intuit when it's a convenient short-hand and when it's just "unnecessary confusion for beginners"
+04:27:00 * hackage hw-uri 0.1.1.8 - Supports IO on URIs  https://hackage.haskell.org/package/hw-uri-0.1.1.8 (haskellworks)
+04:27:32 <toastdieb> Today I watched the video on building web apps with spock and saw that HIE looked real good
+04:28:08 <toastdieb> but following the installation instructions with build-all was a terrible mistake
+04:29:17 <toastdieb> How should I go about removing all the older versions of ghc that the build is still installing? :/
+04:37:30 * hackage cachix 0.3.3 - Command line client for Nix binary cache hosting https://cachix.org  https://hackage.haskell.org/package/cachix-0.3.3 (domenkozar)
+04:47:36 <wallysslima> hello
+05:02:49 <ski> wallysslima, hello yourself
+05:15:12 <wallysslima> someone here?
+05:17:37 <ski> wallysslima : yes
+05:17:48 <ski> wallysslima : if you have a question, just ask
+05:30:30 * hackage vformat 0.9.1.0 - A Python str.format() like formatter  https://hackage.haskell.org/package/vformat-0.9.1.0 (gqk007)
+05:30:43 <boxscape> I wonder if there'll be any serious efforts to make the sound system sound, after Dependent Haskell will have become a thing
+05:30:52 <boxscape> s/system/type system
+05:30:57 <boxscape> uh
+05:31:04 <dminuoso> boxscape: Shame, I was hoping we'd be getting a sound system.
+05:31:06 <boxscape> s/sound system/type system
+05:31:09 <boxscape> heh
+05:31:10 <dminuoso> Compiling would finally be a joyful excercise.
+05:31:36 <boxscape> I wonder what type errors should sound like
+05:32:09 * ski was imagining boxscape meant to use dependent types to better describe sound things
+05:32:40 <boxscape> I mean sure that works, too
+05:32:42 * ski . o O ( "What, is that sound ?" )
+05:35:13 <maralorn> Does any programing language with real implementation have a sound type system?
+05:36:44 <boxscape> Not sure if it's really truly ultimately sound (even if you include obvious builtin cheats) but I was thinking of the usual suspects agda, Idris, and Coq when writing that
+05:36:53 <boxscape> s/inlcude/exclude
+05:37:17 <mycroftiv> maralorn: yeah agda and other proof-languages
+05:38:00 * hackage pinch 0.3.5.0 - An alternative implementation of Thrift for Haskell.  https://hackage.haskell.org/package/pinch-0.3.5.0 (abhinav)
+05:38:04 <maralorn> So at what point did Haskell stray from the path?
+05:38:19 <boxscape> when bottom was introduced
+05:38:23 <mycroftiv> agda should be as 'solid' as any formal math proof in martin-lof type theory, modulo implementation bugs, and assuming you dont 'cheat' with the various ways you can tell it to be unsafe
+05:38:35 <mycroftiv> and being not-formally-sound isnt necessarily bad at all
+05:39:00 <maralorn> Ah, so we would need termination proofs for every program?
+05:39:22 <maralorn> (or only function? that might be more feasible)
+05:40:00 <boxscape> yes, although in practice you'd only do that for some functions
+05:40:14 <maralorn> boxscape: And the others?
+05:40:36 <maralorn> You mean for most functions the compiler can tell?
+05:41:03 <mycroftiv> i dont know for sure what the haskell dep-types people are doing exactly, but termination can be guaranteed if you exclude some things, so i think we should be able even in haskell to have this mechanically verified and implemented
+05:41:22 <boxscape> typically you want to aim to have a core of your program that's proven to be correct, and then around that you build the rest of the program, which would be very annoying to prove correct, especially if you consider IO and such
+05:41:37 <boxscape> (I don't have a lot of experience with it though)
+05:41:58 <Ariakenom> non-termination can be an effect afaik
+05:42:28 <maralorn> From what I understood the aim is for depended Haskell to not rely on termination proofs.
+05:42:29 <boxscape> mycroftiv Richard wrote in his thesis that that's not one of his goals
+05:42:53 <__monty__> Dependent Haskell won't be sound because of general recursion and type-in-type among other things.
+05:43:03 <maralorn> In my mind it‘s something like: You can write ill-typed programs but none of them will ever terminate.
+05:43:34 <maralorn> But I am not sure, if that is a correct intuition.
+05:43:41 <boxscape> maralorn you mean the compilation won't terminate or the actual program execution?
+05:43:48 <mycroftiv> so there probably wont be a {-# require termination #-} available ?
+05:43:57 <boxscape> I doubt it
+05:44:55 <maralorn> boxscape: I meant the later, but the former sounds also plausible. (Albeit wildly annyoing.^^)
+05:45:32 <boxscape> maralorn the former can happen already, but ghc has a default limit of I think 200 of how far it will recurse while typechecking (which you can change or disable entirely with flags)
+05:46:54 <boxscape> (though I think right now it can only happen if you have UndecidableInstances)
+05:47:09 <sshine> in Hspec, is there a way to combine two Testable prop into one? as in, test one, then the other. I thought it was called 'conjoin', but I think I'm mixing test frameworks. unfortunately there isn't a Monoid Property instance.
+05:47:12 <boxscape> (...enabled.)
+05:47:21 <mycroftiv> maybe in a couple years after dependent haskell lands and ive hopefully completed an epic training montage of compiler internals i could involve myself in ghc extensions for agda-style strict termination 
+05:47:29 <__monty__> maralorn: There's unsound programs whose execution terminates though `main :: Void; main = undefined`?
+05:48:22 <boxscape> % type family Test a :: a where Test a = Test a
+05:48:22 <yahb> boxscape: 
+05:48:29 <boxscape> % "test" :: Test Data.Kind.Type
+05:48:29 <yahb> boxscape: ; <interactive>:439:1: error:; * Reduction stack overflow; size = 201; When simplifying the following type: Test Type; Use -freduction-depth=0 to disable this check; (any upper bound you could choose might fail unpredictably with; minor updates to GHC, so disabling the check is recommended if; you're sure that type checking should terminate); * In the expression: "t
+05:49:13 <dminuoso> o_o
+05:49:18 <sshine> ah, d'oh. it was Test.QuickCheck that held 'conjoin'. and I'm actually doing a QuickCheck property within Hspec, so I'm good.
+05:50:15 <boxscape> (though the parameter of that type family is entirely unnecessary, actually)
+05:50:16 <maralorn> __monty__: Well, I feel like undefined shouldn‘t count for this consideration.
+05:51:04 <Ariakenom> __monty__: can you get around IO cases by saying that exceptions are part of IO?
+05:51:12 <__monty__> maralorn: Anything else that errors then?
+05:52:59 <maralorn> __monty__: Well the question is: Could they together with dependend Haskell be used to create an ill-typed program?
+05:53:23 <__monty__> Ariakenom: Only if the exceptions are actual values I think, akin to Either Type Exception.
+05:53:54 <maralorn> __monty__: I kinda regard every partiality other than non-termination a design flaw which won‘t be tolerated in the part of Haskell I am interested in.
+05:54:31 <__monty__> maralorn: Considering DH is a superset of regular haskell it's obvious., no?
+05:54:58 <Ariakenom> maralorn: no division by zero then? 
+05:55:14 <boxscape> I don't think it's strictly a superset, for example, data T = T might well be disallowed
+05:56:00 <maralorn> __monty__: I might not be deep enough into that matter to completely understand the implications.
+05:56:16 <mycroftiv> maralorn: you might find it interesting to explore agda, its quite similar to haskell but with all the guarantees you are interested in, and the ability to disable termination-checking on a per-function basis if you choose.
+05:57:08 <mycroftiv> the existing ecosystem is much more focused on math proofs than anything else, but at least for understanding in detail these issues and how they affect software construction, it might be fun for you
+05:57:20 <boxscape> or Idris, which is similar but more practice oriented rather than proof-assistant oriented
+05:57:40 <Ariakenom> __monty__: why? if you consider the similie IO ~ ExceptT Exception Rest
+05:58:30 * hackage servant-JuicyPixels 0.3.0.5 - Servant support for JuicyPixels  https://hackage.haskell.org/package/servant-JuicyPixels-0.3.0.5 (TvH)
+05:58:42 <maralorn> mycroftiv: I am actually very satisfied with Haskell. (Asides from small things like that partial matches are no errors or at least warnings by default.) I understand that the Soundness is a tradeoff.
+05:59:31 <maralorn> I‘d just like to really understand what the implications of the missing soundness are.
+05:59:44 <mycroftiv> maralorn: i wasnt at all trying to 'pull you away' from haskell, just saying that if you are interested in these things, the dependent typed languages would let you compare/contrast and understand those implications from direct experience
+05:59:59 <maralorn> Yeah, true.
+06:00:00 <boxscape> you can't be certain that something's true just because you've proved it in an unsound language
+06:00:40 <maralorn> I probably would have started with Idris instead of Haskell if I had faith in the idris ecosystem.
+06:01:15 <maralorn> boxscape: Well, I don‘t want to proof anything. I want to execute programs.
+06:02:02 <boxscape> You're already proving things. For example, if you call length, you must first prove that the type of the argument is [a]
+06:02:11 <boxscape> for some a
+06:02:25 <__monty__> Ariakenom: I'm not sure what you're getting at? How can you prove a type system sound by pretending it's a different type system?
+06:02:58 * ski idly wonders whether mycroftiv checked out Charity
+06:03:19 <mycroftiv> ski: first ive heard of it, i will check it out now, 'charity language' is the right search time
+06:03:24 <mycroftiv> err. term?
+06:05:37 <ski> @where Charity
+06:05:37 <lambdabot> http://pll.cpsc.ucalgary.ca/charity1/www/home.html
+06:05:40 <mycroftiv> ski: thanks, this looks interesting, seems like its been dormant for a long time, but since im still often using hugs2006 in plan 9, thats not a criticism :)
+06:05:44 <maralorn> boxscape: Well my concrete question is: Whenever the compiler let‘s me use length on something. Can I be sure that either the program will already have diverged or length is actually applied to a list?
+06:05:52 <merijn> maralorn: Probably best to start of with Haskell anyway, since most of the Idris literature is aimed at people coming from haskell :p
+06:05:52 <maralorn> That‘s the guarantee I need.
+06:06:30 <ski> mycroftiv : it doesn't have general recursion : it's a total/productive language. it does have both inductive and coinductive data types
+06:06:35 <merijn> maralorn: Vector would do that, but whether Vector is suitable depends on lots of things :)
+06:07:34 <maralorn> merijn: Vector as in the Haskell Type or Vector as in some other language I haven‘t heard of?
+06:07:44 <boxscape> maralorn I'm guessing that that's not guaranteed, but I'm not sure how to trick ghc into accepting it without using unsafeCoerce or bottom. But Type :: Type should allow you to get it, somehow, though maybe we need to get closer to Dependent Haskell to exploit that, I couldn't say
+06:07:50 <merijn> maralorn: Vector as in the Haskell type
+06:08:15 <merijn> maralorn: Those are finite in size, therefore length is never diverging (in fact, length is just O(1))
+06:08:25 <__monty__> Ariakenom: Ad absurdum I think you can call any type system sound if you consider exceptional results as valid values of the type.
+06:09:07 <mycroftiv> ski: i bet i can get Charity to compile in plan 9 pretty easily, 90s era C code is its bread and butter, this may be really cool for me for that reason
+06:10:49 <__monty__> Why are you still running plan 9? Just curious not disparaging.
+06:11:00 <maralorn> merijn: Oh, I am fine with length diverging on infinite list. I just want never the situation that the program type checks but get‘s a type error at runtime.
+06:11:16 <ski> perhaps they like Acme ?
+06:11:59 <mycroftiv> well i dont want to drag this channel off-topic, but ive dedicated the last 10 years of my life to plan 9, i have my own quasi-fork of the os, i absolutely adore it :) but in the past year ive come to realize that what makes plan 9 great is ACTUALLY...
+06:12:04 <mycroftiv> the same motivations for functional programming!
+06:12:30 <mycroftiv> because the plan 9 idea that everything should be a 9p fs basically means you can 'map' over absolutely any object in the system
+06:12:53 <mycroftiv> and that you have good type-guarantees that you can freely compose your software components, because everything is 'typed' to 9p messages
+06:13:14 <merijn> maralorn: "type errors at runtime" are a contradiction
+06:13:15 <mycroftiv> file-tree data structures are fundamentally recursion friendly
+06:14:17 <dminuoso> Given some `withR :: (Connection -> IO a) -> IO a`, is there a way to catch exceptions bubbling up from the withR part of it, but not the IO action I supply?
+06:14:37 <boxscape> merijn maralorn maybe segfaults rather than typeerrors, if you trick ghc into accepting a wrong type
+06:14:38 <merijn> maralorn: Type checking is something static you do offline (for example, at compile time), if it happens at runtime it's not a type error. Anyway, I don't see how that could happen in Haskell anyway
+06:14:53 <dminuoso> (Im forced to interact with a library that sadly raises some rather non-descript IOError, and I want to cleanly catch just IOError from just the withR part of it)
+06:15:03 <merijn> dminuoso: Catch and rethrow?
+06:15:12 <maralorn> merijn: Well unsoundness sounds also like something that could lead to a contradiction.
+06:15:22 <tdammers> merijn: maybe actual typechecks vs. "moral" ones, idk
+06:15:38 <dminuoso> merijn: What do you mean? I mean I could catch IOError from the inner IO action, rethrow them as FooIOError, and have an outer catches that differntiates between FooIOError and IOError, but that feels hackery.
+06:15:40 <tdammers> as in, you wrote code that isn't well-typed, but you have no type checker in place, so it crashes at runtime
+06:15:58 <__monty__> merijn: Protocol version mismatch?
+06:16:01 <merijn> dminuoso: Well, what else can you do?
+06:16:01 <tdammers> but that's still an abuse of terminology
+06:16:13 <dminuoso> merijn: I dont know? It's why I was asking. ;)
+06:16:21 <ski> mycroftiv : can you elaborate on the typedness of the 9p messages ? and what you mean by "map" over objects in the system ?
+06:16:28 <maralorn> I mean something like a runtime error for which the programer had the intuition that it should have been prevented by the typechecker?
+06:16:33 <merijn> __monty__: ?
+06:16:50 <tdammers> I think the issue here is that we have to completely disparate meanings of "type" - the type theoretical one, which is fairly well-defined, and the vague everyday notion of "type" that people tend to use casually even in programming
+06:16:53 <merijn> maralorn: That's a matter of "what ways is this unsound?"
+06:17:15 <mycroftiv> ski: sure - when you think about it, i just mean 'map' in the traditional - but accurate to the meaning of map - use of doing a recursive walk of a file tree and performing an operation on each file
+06:17:23 <maralorn> merijn: Exactly my point.
+06:17:31 <tdammers> as in "what type of car is this" - that's not the same meaning of "type" as in "type checking", but it's close to what "type" means to, say, a Python or JavaScript programmer
+06:17:31 <merijn> maralorn: Haskell is just unsound in that *all* types are inhabited (by bottom), not that you can arbitrarily ignore the type system (well, unless you use unsafeCoerce)
+06:17:47 <boxscape> merijn what about Type :: Type
+06:18:07 * ski . o O ( "Typing" by Maria Kovalyova,Roman Cheplyaka in 2012-11-05 at <https://ro-che.info/ccc/17> )
+06:18:07 <merijn> boxscape: No clue, TypeInType is nonsense and I refuse to acknowledge it's existence
+06:18:21 <mycroftiv> ski: and the 'typedness' of 9p messages is that if your software is expressed in the form of a 9p filesystem, you have a lot of strong guarantees, because the common 9p interface means you know for sure that standard operations behave predictably
+06:19:27 <maralorn> People in this channel always say things like. Haskell isn‘t sound anyway. But the only examples for problem that I see are well know hazards of programing. So the question is: Is it sound (and will it be with dependend Haskell) when disregarding the obivous pitfalls.
+06:20:05 <merijn> maralorn: The only reason to care about soundness if you're doing proofs/logic or other theoretical CS anyway
+06:20:07 <andrybak> hello. Does anyone know about dataflow of GHC? does GHC do type inference before, after, or during type checking? I'm trying to add type inference to a small DSL, and can't wrap my head around where in the dataflow it should go.
+06:20:07 <ski> mycroftiv : ok, so "map" in the sense of `fmap' (or `omap', in `MonoFunctor'), transforming each "element" of a "collection" in some fashion
+06:20:14 <mycroftiv> its like the value of typeclasses - a '9p fs' is a super-useful typeclass. its no surprise that the plan 9 authors went on to do go, which is a pretty lame language, but it did 'steal' typeclasses as its interfaces and that is most of what people like in it
+06:20:32 <merijn> andrybak: type inference and type checking are the same thing
+06:21:03 <merijn> andrybak: Think of it as computing a huge set of equations and then checking if it's solvable.
+06:21:07 <__monty__> merijn: Isn't a common criticism of typed languages that they don't deal with the reality of multiple versions remaining in use and therefore going "wrong" in practice when two well-typed versions of a program try to communicate across a network? I know that's not technically unsoundness but it sure looks like a "type error at runtime."
+06:21:16 <c_wraith> merijn: that's not the only reason.  Unsound things require runtime checks, or else they become unsafe.
+06:21:16 <mycroftiv> ski: yeah, just the classic functional map(), in unix you are often 'mapping a grep' across a set of files, that kind of thing
+06:21:17 <maralorn> merijn: So probably I want more to have a weaker notion of a "consistent typesystem" or something.
+06:21:35 <tdammers> __monty__: that would be a valid common criticism of *all* languages, typed or not
+06:21:58 <tdammers> it's not like an untyped language has any actual advantages here, other than defaulting to ignoring type mismatches
+06:22:10 <boxscape> maralorn You seem to want a notion of "hard to accidentally exploit unsoundness"
+06:22:12 <merijn> __monty__: Well, the solution to that problem is to extend the type system to cover those things, but that's hard work :p
+06:22:22 <__monty__> tdammers: That's not true though, duck typing provides *some* robustness.
+06:22:40 <merijn> __monty__: I think robustness is the wrong word there
+06:22:52 <andrybak> merijn, thank you. I had an inkling that that's the case. Need to read more into type theory/unification/etc ...
+06:22:53 <maralorn> boxscape: Yeah. Although it‘s not that hard to accidentally write an infinite recursion.
+06:23:00 <merijn> __monty__: Duck typing means it's more likely to do *something*
+06:23:01 <boxscape> that's true
+06:23:25 <__monty__> I'm not sure what word I'm looking for.
+06:23:47 <merijn> andrybak: The result of this is that (unlike, say, C++) the inference can go both directions
+06:23:56 <ski> @where polymorphic-type-inference
+06:23:56 <lambdabot> "Polymorphic Type Inference" by Michael I. Schwartzbach in 1995-03 at <https://cs.au.dk/~mis/typeinf.p(s|df)>,<http://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.57.1493>
+06:23:59 <ski> andrybak ^
+06:24:15 <ski> andrybak : also, learning some Prolog could perhaps be helpful ..
+06:24:39 <tdammers> __monty__: what you want is decouple both ends of an interface. in untyped languages, you do that by not specifying the interface at all (or only informally), using generic data structures like dictionaries and lists to capture the data, and then dynamically check and massage things when the default behavior (null for missing keys, etc.) doesn't suffice
+06:24:52 <ski> mycroftiv : so, you'd say "9p interfaces" are like type classes ?
+06:25:09 <tdammers> __monty__: in typed languages, the default is to only accept data that matches the declared interface exactly, but that doesn't mean you can make it more lenient.
+06:25:23 <kuribas> __monty__: no, because you can be lenient with static types as well
+06:25:30 <merijn> andrybak: So if you have "map :: (a -> b) -> [a] -> [b]" and a function "foo :: c -> d -> e" then with "map foo" we get "a -> b = c -> (d -> e)" which gives "a = c" and "b = d -> e" (and in turn "[a] = [c]" and "[b] = [d -> e]")
+06:25:33 <__monty__> merijn: Well, tbh, duck typing would go "right" in all cases where it's actually compatible.
+06:25:51 <merijn> __monty__: No, it would also work in case where it only accidentally works
+06:26:02 <merijn> (i.e. it doesn't go wrong in obvious ways)
+06:26:13 <merijn> Which is arguably worse, since that's super hard to catch/detect
+06:26:16 <tdammers> __monty__: duck typing would also pretend that nothing is wrong in cases where it's not actually compatible, but just happens to have methods of the same names on both sides
+06:26:17 <mycroftiv> ski: absolutely, and what i mean is that every 9p fs, regardless of how it is written, is a member of this typeclass because that is what the 9p protocol imposes and creates
+06:26:24 <andrybak> ski, oh boy
+06:26:27 <andrybak> merijn, yeah, I found out about from one SPJ's talks.
+06:26:39 * ski . o O ( "Interface-passing style" by Fare (aka François-René Rideau, of the TUNES project <http://tunes.org/>) in 2010-02-17 at <https://fare.livejournal.com/155094.html> )
+06:26:56 <andrybak> ski thanks for the link. lambdabot, good bot!
+06:28:28 * lambdabot nods to andrybak
+06:29:17 <mycroftiv> ski: and the point of the 9p 'typeclass' is that it is actually 'casting' everything into the typeclass of 'standard unix file' which provides the set of operations of read/wrte/seek etc
+06:30:20 <mycroftiv> so in essence, in functional terms, the plan 9 guys realized that everything needed to be a functor, all the stuff in standard unix that wasnt, should go
+06:30:36 <ski> mycroftiv : hm, ok. so just one "type class", then. i was thinking whether perhaps it's distinguish different types of files (and also, perhaps, typed pipes, and typed network connections (cf. session types ? also what about protocol types ?))
+06:31:08 <ski> mycroftiv : not following the "everything needed to be a functor" part
+06:31:33 <kuribas> __monty__: it's an argument for closure that it's hashmaps are "more organic", and adapt easier to changing requirements.  But IMO that's just uncontrollable, and wether it works or goes wrong is entirely left to chance.
+06:31:33 <mycroftiv> ski: well, any given plan 9 fs can implement 'arbitrary behaviors' for how it fulfills the typeclass, but in general the idea is that at the os/fs level, things all the work the same rather than differently
+06:31:49 <mycroftiv> ski: because anything that is a standard unix file, you can map over with the standard tools of grep/sed/etc
+06:31:57 <kuribas> __monty__: but then that's how lispers work, they introduce bugs and solve them as they arrive.
+06:32:16 <tdammers> kuribas: you misspelled "PHP"
+06:32:33 <tdammers> "counterexample-driven development"
+06:32:51 <mycroftiv> ski: they didnt like things like the ioctl() syscall, because ioctls require special syscalls different from the ones you use with other files - in other words, they werent a functor in the unix context, you cant map() your standard fs operations across them
+06:33:25 <kuribas> tdammers: PHP is just arbitrarily changing code until it works
+06:34:17 <tdammers> or until the person who reported the problem gets tired
+06:34:51 <kuribas> I think lispers still know what went wrong and how to fix it.
+06:35:02 * ski . o O ( "Kreisel development" )
+06:35:05 <mycroftiv> ski: these connections are really deep i think, i wrote 10 years ago a 9p filesystem for persistent/muxed io that works like both screen/tmux and a general purpose pub-sub system, amd in the past year i realize that i 'reinvented monads' because it acts to monadize arbitrary textual programs
+06:35:08 <kuribas> They just aren't that much concerned with getting it right the first time.
+06:36:18 <ski> mycroftiv : i'm still not following "they werent a functor in the unix context, you cant map() your standard fs operations across them" -- you can't traverse a subtree, and then do `ioctl' on every file satisfying some condition ?
+06:36:46 <mycroftiv> you cant sed/grep an ioctl
+06:37:49 <ski> mycroftiv : hm .. ok. i don't reall see what that has to do with `map'ping over the FS, though
+06:38:17 <ski> mycroftiv : or perhaps you're considering a file as a collection of characters (lines ?) ?
+06:38:43 <mycroftiv> the power of traditional unix 'everything is a file' is that all the objects can be manipulated by the same tools, you can map sed/grep/awk/etc across them in a sensible way. 
+06:38:58 * ski has only a faint understanding with what `ioctl' does / is for
+06:39:07 <ski> mhm
+06:39:38 <mycroftiv> forget the ioctl example, just 'any object in the system which cannot be manipilated by standard filesystem operations'
+06:40:23 <ski> `Functor' is not only about being able to "do the same thing" for every "element", but also about `fmap' not caring what type of things the "elements" are (as opposed to `omap' in `MonoFunctor', where the element type is fixed, not arbitrarily variable by the caller)
+06:40:51 <mycroftiv> making absolutely everything, and-we-mean-everything into a file "makes everything a functor" because of exactly that, i can invoke grep on any 9p fs
+06:43:11 <ski> @type fmap digitToInt
+06:43:13 <lambdabot> Functor f => f Char -> f Int
+06:43:34 <ski> this allows me to change the element type from `Char' to `Int' (or any other (concrete) type i fancy)
+06:44:11 <ski> i'm not seeing whether the 9p fs stuff would allow that kind of thing ?
+06:44:38 <mycroftiv> yes, because what happens after you ingest the data is still entirely up to you as a client, i would say - but also
+06:44:46 <novum> hello, you all might remember that I am a newbie. Indeed, it shines through presently. I tried to create `drop` but allow for negative inputs, but I have failed. WHen I pass a negative number, ghci says “Non type-variable argument in the constraint: Num ([Char] -> Integer -> [a] -> [a]) ... (Use FlexibleContexts to permit this)”
+06:45:20 <novum> please see my code http://ix.io/1WTL/hs if you would be so kind. thank you
+06:45:29 <mycroftiv> im not saying at all that plan 9 represents a 'functional environment' in some comprehensive/complete way
+06:45:31 <ski> (also, i think that some of the operations you're talking about, like `grep' and so, would not be something like `fmap'/`map', but perhaps also stuff like `foldr',`foldMap',`filter',`mapM_'/`traverse_',`mapM'/`traverse')
+06:45:45 <boxscape> try putting parentheses around your negative number when you call it novum?
+06:45:46 <mycroftiv> absolutely! map() was just 1 example
+06:46:05 <novum> oh my gosh. I. am. an. idiot.
+06:46:16 <novum> I only remember to do that for (-1) but I forget for other numbers.
+06:46:18 <mycroftiv> standard unix-admin perl scripts are 90% of the time doing folds, maps, filters, etc
+06:46:29 <novum> "thanks boxscape", said the idiot, novum.
+06:46:44 <boxscape> you're welcome, it happens
+06:47:03 <ski> novum : beginners makes beginner mistakes. just learn something and move on. no big deal
+06:47:07 <novum> success! I am rather happy now. thanks.
+06:47:23 <mycroftiv> ski: so what im saying is, now that i have entered the functional world, i can see all these parallels between what i like in plan 9, and why haskell and other functional languages are 'the right way to do things'
+06:47:25 <novum> I think I will get an infinite loop if I pass a really large number, though ^u^
+06:47:37 <novum> really negative number rather
+06:48:07 <novum> ski, I know I know. I just call myself an idiot sometimes. I probably shouldn't.
+06:48:19 <ski> mycroftiv : "pub-sub system" being ? "monadize arbitrary textual programs" ?
+06:48:47 <mycroftiv> ski: i recently got on a kick of trying to see how 'the same abstractions' can exist in different languages/environments - i made a filesystem-shell-like database in forth, which implements map() across its file-objects, and it is code-gened from haskell
+06:49:09 <ski> mycroftiv : "im not saying at all that plan 9 represents a 'functional environment' in some comprehensive/complete way" -- nod, sure, i'm just trying to understand to which extent the similarities go
+06:49:31 <novum> it actually works with really negative numbers because it keeps recursively flopping from negative to positive but it gets closer to zero each time until it is finially within the range [0, length xs) interesting xd
+06:49:40 <mycroftiv> where haskell has an abstract model that 'types' all the forth words, and haskell 'compiles' commands to create the file objects in forth, and forth writes those internal objects out to the external fs, and in shell i interact with those and then dispatch commands to the haskell layer
+06:50:10 <mycroftiv> so i tried to 'unify' haskell, 9pfs, forth, rc shell, with the same set of shared abstraction of file-objects that could be mapped over
+06:50:56 <mycroftiv> it ended up oddly similar to an Oleg Kiselyov os-fs toy based on delimited continuations
+06:55:59 <ski> mycroftiv : "i can see all these parallels between what i like in plan 9, and why haskell and other functional languages are 'the right way to do things'" -- that's interesting. what about any possible "functionalness" of `rc', or `es' (which i haven't tried) ? did you try `Scsh' ? any thoughts on F_{i}-shell <http://fishell.sf.net> ?
+06:56:37 <ski> mycroftiv : there was also some shell tools with commands that looked like `map',`filter',`zipWith',&c. (including passing lambdas), but i can't seem to find it atm :/
+06:57:11 <mycroftiv> ski: well, rc is based on 'lists' to begin with as its primary data type, so that is part of the picture. ive actually been so deep in plan 9 world for the past decade that im not familar with Scsh and fishell
+06:58:16 <ski> mycroftiv : heh, i was actually thinking about mentioning Oleg's del-cont FS stuff :)
+06:59:37 <mycroftiv> yes that and all of Oleg's work in general, showing the same abstractions in multiple languages, im hoping to build some larger scale systems based on the principles he shows
+07:00:35 <ski> mycroftiv : heh, Scsh is Scheme shell (perhaps mostly (in)famous for "Scsh Reference Manual - Acknowledgements" by Olin Shivers in 1994-09-04 at <https://scsh.net/docu/html/man.html>. however, you might've seen his "The SRE regular-expression notation - (Preamble: 100% and 80% solutions)" in 1998-08 at <http://www.ccs.neu.edu/home/shivers/papers/sre.txt>, too)
+07:00:41 <mycroftiv> i think maybe 5 years ago i first saw his essay on parallels between unix pipes and monadic io, at a time when i knew nothing whatsoever of functional, and that may have started all these marbles rolling
+07:01:18 <mycroftiv> thanks i will check that out
+07:02:16 <ski> mycroftiv : and F_{i}-shell (#fishell, by and`, who's not around much, these days) is based on some ideas from logic programming (pipes/channels are passed as arguments to procedures/predicates, whether input or output, one can match on number of parameters)
+07:02:49 <mycroftiv> ah that sounds really neat (starts reading about reaping zombie processes in scsh manual because weve just been having some issues with that in plan 9)
+07:05:07 <mycroftiv> huh, (fork (lambda () (fork/pipe a) (b))) for backgrounded pipe between process, neat
+07:07:23 <boxscape> is there a word for types that aren't function types?
+07:07:56 <sshine> boxscape, they have in common that they have kind *
+07:08:31 <sshine> :kind a -> a
+07:08:48 * ski . o O ( "<andersca> what meeting?  <Marvin--> research meeting for the cover group  <shapr> are you guys covering up the black ops section?  <Marvin--> shapr: there is no HSU  <shapr> and you're not part of it  <Marvin--> of course not" )
+07:08:56 <sshine> :kind Int -> Int
+07:09:02 <sshine> does lambdabot not have :kind?
+07:09:09 <sshine> > :kind Int -> Int
+07:09:10 <boxscape> @kind a -> a
+07:09:11 <lambdabot>  <hint>:1:1: error: parse error on input ‘:’
+07:09:11 <lambdabot> error: Not in scope: type variable ‘a’
+07:09:12 <lambdabot> error: Not in scope: type variable ‘a’
+07:09:20 <sshine> @kind Int -> Int
+07:09:21 <lambdabot> *
+07:09:27 <ski> boxscape : "non-function-types" ?
+07:09:31 <sshine> er
+07:09:36 <sshine> I'm being dumb.
+07:09:37 <dminuoso> boxscape: non-function-type indeed.
+07:09:44 <boxscape> ok, thanks
+07:10:20 <boxscape> interesting choice to not include implicit foralls in @kind
+07:10:25 <sshine> boxscape, you're thinking in terms of e.g. Java having "primitive" types, right?
+07:10:41 <boxscape> I don't think so
+07:10:45 <sshine> oh, okay.
+07:12:04 <sshine> I suppose there's some distinction between types you can unbox. https://tech.fpcomplete.com/haskell/tutorial/primitive-haskell
+07:12:53 <dminuoso> sshine: That article is a bit dated and does not reflect the current state of GHC anymore.
+07:13:24 <ski> @kind forall a. [a] -> Int
+07:13:26 <lambdabot> *
+07:14:50 <dminuoso> % :k Int# -- sshine 
+07:14:50 <yahb> dminuoso: Int# -- sshine :: TYPE 'GHC.Exts.IntRep
+07:15:27 <boxscape> @kind Int#
+07:15:28 <lambdabot> error:
+07:15:29 <lambdabot>     Not in scope: type constructor or class ‘Int#’
+07:15:29 <lambdabot>     Perhaps you meant one of these:
+07:15:47 <boxscape> @kind GHC.Exts.Int#
+07:15:49 <lambdabot> TYPE 'GHC.Types.IntRep
+07:15:58 <dminuoso> (Note that TYPE here is a primitive that can't really exist since it crosses universe levels)
+07:16:18 <boxscape> what do you mean by "can't exist"?
+07:16:25 <dminuoso> boxscape: Classify TYPE for me.
+07:16:49 <boxscape> It's a type constructor?
+07:16:58 <sshine> no
+07:17:03 <dminuoso> boxscape: It surely is not.
+07:17:11 <boxscape> why not?
+07:17:17 <dminuoso> boxscape: Because it doesnt exist at the type level?
+07:17:31 <boxscape> but the type level and the kind level are the same thing now, are they not?
+07:17:32 <sshine> the stuff that comes out of :type can be types (or type constructors for higher-kinded types), but the stuff that comes out of :kind are kinds.
+07:17:42 <dminuoso> boxscape: No they are only the same in TypeInType.
+07:17:48 <boxscape> oh
+07:18:01 <dminuoso> boxscape: TypeInType basically means: Type :: Type
+07:18:07 <dminuoso> boxscape: (Where Type is an alias for *)
+07:18:17 <boxscape> Does that specifically refer to -XTypeInType?
+07:18:26 <dminuoso> boxscape: Yes.
+07:18:28 <boxscape> okay
+07:19:41 <lortabac> dminuoso: IIRC TypeInType has been integrated into PolyKinds and deprecated
+07:20:10 <sshine> https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/glasgow_exts.html#extension-TypeInType
+07:20:14 <dminuoso> lortabac: Huh? I think you confused something.
+07:20:17 <sshine> The extension TypeInType is now deprecated: its sole effect is to switch on PolyKinds (and hence KindSignatures) and DataKinds.
+07:20:23 <dminuoso> Oh interesting.
+07:20:27 <dminuoso> I see.
+07:20:47 <sshine> things move fast.
+07:21:06 <boxscape> dminuoso if TypeInType more or less means Type :: Type, why is this the case even without extensions?
+07:21:11 <boxscape> @kind *
+07:21:12 <lambdabot> *
+07:21:29 <dminuoso> boxscape: Possibly things have moved faster than I kept track of.
+07:21:39 <boxscape> okay
+07:22:25 <dminuoso> sshine: So PolyKinds flips on the * :: * doctrine?
+07:22:32 <sshine> dminuoso, I don't know.
+07:22:35 <dminuoso> Actually it doesnt seem so.
+07:22:38 <dminuoso> My raw GHCi reports:
+07:22:42 <dminuoso> (*) :: *
+07:23:17 <lortabac> "The kind system as described here is always in effect, with or without extensions"
+07:23:24 <lortabac> https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/glasgow_exts.html#overview-of-kind-polymorphism
+07:23:50 <lortabac> it seems that Type :: Type is always true, with or without extensions
+07:24:22 <boxscape> so TYPE is a type constructor?
+07:25:31 <dminuoso> boxscape: No.
+07:25:31 <dminuoso> boxscape: TYPE is a magical GHC primitive.
+07:26:00 <dminuoso> boxscape: Equivalently to how we can define a data constructor one we can pattern match, we can say that a type constructor is one we can also pattern match against.
+07:26:24 <dminuoso> (With type constructors you can use tyfams or typeclasses to do that)
+07:26:48 <ski> % :k TYPE
+07:26:48 <yahb> ski: TYPE :: RuntimeRep -> *
+07:28:42 <dminuoso> lortabac: Interesting, I did not know that it was that deeply integrated.
+07:30:42 <boxscape> dminuoso but you *can* pattern match on TYPE
+07:30:48 <boxscape> % type family Test a where Test (TYPE x) = Int
+07:30:48 <yahb> boxscape: 
+07:30:52 <boxscape> % :kind! Test (TYPE GHC.Exts.IntRep)
+07:30:52 <yahb> boxscape: Test (TYPE GHC.Exts.IntRep) :: *; = Int
+07:31:01 <dminuoso> Huh. I stand corrected.
+07:31:14 <novum> how do you map  [1..10] eg to  drop * "Hello, world!"  .. how to "curry"(?) this? I tried  ghci> map drop (zip [1..10] (repeat "hello"))  .. But I silly beginner so
+07:31:16 <dminuoso> boxscape: I suppose my TypeInType thinking was fundamentally wrong, so I didnt realize this.
+07:31:38 <boxscape> interesting though that there doesn't seem to be a `data TYPE` in GHC.Prim
+07:31:48 <sshine> novum, map (\i -> drop i "Hello, World!") [1..10]
+07:32:10 <novum> oh my lambda functions - something I've not delved into yet in haskell .. ok thanks
+07:32:24 <sshine> > map (\i -> drop i "Hello, World!") [1..10]
+07:32:26 <lambdabot>  ["ello, World!","llo, World!","lo, World!","o, World!",", World!"," World!",...
+07:32:33 <dminuoso> novum: Or, even cleaner, just move it into a separate binding.
+07:32:36 <novum> wow it's just like vimscript `map()` haha
+07:32:55 <novum> dminuoso, beep boop. I am beginner. boop beep.
+07:32:55 <dminuoso> % let dropped i = drop i "Hello, World!" in map dropped [1..10] -- novum 
+07:32:56 <yahb> dminuoso: ["ello, World!","llo, World!","lo, World!","o, World!",", World!"," World!","World!","orld!","rld!","ld!"]
+07:33:05 <sshine> novum, actually there's a library function that does pretty close to what you're doing, but infinitely:
+07:33:10 <sshine> > Data.List.tails "Hello, World!"
+07:33:12 <lambdabot>  ["Hello, World!","ello, World!","llo, World!","lo, World!","o, World!",", Wo...
+07:33:21 * novum is overwhelmed
+07:33:26 * novum is thankful
+07:33:26 <dminuoso> novum: Moving things into separate bindings is the best you can do to create modular code. :)
+07:33:32 <dminuoso> novum: Use let, use where!
+07:34:19 <sshine> :t Data.List.tails
+07:34:20 <lambdabot> [a] -> [[a]]
+07:34:31 <tdammers> protip: move things into separate bindings, add explicit type signatures, and then throw those into hoogle to see if the thing already exists
+07:34:40 <tdammers> also, hlint.
+07:34:43 <sshine> or run HLint, yes
+07:35:10 <tdammers> hlint will not find all possible refactorings though, just the blatant ones
+07:35:15 <novum> there are like length [1..] bots in here
+07:35:41 <sshine> novum, I think the eval bots inhere are pretty safe against those.
+07:35:41 <boxscape> HLint also doesn't support the newest extensions because ghc-src-exts isn't up to date :(
+07:36:11 <novum> just saying that there are so many bots in here.. infnitely many bots xd
+07:36:27 <sshine> boxscape, HLint still uses ghc-src-exts?
+07:36:48 <boxscape> or wait, haskell-src-exts, rather
+07:36:59 <boxscape> they're in the process of moving away from it
+07:37:02 <boxscape> and to the ghc api
+07:37:30 <sshine> right
+07:37:48 <sshine> I get confused. have been playing with ghcide lately, also by ndmitchell, so I can't remember what's what.
+07:37:55 <dminuoso> novum: One cool think about moving things into separate bindings, is that it lets you focus on small parts of code. Its usually complicated to write complex expressions because you get lost in types very quickly.
+07:39:24 <ski> > [drop i "Hello, World!" | i <- [1 .. 10]]  -- novum, this is a list comprehension
+07:39:26 <lambdabot>  ["ello, World!","llo, World!","lo, World!","o, World!",", World!"," World!",...
+07:39:53 <novum> ski, I thought of that, also, but I was practicing partial function application or currying or whatever
+07:39:59 * ski nods
+07:40:13 <boxscape> you can also give local bindings type annotations, which can make things a lot easier to think about sometimes
+07:40:31 <novum> ski, 🎿 :D thanks, though
+07:41:27 <boxscape> novum currying is taking a multi parameter function and converting it to a function that takes one parameter and returns another function (which takes one more param, etc.). Partial application is taking a multi-argument function and only applying some of its arguments
+07:42:07 <boxscape> s/multi-argument/multi-parameter
+07:42:11 <novum> can you curry something like drop if you want to pass something to the first param
+07:42:20 <sshine> yes
+07:42:25 <novum> banana = drop _ "hello bananas"
+07:42:28 <boxscape> drop is already curried
+07:42:31 <boxscape> :t drop
+07:42:32 <lambdabot> Int -> [a] -> [a]
+07:42:34 <boxscape> :t uncurry drop
+07:42:36 <lambdabot> (Int, [a]) -> [a]
+07:42:50 <novum> banana 1
+07:43:15 <sshine> > map (`drop` "Hello") [1..5]
+07:43:17 <lambdabot>  ["ello","llo","lo","o",""]
+07:43:25 <novum> how do you curry it though
+07:43:32 <novum> of infix
+07:43:33 <sshine> > map (flip drop "Hello") [1..5]
+07:43:35 <lambdabot>  ["ello","llo","lo","o",""]
+07:43:49 * merijn recommends forgetting the entire curried/uncurried distinction
+07:43:51 * novum 's mind is blown into little tiny bits
+07:44:04 <novum> kaboom
+07:44:27 <sshine> novum, there are a few ways. if 'drop :: Int -> [a] -> [a]', then you want a 'drop2 :: [a] -> Int -> [a]' with the arguments flipped. when you have that, you can partially apply the first argument to 'drop2' (being the second argument to 'drop').
+07:44:49 <boxscape> > map (drop ?? "Hello") [1..5]
+07:44:51 <lambdabot>  ["ello","llo","lo","o",""]
+07:46:01 <kuribas> > tails "Hello"
+07:46:04 <lambdabot>  ["Hello","ello","llo","lo","o",""]
+07:46:04 <sshine> novum, but then you usually don't care about naming this flipped version of drop anything like 'drop2'. you'd just use it directly, since the expression that produces it, whether that's 'flip drop xs' or '(`drop` xs)' or 'drop ?? xs', is rather short.
+07:47:25 * nil snorts at (??)
+07:47:30 <novum> > putStrLn "% putStrLn \"test\""
+07:47:32 <lambdabot>  <IO ()>
+07:47:44 * novum giggles
+07:47:50 <sshine> novum, but really, 'map (\i -> drop i "Hello") [1..5]' is very fine also.
+07:48:00 <novum> I'll take your word for it
+07:49:16 <sshine> > iterate show ""
+07:49:19 <lambdabot>  ["","\"\"","\"\\\"\\\"\"","\"\\\"\\\\\\\"\\\\\\\"\\\"\"","\"\\\"\\\\\\\"\\\\...
+07:49:25 <sshine> o_ô
+07:50:02 <ski> > fix show
+07:50:04 <lambdabot>  "\"\\\"\\\\\\\"\\\\\\\\\\\\\\\"\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"\\\\\\\\\\\\\...
+07:50:19 * ski waits for it
+07:50:30 <sshine> seems to have broken rather than fixed it.
+07:50:39 <sshine> ^- that?
+07:50:46 <merijn> > fix error -- ;)
+07:50:48 <lambdabot>  "*Exception: *Exception: *Exception: *Exception: *Exception: *Exception: *Ex...
+07:50:53 <sshine> haha
+07:50:54 <ski> merijn : thank you ;)
+08:15:14 <t7> what do you do when your type arguments are in the wrong order to write a type class instance ?
+08:16:43 <lortabac> t7: can you expand a little bit?
+08:17:00 <lortabac> the type arguments of what?
+08:18:49 <maralorn> merijn: This argument against Duck-Typing is also kinda an argument against extensible records, isn‘t it?
+08:18:52 <lortabac> t7: do you mean instances of types with partially-applied arguments like 'instance Monad (Either a)'?
+08:19:09 <t7> lortabac: yup
+08:19:17 <lortabac> t7: in those cases you can use a newtype with flipped type-arguments
+08:19:47 <t7> instance Monad (\x -> Either x a) 
+08:19:52 <dmwit> t7: newtype
+08:20:13 <dmwit> No other choice, really.
+08:21:16 <geekosaur> there's already a Flip newtype somewhere, isn't there?
+08:21:45 <dmwit> Yes. But "wrong order" doesn't always mean "Flip is enough".
+08:22:00 * hackage dl-fedora 0.7.1 - Fedora image download tool  https://hackage.haskell.org/package/dl-fedora-0.7.1 (JensPetersen)
+08:23:07 <ski> @type flip (flip . foldr)
+08:23:08 <lambdabot> Foldable t => t a -> (a -> c -> c) -> c -> c
+08:23:24 <ski> @type GHC.Exts.build
+08:23:26 <lambdabot> (forall b. (a -> b -> b) -> b -> b) -> [a]
+08:25:00 * hackage hierarchical-spectral-clustering 0.5.0.0 - Hierarchical spectral clustering of a graph.  https://hackage.haskell.org/package/hierarchical-spectral-clustering-0.5.0.0 (GregorySchwartz)
+08:45:21 <maralorn> Well there is currying in haskell. But it is nearly never used.
+08:50:03 <Guest_98> Installation done!In order to run ghc and cabal, you need to adjust your PATH variable.You may want to source '/Users/xiaowan/.ghcup/env' in your shellconfiguration to do so (e.g. ~/.bashrc).moqideAir:~ xiaowan$ ghci-bash: ghci: command not foundmoqideAir:~ xiaowan$ ghci-bash: ghci: command not foundmoqideAir:~ xiaowan$ 
+08:50:34 <Guest_98> I already installed but it does not work
+08:50:45 <maralorn> (Well, one could actually argue that a function taking a record is a curried function.)
+08:50:45 <Guest_98> could someone help me pls
+08:53:10 <EvanR> by curried you mean uncurried
+08:53:14 <EvanR> A x B -> C
+08:53:29 <EvanR> :t uncurry
+08:53:30 <lambdabot> (a -> b -> c) -> (a, b) -> c
+08:53:36 <Guest_98> hi
+08:53:51 <Guest_98> `I already install the Haskell on my terminal
+08:54:05 <Guest_98> but when I type ghci
+08:54:10 <EvanR> may the Haskell be with you
+08:54:13 <Guest_98> it shows
+08:54:25 <Guest_98> -bash: ghci: command not found
+08:54:35 <tdammers> try `echo $PATH`
+08:55:06 <tdammers> does that contain any path that has the ghci binary in it? if not, then that's your problem
+08:55:08 <maralorn> EvanR: I hate signs.
+08:55:17 <Guest_98> it shows `;-bash: /usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin: No such file or directory
+08:55:29 <tdammers> without the backticks
+08:56:17 <tdammers> but anyway, have you done what ghcup told you to? the /env thing?
+08:56:57 <Guest_98> yeah
+08:57:11 <Guest_98> seconds
+08:57:13 <ski> maralorn : sometimes we say "tupled"
+08:57:22 <Guest_98> `I will show you
+08:57:23 <ski> (as i "tupled style" vs. "curried style")
+08:57:51 <Guest_98> Run the following in your terminal (as a user other than root), then follow the onscreen instructions.curl https://get-ghcup.haskell.org -sSf | sh
+08:58:01 <Guest_98> `I type the code 
+08:58:43 <Guest_98> and when `I finished the onscreen instruction , it shows Installation done!
+08:59:33 <Guest_98> and it also shows-------- In order to run ghc and cabal, you need to adjust your PATH variable.You may want to source '/Users/xiaowan/.ghcup/env' in your shellconfiguration to do so (e.g. ~/.bashrc).
+09:01:19 <shapr> mmmm ghcup is my fav
+09:02:08 * ski idly wonders whether shapr remembers that quote
+09:04:45 <Guest_98> hi?
+09:04:55 <kuribas> wow, cassava is really shitty in its error messages
+09:06:40 <kuribas>  ./Data/Vector/Generic.hs:245 ((!)): index out of bounds (5,5)
+09:06:58 <kuribas> not quite what I expect from a haskell library
+09:07:49 <EvanR> that looks more like not-having-any-error-messages
+09:08:02 <EvanR> it's blindly !-ing vectors without regard to bounds
+09:08:55 <kuribas> indeed
+09:10:48 <EvanR> if this was C... that'd be a segfault
+09:10:53 <EvanR> hopefully
+09:20:25 <kuribas> ah, I see I called it wrong...
+09:23:13 <kuribas> the problem is the (.!) operator, which has bad error messages
+09:24:56 <kuribas> at least it could inject some context
+09:26:19 * QinGW new
+09:29:41 <ski> hello QinGW
+09:30:03 <QinGW> hi
+09:30:28 <ski> do you have any (Haskell-related) question ?
+09:31:23 <QinGW> any recommendations to give haskell a quick try around work?
+09:32:15 <ski> i suppose it depend on several things, like how well you know it, how open work is about new languages, and so on
+09:32:29 <QinGW> or some birdge to java or python
+09:32:54 <Zemyla> Okay, so suppose I have the following type:
+09:33:07 <Zemyla> @let newtype Codensity2T t m a = Codensity2T { runCodensity2T :: forall r. (a -> m (t r)) -> m (t r) }
+09:33:08 <lambdabot>  Defined.
+09:33:50 <ski>   Codensity2T t m a = Codensity (Compose m t)
+09:34:12 <Zemyla> Well, we turn it into a Functor, Applicative, Monad, and MonadTrans in the obvious ways.
+09:34:17 <Zemyla> But then we define another function:
+09:34:25 <Zemyla> @let liftT :: (Monad t, Traversable t, Applicative m) => t a -> Codensity2T t m a; liftT t = Codensity2T $ \c -> fmap (>>= id) $ traverse c t
+09:34:26 <lambdabot>  Defined.
+09:35:10 <Zemyla> It seems pretty obvious, at least to me, that liftT (return a) = return a.
+09:35:40 <Zemyla> But is it always the case that liftT m >>= liftT . f = liftT (m >>= f)?
+09:37:11 <novum> if you consider the expression ``never say never - unless you're saying "never say never - unless you're saying 'never say never - unless ...'"`` is it possible to create a function that will infinitely print this recurisve expression (alternating between " and ' for quotes) but then also have it handle something like `take` properly such that if you do  take 1 neverSayNever  it just says  never
+09:37:12 <novum> say never - unless you're saying "never say never"  and take 2 neverSayNever says  never say never - unless you're saying "never say never - unless you're saying 'never say never'"
+09:37:56 <novum> the issue is the end quotes ..
+09:38:50 <ski> `take n' never takes more than `n' elements from a list
+09:39:36 <nshepperd2> kuribas: you should be able to compile with profiling and run with RTS -xc to get the evaluation stack of the error
+09:39:47 <nshepperd2> in future
+09:40:27 <nshepperd2> it would be nicer if there was a flag to give all those partial functions like ! and head a HasCallStack constraint
+09:41:45 * novum can feel the geers turning in peoples' heads.
+09:42:01 <novum> hm I guess you would just have to incorporate the count in the function itself
+09:42:31 <ski> that would be possible, i guess
+09:42:54 <nshepperd2> the infinite expression wouldn't have any end quotes
+10:06:58 <sshine> with Megaparsec, when I do 'type Parser = ReaderT MyEnv (Parsec Void Text)', I can't use MonadParsec operators directly.
+10:07:54 <sshine> when I instead do 'newtype Parser a = Parser { runParser :: ReaderT MyEnv (Parsec Void Text) a }', then how do I spell my 'deriving's?
+10:07:55 <ski> does it have a transformer version ?
+10:08:21 <sshine> Megaparsec has both a ParsecT and a MonadParsec.
+10:08:22 <ski>   deriving (Functor,Applicative,Alternative,Monad,MonadPlus)
+10:08:26 <ski> perhaps some more, too
+10:08:43 <sshine> I thought I needed 'deriving (..., MonadReader MyEnv, MonadParsec <something>)'
+10:08:55 <ski> yea, souonds reasonable
+10:09:07 <sshine> I'm just not sure what the <something> is.
+10:09:10 <ski> what are the parmeter(s) of `MonadParsec' ?
+10:09:46 <sshine> MonadParsec e s m | m -> e s
+10:09:48 * ski idly replaces parameters with parmesons
+10:09:56 <sshine> with s being Stream
+10:10:01 <ski> ok, so two of them
+10:10:13 <ski> `MonadParsec EThing Stream' ?
+10:10:21 <ski> whatever `e' is
+10:10:47 <sshine> that's probably Void. that's what I stuck into 'type Parser = Parsec Void Text'.
+10:11:02 <ski> tias ?
+10:11:08 <sshine> it's a custom error component according to the docs.
+10:11:09 <sshine> tias?
+10:12:46 <ski> "try it and see"
+10:13:36 <sshine> ah :) thanks.
+10:33:00 * hackage zxcvbn-hs 0.2.1.0 - Password strength estimation based on zxcvbn.  https://hackage.haskell.org/package/zxcvbn-hs-0.2.1.0 (PeterJones)
+10:37:27 <dmwit> um
+10:37:49 <dmwit> If you can't use MonadParsec operators with ReaderT MyEnv (Parsec Void Text), then adding a newtype wrapper isn't going to magically change that.
+10:38:36 <dmwit> But then, I'm confused by your claim that you can't use MonadParsec operators, because my copy of the documentation says there is indeed an instance for ReaderT.
+10:38:39 <dmwit> So what gives?
+10:40:58 <dmwit> (Adding a newtype wrapper *and a hand-written instance* might non-magically change it, but deriving does not count as non-magical.)
+10:45:10 * EvanR tries to come up with a direct word for "non-magical"
+10:45:25 <lavalike> realistical
+10:45:34 <EvanR> maybe magical is too idiomatic, like what is "non-cheesy"
+10:45:57 <EvanR> whatever, lets embrace non-ness
+10:46:03 <nshepperd2> Muggle
+10:46:29 <EvanR> i think that's a different version of magical
+10:47:25 <lavalike> fine, proper, neat
+10:49:31 <EvanR> i'd give proper is opposed to magical a test-drive
+10:53:47 * ski idly wonders whether McBride would have had any better suggestion ..
+11:02:00 <monochrom> scientific (for non-magical)
+11:02:56 <monochrom> no-nonsense (for embracing non- and then one level up >:) )
+11:03:11 * ski likes that one
+11:03:43 * ski . o O ( Kreisel no-counterexample interpretation )
+11:04:06 <monochrom> Constructive logic can prove the no-nonsense version of excluded middle >:)
+11:04:41 * ski grins
+11:05:49 * ski . o O ( "Dual-Intuitionistic Logic" by Igor Urbas in 1996 at <https://projecteuclid.org/download/pdfview_1/euclid.ndjfl/1039886520>,"Dual Intuitionistic Logic Revisited" by Rajeev Goré in 2000 at <http://citeseerx.ist.psu.edu/viewdoc/download;jsessionid=3C896000A33376270A99EE2BFE5F6ACF?doi=10.1.1.71.8339&rep=rep1&type=pdf> )
+11:05:56 * ski . o O ( "Subtractive Logic" by Tristan Crolard in 1999-05-02 at <https://cedric.cnam.fr/sys/crolard/publications/tcs.pdf> )
+11:08:19 <shapr> ski: which quote?
+11:09:09 <ski> * ski . o O ( "<andersca> what meeting?  <Marvin--> research meeting for the cover group  <shapr> are you guys covering up the black ops section? <Marvin--> shapr: there is no HSU  <shapr> and you're not part of it  <Marvin--> of course not" )
+11:09:14 <shapr> ohh yeah
+11:09:23 <shapr> ski: we were talking about that on twitter recently, did you see?
+11:09:32 <ski> oh ? no, not at all
+11:09:39 <shapr> I asked SyntaxNinja if cabal was an acronym
+11:09:56 <shapr> cause I know Isaac came up with cabal while we were talking in the hotel room at ICFP 2006
+11:09:57 <ski> i just magically^Wno-no-nonsensly read your minds
+11:10:04 <shapr> ski: that's an impressive skill
+11:10:08 <shapr> I can't read minds yet.
+11:10:14 <shapr> is that an advanced category theory skill?
+11:10:28 <ski> i dunno how it works, so who can tell ?
+11:10:41 <ski> might be (nudge, nudge)
+11:10:51 <shapr> :-)
+11:11:03 <shapr> ski: so yeah, the Haskell Secret Underground came up on twitter
+11:11:16 <ski> <Marvin--> shapr: there is no HSU
+11:11:20 <shapr> :-D
+11:11:27 <shapr> yup :-)
+11:11:46 <ski> Marvin-- was StarvinMarvin was SyntaxNinja ?
+11:11:54 * ski can't keep people straight, probably
+11:12:24 <shapr> nah, Marvin-- was Martin Sjögren
+11:12:36 <ski> ah
+11:12:42 <shapr> SyntaxNinja aka SyntaxPolice was Isaac Jones, now Isaac Potozny-Jones
+11:12:55 * ski nods
+11:13:00 <shapr> ski: https://twitter.com/SyntaxPolice
+11:13:16 <ski> (never heard the last nickname, "Isaac Potozny-Jones")
+11:13:23 <shapr> here's the whole thread: https://twitter.com/shapr/status/1173685830776434689
+11:13:42 * ski was, for inscrutable reasons, reading
+11:13:43 <shapr> ski: that's real name, IRC nickname was SyntaxNinja and also SyntaxPolice
+11:13:47 <ski> @wiki QuotesPage
+11:13:47 <lambdabot> https://wiki.haskell.org/QuotesPage
+11:14:13 <ski> "SyntaxNinja"/"SyntaxPolice" was/is his real name, to me !
+11:14:19 <shapr> good point!
+11:14:20 * ski mutters
+11:14:27 <EvanR> now i'm imagining a whole franchise of various syntax characters
+11:14:27 <shapr> Some people I never know their real name, only their IRC nickname
+11:14:43 * ski idly wonders what happened with esap
+11:14:45 <EvanR> the syntax butcher, the syntax baker, the syntax candlestick maker
+11:15:21 <MarcelineVQ> the syntax urine tannery
+11:15:39 <shapr> ski: esap is still active on twitter: https://twitter.com/PulkkinenEsa/
+11:16:00 <ski> anyway search for "Comrade Shivers's helicopter", on that quote page
+11:16:17 * shapr cackles cheerfully
+11:16:26 <shapr> I still haven't met Shriram
+11:16:28 <shapr> hopefully one day
+11:16:46 * ski never thought to look there
+11:16:48 <ski> hm
+11:16:55 <shapr> ski: anyone else you want to know about?
+11:17:32 <shapr> I wonder what happened to Igloo?
+11:18:05 <ski> shapr : did you see "The Swine Before Perl" (talk/presentation) by Shriram Krishnamurthi in 2001-11 at <https://cs.brown.edu/~sk/Publications/Talks/SwineBeforePerl/>,<https://cs.brown.edu/~sk/Publications/Talks/SwineBeforePerl/audio.mp3>,<http://www.ai.mit.edu/projects/dynlangs/ll1/shriram-talk.pdf> ?
+11:18:08 <monochrom> Igloo melted due to global warming
+11:18:14 <shapr> nope
+11:18:15 <ski> (quite fun, if you hadn't yet)
+11:19:00 <shapr> I never did attend one of the LL conferences
+11:19:25 <lavalike> only go to LR ones
+11:20:05 <Igloo> Everything and Nothing
+11:21:14 <shapr> Igloo: you're ALIVE!
+11:21:18 * shapr hugs Igloo
+11:21:33 <shapr> Igloo: don't think I've chatted with you in ten years or so
+11:21:52 <Igloo> What country are you in now, shapr?
+11:22:01 <shapr> I'm in New York City, at The Recurse Center!
+11:22:09 <shapr> after Halloween I'm moving to Washington DC
+11:22:27 <shapr> but almost six months ago I was living in Atlanta, Georgia
+11:22:55 <Igloo> Perhaps I should have asked where you haven't been living  :-)
+11:23:10 <ski> Pseudonym,TheHunter,mmorrow,vixey,ddarius,andersca,augustss,bringert,ndm,Lor,Peaker,dons,Korollary,gio123,palomer ?
+11:23:29 <shapr> ski: Pseudonym is still active in FP, but I think has a 'real' job in Australia
+11:23:38 <shapr> TheHunter is still active on github, but off doing other things
+11:23:52 <ski> oh, glad to hear TheHunter is well, at least
+11:23:59 <shapr> don't know about mmorrow, or vixey, or Lor, or Korollary, or gio123
+11:24:05 * ski could probably think of more people, with some time
+11:24:25 <EvanR> these real jobs seem to be a real problem 
+11:25:21 <shapr> ddarius is living off the grid in the Cascades, doing category theory full time
+11:25:34 <shapr> last I heard andersca went to work for Apple after dbus was successful
+11:25:37 <shapr> and I think he's still there
+11:25:44 <shapr> bringert was working for Google, and I think still is
+11:25:57 <shapr> ndm is still active on other IRC channels such as #ghc
+11:26:04 <shapr> dons is busy at facebook last I heard
+11:26:47 <ski> ah
+11:27:01 * ski hasn't been in #ghc that much
+11:27:32 <shapr> I got to see ddarius and augustss in person at the 2018 ICFP
+11:27:36 <shapr> I think ndm was there also?
+11:27:42 <ski> great :)
+11:27:47 <shapr> ski: do you attend the ICFP conferences?
+11:27:51 <ski> i haven't
+11:27:52 <shapr> would be nice to meet you again ~20 years later
+11:29:06 <ski> yea
+11:29:33 * ski hugs shapr
+11:30:30 * ski still remembers the unicycle
+11:30:57 <ski> wasn't there considerable overlap between #haskell, and #unicycling, at some point ?
+11:30:59 <shapr> ski: did you see the mountain unicycle I bought later?
+11:31:01 <shapr> ski: there was!
+11:31:23 <ski> hm, not sure whether i saw that
+11:31:53 * ski for some reason can't stop smiling, facial muscles must be malfunctioning
+11:32:18 <shapr> monad tutorial on unicycle was a good story
+11:34:37 <ski> hmm, i don't remember that ?
+11:38:31 <flogfr> Hello, I would like to be upgraded as uploader to share a library on hackage. I just sent an email to trustees@ , let me know if you need any more information?
+11:40:38 <EvanR> think of a monad as like a unicycle
+11:40:41 <lyxia> I think that's all you need to do
+11:41:07 <monochrom> Hell in fact mon=uni
+11:41:40 <monochrom> Oh I know! My evil twin is called unichrom >:)
+11:41:48 <shapr> chin-tastic: HELLO! would you like to learn Haskell?
+11:43:16 <shachaf> monochrom: I thought your evil twin was multichrom.
+11:43:17 * ski . o O ( ambushing unsuspecting newbies with Haskell proposals, since 2001 )
+11:44:16 <made> can i memoize a f :: Int -> Int -> Int
+11:44:25 <ski> i suppose unichrom is the Doppelgänger ?
+11:44:44 <jle`> made: yes
+11:45:24 <made> should i just split the function in two ?
+11:45:51 <jle`> one simple way to memoize it, if it isn't already recursive, is to wrap calls to it over some lazy data structure
+11:46:01 <made> its recursive :(
+11:46:03 <jle`> in this case, like a Map
+11:46:22 <jle`> ah. well then you'd have to sort of 'inline' this the whole way through
+11:46:30 <jle`> you can probably get the idea from the non-recursive case:
+11:46:41 <jle`> memoizedF :: Int -> Int -> Int
+11:47:18 <jle`> memoizedF x y = cache M.! (x, y)
+11:47:41 <made> i will try
+11:47:42 <jle`> er wait maybe Map is not the best structure for this. but yeah, some cache would be lazily populated as you need it
+11:47:54 <made> thanks! will try
+11:48:21 <jle`> made: alternatively you can just use one of the pre-made libraries for memoizing things like this
+11:48:33 <jle`> but you'd still have to rewrite your function to use those libraries, if they are recursive
+11:48:47 <made> oh, ill look into. whats it called?
+11:48:51 <shapr> hm, I need to figure out how to hook cabal-fmt into haskell-mode
+11:49:16 <shapr> ski: happily, I know chin-tastic IRL, from my last job
+11:49:29 <shapr> these days I only ambush people in person with Haskell tutorials
+11:50:25 <EvanR> shapr can you do some magic and make people like haskell in New Orleans
+11:51:39 <shapr> EvanR: have you already met luqui? I hung out with him last time I was in nawlens
+11:51:48 <EvanR> Nope
+11:51:51 <shapr> I wonder why I didn't meet you when I was there for a few days?
+11:51:56 <shapr> next time I'm in town
+11:52:06 <shapr> I think we need another Haskellers google map
+11:54:50 <w1d3m0d3> what is the best way to learn haskell??
+11:54:59 <w1d3m0d3> s/??/?/
+11:55:43 <EvanR> by doing haskell
+11:55:55 <shapr> w1d3m0d3: I like cis194
+11:55:57 <shapr> @where cis194
+11:55:58 <lambdabot> https://www.seas.upenn.edu/~cis194/spring13/lectures.html
+11:56:07 <EvanR> download yourself a compiler
+11:56:10 <shapr> w1d3m0d3: and I like asking questions on this IRC channel, and also on #haskell-beginners
+11:56:25 <w1d3m0d3> EvanR: got ghc(i) already
+11:56:27 <shapr> w1d3m0d3: if you're using mac or linux, I recommend using https://github.com/haskell/ghcup
+11:56:32 <merijn> shapr: Yeah, but you liking this channel is a typical case of bias ;)
+11:58:23 <ski> shapr : najs :)
+11:58:34 * ski remembers luqui
+11:59:02 <shapr> merijn: oh, why do you say that? :-D
+11:59:33 <ski> @where map
+11:59:33 <lambdabot> http://www.haskell.org/haskellwiki/HaskellUserLocations
+11:59:37 <ski> oh, memories :)
+12:00:02 <shapr> oh yeah, I remember that!
+12:00:16 <shapr> didn't dons hook that into a google maps layer?
+12:00:22 <EvanR> it's up to date as of 2007
+12:00:25 <ski> no idea
+12:00:43 <ski> EvanR : that's not too bad, now is it ?!
+12:01:32 <EvanR> someone must have applied a large time evolution operator
+12:02:45 <merijn> shapr: Didn't you badger the initial population into joining in the first place? :p
+12:02:57 <shapr> merijn: yes, I did
+12:03:09 <ski> "initial population" ?
+12:03:15 <ski> you mean like augustss and so ?
+12:03:18 <shapr> merijn: when I joined #haskell I was the only person on the channel!
+12:03:32 <merijn> shapr: Hence, biased, towards liking it ;)
+12:03:37 <shapr> fair enough
+12:03:59 * ski recalls using ircII, at the time
+12:04:18 <merijn> It's a shame augustss isn't here anymore
+12:04:24 <ski> yea :/
+12:05:16 <ski> it was nice having someone from the committee around, to be able to ask stuff about
+12:05:52 <merijn> I was more tinking about having a walking Haskell lore encyclopedia :p
+12:07:06 * ski remembers first discovering <news:comp.lang.functional>, then HaWiki, then the IRC channel (my first one !) via <https://wiki.haskell.org/IRC_channel> (or the HaWiki version thereof)
+12:07:29 <ski> merijn : isn't that what i said ? :)
+12:08:10 * ski thought every IRC channel was as nice and friendly, at that time
+12:08:41 <merijn> ski: hah
+12:09:07 * ski used to read all the backlog ..
+12:09:48 <ski> shapr : was that 2000 or 1999 or so ?
+12:09:50 <monochrom> I came from comp.lang.functional too. I think I heard of Haskell there.
+12:10:08 <merijn> I have no clue how I learned about Haskell...
+12:10:33 <quiet_laika[m]> same
+12:11:19 <quiet_laika[m]> it must have been in college?
+12:11:41 <quiet_laika[m]> i just barely knew some C and a tiny bit of Java in those days...
+12:11:52 <merijn> I had OCaml in uni, so that can't be it :p
+12:12:25 <quiet_laika[m]> unfortunately they didnt teach us any! just... java and C!
+12:12:30 * ski remembers the wake
+12:12:44 <w1d3m0d3> We are taught C with GCC extensions and warnings disabled :)
+12:12:46 <quiet_laika[m]> im jealous of coworkers i know who went to imperial college in london where they do haskell the first year
+12:13:30 <EvanR> a swedish guy with nick tesmako (?) in #sdl mentioned haskell in passing as some language that would blow your mind if you learned it (not that you'd ever want to really use it)
+12:13:57 <EvanR> i already kind of heard of haskell, and didn't follow up on that for a while
+12:14:09 <monochrom> I went into formal methods research (the imperative programming side actually). That led to needing a theorem prover or assistant. That led to HOL. That led to SML. That led to comp.lang.functional. That led to Haskell.
+12:14:31 <monochrom> Also OCaml but I like Haskell more.
+12:14:43 * ski likes SML
+12:15:01 * ski is still missing `local'-`in'-`end', in Haskell ..
+12:15:12 <monochrom> But if anyone prefers typed OO, I highly recommend OCaml which does typed OO justice.
+12:15:34 <monochrom> (And if you prefer untyped OO --- Smalltalk.)
+12:16:19 <shachaf> I prefer typed unOO.
+12:16:31 <monochrom> Then you're in the right channel haha
+12:18:04 <monochrom> quiet_laika[m]: Hey I'm jealous of you who are in Britain at all!
+12:18:28 <merijn> monochrom: Yeah, the final season is very exciting!
+12:18:40 <quiet_laika[m]> monochrom: american here :p
+12:18:48 <monochrom> <-- from Hong Kong in the colonial days. Very fond of British culture. Tea, and colour is spelled colour dammit. Also trousers not pants.
+12:18:49 <quiet_laika[m]> just have a weird number of coworkers from imperial...
+12:21:17 <ski> monochrom : yea, i rather like the OO system in O'Caml, as far as OO goes :)
+12:22:17 * ski idly recalls getting a mark off, for spelling it "color" in first english class ..
+12:22:42 <ski> .. i hadn't even noticed there was an alternative spelling. i had learned "color" from the Commodore 128
+12:23:23 <EvanR> dichotomy of color and colour kind of undermines the entire argument of spelling properly
+12:23:47 <EvanR> if only i could had stated this in 1st grade
+12:23:49 <monochrom> You should have went with Sinclair ZX-something instead. Takes up less space on your desk too. >:)
+12:24:02 <ski> ZX Spectrum
+12:24:05 <EvanR> zed x spectrum :)
+12:24:10 <ski> the speccy
+12:24:23 <EvanR> there is a reboot of this on sale now
+12:24:34 * ski is rather fond of the bread box, has a couple of them
+12:24:36 <EvanR> designed by sinclair himself
+12:25:12 * ski idly wonders how much demoscene there was on the speccy
+12:26:11 * ski idly recalls having some plans to implement a graph reduction machine, on the C64
+12:35:34 <Sarah73> im about to take my first haskell test tomorrow can anyone help explain the things I need to know out of the kindness of your heart
+12:36:50 <pavonia> Don't ask meta-questions
+12:37:07 <monochrom> If the test is tomorrow, today is too late to start learning.
+12:37:51 <shapr> ski: you can ask /msg chanserv info #haskell
+12:38:06 <shapr> Registered : Apr 30 22:22:56 2001
+12:39:05 <merijn> hmm, is there a way to export "everything except identifier Foo" from a module?
+12:39:13 <w1d3m0d3> list everything else?
+12:39:17 <monochrom> No.
+12:39:21 <merijn> Bah
+12:39:37 <w1d3m0d3> I mean, it's generally not a good design to export everything
+12:39:41 <ski> shapr : yea, but that doesn't tell me how long it was there, before being registered
+12:39:48 <shapr> I think I registered it right off
+12:39:52 <monochrom> Unfortunately no "module X hiding (foo)"
+12:40:09 <ski> Sarah73 : just ask your questions, okay ?
+12:40:10 <merijn> w1d3m0d3: When "everything" is a bunch of TH generated stuff that's hard to enumerate because you don't know what it all is, it is
+12:40:13 <shapr> same way I registered #unicycling and #esoteric and #concatenative and bunch of others now owned by others
+12:40:38 <merijn> monochrom: That's sad :(
+12:40:44 <monochrom> Hey TH needs to be extended to cover export list then >:)
+12:40:44 <shachaf> shapr: You registered #esoteric?
+12:40:57 <merijn> monochrom: Patches welcome
+12:41:09 <ski> shapr : ok. ty :)
+12:41:34 <shapr> shachaf: pretty sure, lemme check
+12:41:52 <shapr> shachaf: maybe not, I don't still have ops there
+12:42:00 * ski idly wonders about slava
+12:42:05 <Sarah73> Given the below function definition show, step-by-step, how Haskell would evaluate the expression 23 - (double (3+1)).
+12:42:07 <shapr> or maybe I passed it off and someone took me out of the ops list
+12:42:24 <Sarah73> okay so i have the answer for it which is double :: Int -> Int
+12:42:50 <Sarah73> but I don't understand 
+12:43:12 <monochrom> Where is the answer?
+12:46:04 <Sarah73> double :: Int -> Int
+12:46:36 <monochrom> That cannot be an answer for a question of the form "show the steps of evaluation"
+12:46:40 <kosmikus> that can hardly be the *answer* to that question
+12:46:48 <Sarah73> at least thats what our teacher had
+12:46:49 <kosmikus> also, the question mentions "below function definition"
+12:46:58 <kosmikus> where is that?
+12:46:59 <EvanR> double :: Int -> Int seems like a scam of a function :)
+12:47:23 <Sarah73> LOL this is how he is teaching us
+12:47:39 <monochrom> I call you bluff.
+12:47:48 <Sarah73> As you can tell, my universities computer science isn't the best
+12:48:56 <kosmikus> I can't tell anything based on this.
+12:49:39 <Sarah73> so how would you guys answer that question? 
+12:49:46 <kosmikus> it's not a complete question
+12:49:53 <Sarah73> Given the below function definition show, step-by-step, how Haskell would evaluate the expression 
+12:49:55 <Sarah73> 23 - (double (3+1)).
+12:50:10 <monochrom> Where is the "below function definition"?
+12:50:16 <kosmikus> right, so presumably the definition of double is part of the question
+12:50:26 <kosmikus> the type signature you've given is probably one half of that definition
+12:50:35 <kosmikus> rather than the answer
+12:50:49 <Sarah73> oh lmao
+12:51:26 <monochrom> And where are all the class notes and course material so we can use the same convention and notation that match your course?
+12:52:48 <Sarah73> https://docs.google.com/document/d/1-LsJM-wy0iv1a4lbUg8lIILG47YvzGYiW99eNkykCQA/edit?usp=sharing
+12:53:01 <Sarah73> these are the notes of everything we have learned so far
+12:56:03 <monochrom> Sometimes it says "Trace:" and shows a trace.  Take inspiration from that.  Do something similar.
+12:56:55 <Sarah73> monochrom long have you been using haskell?
+12:57:11 <Sarah73> how long*
+12:57:30 <monochrom> I thought you had a test to study for.
+12:58:22 <Sarah73> I just want to know how screwed I am. Obviously I have no idea what I'm doing, I want to know how long until it all clicks and makes sense to me
+12:59:09 <monochrom> See my very first sentence.
+12:59:44 <EvanR> everyone learns at a different rate, depending on the day of the week and phase of the moon
+13:01:18 <Sarah73> Okay so lets say I have no chance at doing well tomorrow (I have faith in myself, though) Moving forward does anyone have any resources they find helpful that I can look into?
+13:01:19 <shapr> if I get exercise, sleep, and food; I learn much faster
+13:01:54 <shapr> Sarah73: I like cis194, but it's the notes and homework for a Haskell class, and it sounds like you've already got such a class!
+13:02:03 <EvanR> it's more convenient to blame the moon, but more effective to do all that work :)
+13:02:50 <monochrom> The fallacy of hoping that more resource can make true the fallacy of hoping that learning is a spectator sport.
+13:03:51 <monochrom> As far as I can tell, all other resources explain things the same way your course note does. You may as well start with it.
+13:04:38 <Sarah73> Okay so how about a code academy type thing for haskell? Where I don't just read notes but actually use it 
+13:05:07 <no-n> where are you learning Haskell from now?
+13:05:28 <Sarah73> West Chester University
+13:05:28 <dmwit> Advent of Code and Project Euler are good sources of programming puzzles.
+13:05:35 <Sarah73> just for a Paradigms class
+13:05:51 <merijn> dmwit: I think Project Euler is pretty terrible for Haskell, tbh >.> Too much futzing with the Num hierarchy
+13:06:14 <Sarah73> dmwit thank you anything is better than nothing
+13:06:36 <monochrom> And Project Euler only hones your list comprehension skill if you don't know math.
+13:06:37 <kosmikus> both don't really teach the/a language. they're general sources of programming problems.
+13:06:45 <chesscipher> installing stack from cabal I get ``ghc: out of memory (requested 1048576 bytes)'', any idea of which memory is it?
+13:07:19 <merijn> kosmikus: Project Euler is a source of number theory problems, not programming problems, tbh. Advent of Code is nice, though
+13:08:54 <kosmikus> merijn: yes, sure, but the intent is for them to be solved by programming.
+13:08:55 <chesscipher> I used the command ``cabal install --force-reinstalls stack'' on OpenBSD
+13:09:10 <kosmikus> merijn: fwiw, I also prefer Advent of Code.
+13:09:16 <merijn> @where exercises
+13:09:16 <lambdabot> http://www.haskell.org/haskellwiki/H-99:_Ninety-Nine_Haskell_Problems https://github.com/bitemyapp/learnhaskell http://www.reddit.com/r/dailyprogrammer/ http://www.reddit.com/r/programmingchallenges/
+13:09:53 <merijn> I should probably add advent of code too
+13:10:30 <Sarah73> Sadly I need to go, thank you everyone for the help, I will look into those resources. Wish me luck, I need it haha.
+13:14:04 <kosmikus> https://uu-afp.github.io/assignments.pdf has a lot of exercises
+13:16:36 <monochrom> Oh w00t this is great. I need to tell my students!
+13:45:04 <jle`> kosmikus: they are intended to be solved by programming. but solving them won't teach you any programming. it'll teach you a lot of number theory
+13:45:26 <jle`> oh someone already said this
+13:45:33 <jle`> i need to read scrollback more comprehensively :)
+13:50:34 <monochrom> If you don't know math, PE merely trains you on brute-force list comprehension.
+13:50:45 <monochrom> If you know math, PE merely trains you on clever list comprehension.
+13:56:04 <jle`> advent of code is nice but it's only once a year :'(
+13:56:29 <jle`> but i suppose it does have 49 nice problems
+13:56:47 <jle`> 40 easy-ish/medium ones and 9 hard-ish ones
+13:56:56 <jle`> i had no business using that many sigfigs
+14:02:32 <iqubic> I un
+14:02:47 <iqubic> I understand how to use the callCC function, but not how it works.
+14:03:48 <merijn> iqubic: That is normal
+14:03:51 * ski guesses they didn't read RC and AC, yet
+14:04:35 <merijn> iqubic: In fact, thinking you understand how callCC works is a clear sign of not understanding it OR losing your sanity in a Lovecraftian way
+14:05:13 <shachaf> merijn: "how callCC works" is very simple, though?
+14:05:19 <shachaf> Which disjunct am I in?
+14:05:24 <shapr> I wish FilePath were Text
+14:05:25 * shapr grumbles
+14:05:26 <merijn> shachaf: 
+14:05:34 <laudecay> does anyone here know things about the binary library
+14:05:36 <merijn> shachaf: It's not an exclusive OR ;)
+14:05:47 <shachaf> @src Cont callCC
+14:05:47 <lambdabot> callCC f = Cont $ \c -> runCont (f (\a -> Cont $ \_ -> c a)) c
+14:05:53 <merijn> shachaf: I keep finding myself in quantum superposition of "this is obvious" and "wait, what?"
+14:05:57 <laudecay> if i wanted to make a type that's just 16 bytes how would i do that
+14:06:11 <laudecay> like a tuple of WordWhatever's is icky, right?
+14:06:12 <merijn> laudecay: That would depend on why you'd want that :)
+14:06:27 <laudecay> https://www.wireguard.com/papers/wireguard.pdf page 11 here
+14:06:38 <shachaf> callCC f k = f (\x _ -> k x) k
+14:06:51 <laudecay> the "empty" field is actually 16 bytes long because it's just a MAC of 0 bytes with a given shared key
+14:07:01 <laudecay> and the mac1/mac2 fields are also just 16 bytes
+14:07:03 <shachaf> That looks very simple to me. You get a continuation and you use it twice, once for normal return and once for special return. The special return case ignores the continuation it gets.
+14:07:07 <merijn> laudecay: I mean, you could use Sized Vector, ByteArray or Vector
+14:07:11 <laudecay> oh okay
+14:07:31 <merijn> laudecay: I'm actually using sized vector of Word8 for that in some code
+14:07:34 <laudecay> what's bytearray's characteristics?
+14:07:56 <laudecay> ya i think that sounds right to me and then like unsized vector for the transport layer ones
+14:08:06 <laudecay> but bytearray, is it like faster or mutable or something?
+14:08:18 <merijn> laudecay: ByteArray is just "GC tracked blob"
+14:08:23 <laudecay> ohhh okay
+14:08:30 <laudecay> so like refcounting or somesuch but nothing else
+14:09:23 <laudecay> but where's this sized vector type?
+14:09:25 <merijn> laudecay: ByteArray# is "I wanna do dirty things to bytes"
+14:09:37 <laudecay> i do wanna do dirty things to bytes but
+14:09:39 <merijn> @hackage vector-sized
+14:09:39 <lambdabot> http://hackage.haskell.org/package/vector-sized
+14:09:47 <laudecay> with a nice clean binary serialization
+14:09:50 <laudecay> as protection
+14:09:53 <adius> Hi, how can I get the path to a file which is part of a project? 🤔
+14:10:12 <merijn> adius: Static file?
+14:10:15 <adius> So relative to the code file `copyFile "../example-config.yaml" configPath`
+14:10:56 <merijn> adius: https://cabal.readthedocs.io/en/latest/developing-packages.html#accessing-data-files-from-package-code
+14:11:31 <saml> pandoc: Use `+RTS -Ksize -RTS' to increase it.
+14:12:23 <adius> merijn: Is this supported by stack?
+14:13:19 <merijn> adius: This is part of Cabal, not cabal-install (see: https://gist.github.com/merijn/8152d561fb8b011f9313c48d876ceb07), so it should, yes.
+14:18:48 <adius> merijn: Awesome, it worked! Thanks a lot!  … I'm glad I asked … this is not the solution I expected 😅
+14:23:43 <merijn> adius: np
+14:24:23 <monochrom> Oh hey I'm reading the autogen'ed Path_package.hs source code and discover that getDataDir (for example) honours the environment variable package_datadir!
+14:24:40 <monochrom> getDataDir = catchIO (getEnv "morphochrom_datadir") (\_ -> return datadir)
+14:24:56 <monochrom> (datadir is a hardcoded string literal for the default)
+14:24:56 <merijn> monochrom: Yes, the idea is that platform packagers can conveniently remap the install dir to whatever fits their distro
+14:25:08 <monochrom> Very nice.
+14:26:06 <merijn> monochrom: v2-run also correctly locates data files within your project directory without having to install the package :)
+14:26:43 <merijn> monochrom: Which means that v2-run based bash scripts I use for invoking executables I work on actually work properly from any CWD :)
+14:28:13 <monochrom> No wonder you said you haven't "deployed" for a long time :)
+14:29:33 <adius> Is there any reason not to use `ScopedTypeVariables` be default?  
+14:29:49 <merijn> adius: Thinking up unique variables is hard!
+14:30:08 <merijn> (but other than that, not really)
+14:32:03 <Cale> Well, that would break code
+14:32:49 <merijn> Cale: I was assuming the question was "for new code"
+14:33:00 <monochrom> or "for my project"
+14:33:31 <monochrom> World-wide Haskell 2020 default is too late, yes.
+14:34:06 <adius> Yeah, just for my project. Thx
+14:34:23 <merijn> monochrom: Can't make an omelet without breaking some eggs^H^H^H^Hall of Hackage
+14:38:40 <lavalike> this isn't chicken scheme!
+14:38:52 <monochrom> haha
+14:39:56 <monochrom> In chicken scheme, do you write chicken noodle code?
+14:40:14 <lavalike> with a double dose of eggs
+14:42:21 <agohoth> are there are databases in pure haskell that compete with postgresql?
+14:44:57 <merijn> agohoth: As in the database implemented in Haskell?
+14:45:21 <merijn> agohoth: I don't there's any databases implemented in Haskell at all, let alone one capable of competing with postgres...
+14:46:15 <adius> I'm suddenly getting a `createDirectory: permission denied (Permission denied)` with `createDirectoryIfMissing` altough I didn't change any code. Just recompiled. How could this happen?
+14:46:27 <adius> And the directory already exists
+14:54:04 <agohoth> what user are you donig things as?
+14:54:09 <agohoth> what user owns the dir?
+14:54:30 <agohoth> so with haskell you use some kinda database
+14:54:32 <agohoth> for msot apps?
+14:54:51 <agohoth> happstack.com has acidstate but Im guessthing that isnt clustered
+14:55:41 <merijn> acid-state isn't a database, tbh
+14:56:09 <merijn> I used to think it was not a database before, but now that I've learned the ACID in it's name is a blatant lie it's doubly not a database >.>
+14:56:28 <Guest76074> can anyone show me how to get Network.Connection from hackage I am running debian buster
+14:57:00 <merijn> agohoth: I'd say most people just use whatever database they already know/have (i.e. postgres, mysql, etc.)
+14:57:29 <adius> Haha, sorry, works now. That was some really stupid bug by me. I accidentally overwrote a config file to create a directory at an illegal path
+14:59:01 <Guest76074> i tried cabal but it returned not found package 
+15:01:00 <enikar> Guest76074: try hoogle: https://hoogle.haskell.org/?hoogle=Network.Connection
+15:01:54 <enikar> I found it here: https://hackage.haskell.org/package/connection-0.3.1/docs/Network-Connection.html
+15:03:30 <agohoth> does anyone here get to use haskell in a paid job?
+15:03:35 <agohoth> I kinda dont like java
+15:04:52 <merijn> agohoth: I'm pretty sure the answer to that is "yes" :p
+15:05:58 <merijn> agohoth: Just write one-off tools and dev tools in it while working on the production code. Nothing as permanent is a convenient temporary tool ;)
+15:07:43 <inimino> if you
+15:08:02 <inimino> 're stuck with Java... it's kind of a big leap
+15:09:29 <inimino> maybe you can make Haskell write Java for you
+15:31:38 <newhoggy> Anyone seen this kind of error before?
+15:32:11 <newhoggy> https://www.irccloud.com/pastebin/iIA8gZlU/
+15:33:00 * hackage bitvec 1.0.1.0 - Space-efficient bit vectors  https://hackage.haskell.org/package/bitvec-1.0.1.0 (Bodigrim)
+15:33:17 <MarcelineVQ> no but look closer :>
+15:35:45 <MarcelineVQ> That is to say the error and suggestion are valid
+15:36:12 * newhoggy I've never had to supply `package-key` flag before.
+15:36:50 <newhoggy> But also I want `hw-prim-0.6.2.33` which is the lower bound constraint in my cabal file.
+15:37:36 <MarcelineVQ> I'll cut the mystique then so you're not spending too much time chasing rabbits, you've missed a capitalization in your import
+15:38:07 <newhoggy> Oh my.
+15:38:23 * newhoggy Runs away.
+15:38:35 * newhoggy Thanks MarcelineVQ!
+15:38:40 <MarcelineVQ> :>
+15:40:17 <merijn> Fun times, my executable magically hangs indefinitely when I redirect stdout to a file >.>
+15:40:57 <hpc> i wonder how that works
+15:41:04 <merijn> hpc: Me too >.>
+15:44:25 <merijn> ooh, I bet the answer is "most haskell ansi-terminal interaction libraries could use some work"
+15:46:05 <merijn> ugh, ffs
+15:47:34 <merijn> hpc: The answer is: I use ansi-terminal to detect the size of the terminal for pretty-printing error output/commandline help. I check whether stderr is actually a terminal before running this
+15:48:56 <merijn> hpc: However, ansi-terminal's operations always operate on stdout, so if you redirect stdout, but not stderr, that logic goes "hey, a terminal! I should check the size for pretty-printing" and then ansi-terminal's getTerminalSize gets stuck indefinitely, because it tries to talk to stdout's "not a terminal"
+15:52:47 <merijn> Never trust anyone else's POSIX code >.<
+15:56:11 <ph88> whats the most mature FP language/ecosystem that compiles to JS ?
+15:58:44 <boj> ph88: you don't really have much choice outside of haskell reflex, purescript, and perhaps elm i think
+15:59:23 <hpc> typescript seems pretty good
+15:59:33 <ph88> typescript FP ?
+15:59:50 <merijn> PureScript?
+16:00:09 <lyxia> reason
+16:00:10 <ph88> there is also clojurescript, fsharp (fable), reasonml, elixir ..
+16:00:41 <sm[m]> merijn: nice, seems like a good bug report for ansi-terminal
+16:00:49 <merijn> sm[m]: Already filed it
+16:01:13 <sm[m]> thought so 👍🏻
+16:02:10 <merijn> sm[m]: Nice follow up to my "hmm, why is optparse-applicative's output messed up after getTerminalSize" issue :p
+16:07:13 <jle`> ph88: do you mean most mature (FP language ecosystem) (that compiles to JS)
+16:07:24 <ph88> yes
+16:07:28 <jle`> ph88: or do you mean most mature FP language (ecosystem that compiles to JS)
+16:07:54 <ph88> first one i think
+16:07:57 <jle`> because haskell probably by far has the most mature fp language ecosystem, disregarding JS
+16:08:08 <jle`> rivaled probably only by the lisps maybe
+16:08:29 <jle`> but haskell probably isn't the most mature compile-to-js story.  that would probably be purescript or elm, which are built for js from the ground up
+16:08:57 <jle`> and a lot of the haskell ecosystem won't compile to JS because they use C bindings to C libraries
+16:09:34 <jle`> so haskell is probably the most mature FP language ecosystem that checks off the 'compiles to js' box.  but not the most mature JS ecosystem
+16:10:16 <ph88> mature JS ecosystem is important
+16:10:30 * hackage reqcatcher 0.2.0.0 - A local http server to catch the HTTP redirect  https://hackage.haskell.org/package/reqcatcher-0.2.0.0 (hiratara)
+16:10:54 <sm[m]> What about ocaml, didn’t that compile to js before everyone ?
+16:11:33 <jle`> ah that's probably a strong candidate too
+16:11:40 <jle`> and it has a lot of industry backed ecosystem
+16:12:31 <ph88> i think better skip ocaml and use reasonml in that case
+16:17:33 <agohoth> so how do you make a website by compiling haskell to js?
+16:17:38 <agohoth> how does that work?
+16:17:51 <agohoth> isnt ti better to just program in haskell?
+16:18:03 <jle`> the problem is getting active things to happen in the browser
+16:18:25 <jle`> but actually writing your program and compiling it to js *is* progrmaming in haskell
+16:18:33 <jle`> *writing your program in haskell
+16:18:42 <EvanR> yeah, when the browser supports <script type="text/haskell"> that will be better
+16:18:49 <EvanR> youre spot on
+16:19:11 <jle`> so 'isn't it better to just program in haskell' is the exact reason why we have compile-to-js
+16:19:19 <jle`> so we can program in haskell, and have it run in the browser
+16:19:34 <glguy> agohoth: Here's a tiny Haskell program running in the browser (via compilation to JS) https://glguy.net/config-demo/
+16:19:44 <glguy> The "Parse" button at the bottom is implemented in Haskell
+16:20:30 <glguy> (which I'm currently working on updating to the latest versions of the library being demo'd)
+16:20:45 <ph88> i made this quickly .. https://bpaste.net/show/okqb says something i think
+16:21:57 <jle`> hm yeah, that matches roughly my expectations
+16:22:11 <jle`> purescript has a pretty mature ecosystem, a lot of FP conferences I go to, they give FP talks just about purescript and purescript libraries
+16:22:20 <jle`> it gives me the impression that the standalone ecosystem is pretty nice
+16:22:44 <iqubic> I think Elm might be better.
+16:23:06 <jle`> although i would say that clojurescript, as a lisp dialect, is very different from the sort of FP that you would want if you are looking for a haskell-like
+16:23:12 <jle`> Elm is nice but it's not a general purpose language
+16:23:22 <iqubic> Why do you say that?
+16:23:27 <jle`> so it's good if you want to program some of the things it is specialized for
+16:23:35 <jle`> iqubic: because that's a part of the design goals of elm
+16:23:44 <jle`> it's not meant to be good at progrmaming in general, just at specific domains
+16:23:56 <iqubic> Isn't elm useful for Web Development?
+16:24:08 <ph88> does ghcjs work with packages that are made for the web ?
+16:24:26 <jle`> iqubic: mostly web apps i think
+16:24:30 <merijn> ph88: ghcjs works with basically anything that's pure Haskell (i.e. no C FFI)
+16:24:44 <jle`> ph88: a lot of haskell web server + client pairs are built on ghcjs
+16:24:48 <iqubic> ghcjs works with just about all Hackage Packages.
+16:25:14 <ph88> just that almost all haskell packages are not written to run in the browser ..
+16:25:23 <ph88> need some specific packages for DOM and so on
+16:25:34 <jle`> ph88: for that there are a lot of packages that give you DOM manipulation
+16:25:39 <iqubic> Oh, yeah. That's an issue.
+16:25:39 <jle`> like miso and reflex-frp and stuff
+16:25:53 * dmj` hears something about miso
+16:25:55 <jle`> ph88: when we say 'most haskell packages' we mean the ones that provide the logic you need to program your frontend
+16:26:07 <jle`> "working with dom" is just another library
+16:26:33 <ph88> does anyone know of a list of haskell packages that are meant to work with browser stuff ?
+16:26:38 <jle`> most haskell packages aren't written to be "run" as an executable, they provide useful tools for programming your logic
+16:26:45 <jle`> ph88: do you mean libraries for dom manipulation?
+16:26:57 <dmj`> ph88: https://haskell-miso.org
+16:27:25 <dmj`> believe the hype
+16:28:37 <glguy> My problem with ghcjs is that to use it I have to ask dmj` how to build my stuff
+16:28:45 <ph88> jle`, for dom manipulation but also for other browser API's
+16:29:01 <dmj`> glguy: =P
+16:29:08 <glguy> My nix build is still running to this day
+16:29:32 <dmj`> it's a bit of a bait and switch if I do say so
+16:29:41 <dmj`> glguy: yea but you don't need to turn your heater on at least
+16:30:17 <shapr> https://en.wikipedia.org/wiki/Data_furnace
+16:30:53 <dmj`> I use a cache for all my nix deps. and then instruct people to use the cache before calling nix-build
+16:31:15 <dmj`> you can just nix copy --to s3://path/to/my/bucket all the deps
+16:31:34 <glguy> I don't remember that instruction
+16:39:06 <dmj`> glguy: ah, well I put it on miso, but its not on ghcjs in general. I think luite doesn't use nix when he develops ghcjs
+16:39:33 <dmj`> glguy: I'm waiting on a bug fix in cachix though
+16:39:56 <dmj`> glguy: but I think the hash of nixpkgs that config-value uses is the same as that of miso, so the cache should really simplify the build
+16:42:21 <blandcurry> Hello all, new Haskell user here, trying to set up Emacs as an environment. Did something happen to intero? Melpa can't find it, and the github repo appears to be failing it's tests. It has commits from 4 months ago, so it doesn't seem totally dead. Did something I haven't run across replace it?
+16:42:41 <blandcurry> https://github.com/chrisdone/intero for reference.
+16:48:53 <duncan> blandcurry: What do you see when you `M-x list-packages`?
+16:49:18 <duncan> I see it over here... it's in melpa and melpa-stable: https://usercontent.irccloud-cdn.com/file/Jt6SkPCk/Screenshot%202019-09-26%20at%2000.48.10.png
+16:54:14 <blandcurry> I do as well, but running `M-x package-install RET intero` produces `Error (use-package): Failed to install intero: http://melpa.org/packages/haskell-mode-20190801.50.tar: Not foundError (use-package): Cannot load intero`.
+16:56:09 <blandcurry> I do as well, but running `M-x package-install RET intero RET` produces `Error (use-package): Failed to install intero: http://melpa.org/packages/haskell-mode-20190801.50.tar: Not foundError (use-package): Cannot load intero`.
+16:56:32 <blandcurry> sorry, didn't mean to double post that.
+16:58:47 <EvanR> Not foundError
+16:59:29 <Nevoic> Is handling state in a web framework always going to be unique based on what monad you're operating over?
+16:59:50 <Nevoic> I'm not sure I phrased that correctly so lmk if it doesn't make sense lol
+17:02:48 <Nevoic> as an example, in an OO language, if I had 3 methods, each that fired when a different route was hit, I would be able to make some top level hashmap that can be accessed in each method, no matter what framework I'm using (Spring, Javalin, etc.)
+17:03:25 <Nevoic> but in Haskell, if I'm not mistaken, I have to learn how to manage state specifically for each web framework I'm using, because each monad (that usually wraps over IO) is going to handle passing state to methods differently.
+17:04:43 <EvanR> haskell doesn't have classes or objects like java, so not everything can be implemented as them
+17:05:00 * hackage ribbit 0.4.0.0 - Type-level Relational DB combinators.  https://hackage.haskell.org/package/ribbit-0.4.0.0 (taphu)
+17:05:10 <Nevoic> Yeah I'm aware of that, I'm not looking to mimic the implementation done in Java or Kotlin.
+17:05:17 <EvanR> haskell also doesn't have any top level state, so you have to do it some other way. Each library does it differently
+17:05:40 <EvanR> Not that top level state would ever work in a web framework that's doing stuff concurrently
+17:07:30 <EvanR> if you want to make a hashmap or something that is used in several places, then one way is to pass it to where it's being used
+17:07:46 <EvanR> i.e. don't even use state for this
+17:08:29 <Nevoic> Well it works to some extent, if every request is handled concurrently then that'd be a problem, but when code is fast enough to handle 1000s -> millions of requests a second, then you can just offload expensive operations to other threads and do small bits of top level state sharing.
+17:09:06 <EvanR> so basically, if you don't handle requests concurrently
+17:09:14 <Nevoic> Basically, yeah.
+17:09:29 <EvanR> definitely a waste of a cpu core :)
+17:09:45 <Nevoic> If you need to scale your website to handle more than a million requests a second though, it probably won't be an issue.
+17:09:57 <Nevoic> And since my websites usually have like maximum 10 requests a second it's not been an issue lol
+17:10:11 <EvanR> sure
+17:10:12 <Nevoic> unless you need to *
+17:10:44 <Nevoic> Either way, I'm absolutely lost as to how to pass hashmaps around in Scotty.
+17:10:46 <EvanR> but the fact that haskell is purely function kind of makes handling requests concurrently embarassingly possible
+17:10:52 <EvanR> functional*
+17:10:54 <Nevoic> I have code like `get "route" routeMethod`
+17:11:13 <Nevoic> `get` returns an ActionM(), which is a monad defined by this framework.
+17:11:30 <Nevoic> I have *no idea* how to pass a hashmap into `routeMethod` and unwrap it inside the method that `get` is called.
+17:11:35 <Nevoic> So I can pass it into other route methods.
+17:11:40 <Nevoic> I'm not even sure it's possible.
+17:12:03 <EvanR> i mean... you want to make a hashmap... that every request sees?
+17:12:13 <EvanR> or can modify
+17:12:22 <Nevoic> some will modify, some will see.
+17:12:51 <EvanR> then i would put the hashmap into an IORef (TVar if doing concurrent)
+17:13:36 <EvanR> then you can pass the IORef to the handler code as one of the first arguments
+17:13:44 <EvanR> (before you register it with scotty)
+17:14:32 <Nevoic> ah I see. And when the IORef is "unwrapped" with `<-` it'll receive the most up to date version of itself?
+17:14:41 <Nevoic> So there's no need to return a value from the route methods?
+17:14:47 <EvanR> when you access the IORef you get the value that's there
+17:15:03 <EvanR> and you can update it. All this requires `IO'
+17:15:18 <EvanR> which you probably have if you're handling webrequests
+17:15:27 <Nevoic> Yeah I do, I'm lifting other things already.
+17:15:51 <EvanR> accessing IORefs and modifying them can get tedious, so another way is to wrap doing that in more monadic actions
+17:15:53 <Nevoic> That's cool that that is all handled over IO, makes sense I guess.
+17:16:15 <EvanR> and installing the IORef as part of your monads state
+17:16:18 <Nevoic> how is an IORef not monadic? 
+17:16:25 <Nevoic> doesn't it require the IO monad?
+17:16:50 <EvanR> ... the functions to access it give IO actions, but you still need to pass the IORef itself around
+17:16:56 <jle`> Nevoic: it doesn't 'require' the IO monad
+17:17:01 <jle`> Nevoic: any more than 5 requires the list monad
+17:17:17 <jle`> Nevoic: also, be sure to distinguish 'IO monad" from "the IO type"
+17:17:29 <jle`> the IO type is something useful on its own right, with or without a Monad instance
+17:17:36 <Nevoic> maybe I'm misunderstanding something, but to get the usable value of `IORef`, you'd need an IO, right?
+17:17:46 <Nevoic> where with `5` to get the usable value you don't need to `<-` inside some monad
+17:17:48 <jle`> like how lists are useful on their own right, with or without a MOnad instance
+17:18:03 <EvanR> yes you need IO at some level
+17:18:15 <EvanR> i was talking about the act of passing IORefs around
+17:18:21 <EvanR> (doesn't require IO)
+17:18:24 <jle`> Nevoic: yes the only way of creating an IORef from the IORef API requires IO
+17:18:26 <jle`> Nevoic: but not the IO Monad
+17:18:39 <jle`> Nevoic: the analogy would be like, you can have [1,2,3] without "the list monad"
+17:18:55 <jle`> so, i wouldn't really say that something like [1,2,3] is monadic
+17:18:55 <EvanR> Nevoic was trying to ask, you need IO to read an IORef, yes
+17:18:58 <jle`> any more than an IORef is monadic
+17:19:07 <jle`> ah, i was referring sepcifically to "how is IORef not monadic"
+17:19:11 <Nevoic> ? Isn't the `IO` type a monad, because it has an instance defined on Monad?
+17:19:28 <jle`> IO type has a MOnad instance, but not everything you do with IO is 'monadic'
+17:19:28 <Nevoic> What's this distinction between `IO` and `the IO Monad`?
+17:19:34 <EvanR> yeah but writing IO actions doesn't necessarily involve Monad
+17:19:43 <jle`> Nevoic: just like how list has a MOnad instance, but not everything you do with lists is 'monadic'
+17:19:48 <Nevoic> Like isn't a List a functor because you can map (fmap in Haskell) over a list?
+17:19:58 <jle`> Nevoic: usually when someone says "the IO monad", they are talking about IO type + the monad functions on it
+17:20:05 <EvanR> and you can do many things with List that don't involve Functor
+17:20:11 <jle`> Nevoic: right. so i'm saying that [1,2,3] isn't inherently "functorial" or "monadic"
+17:20:28 <jle`> like, you wouldn't see the string "hello" and think 'how "hello" not monadic?'
+17:20:31 <Nevoic> But you wouldn't ever separate "List" and the "functorial List", right? Above it was said that "IORef requires IO but not the IO Monad"
+17:20:44 <Nevoic> That's like someone saying "that function requires List, but not the List Functor"
+17:20:46 <Nevoic> which seems to make no sense to me.
+17:20:49 <jle`> Nevoic: technically something like [1,2,3] doesn't involve functors at all
+17:20:50 <jle`> it doesn't involve fmap
+17:20:52 <EvanR> true, IORef requires IO, not monads
+17:21:06 <EvanR> we're on a tangent now
+17:21:06 <jle`> Nevoic: [1,2,3] could exist, even if List has no Functor instance or no Monad instance
+17:21:13 <jle`> sorry for de-railing :)
+17:21:37 <Nevoic> Yes, but I've still never seen anyone make that distinction between `List` and the `List Functor`, but you mentioned it in IO vs IO Monad, so I assume there's some difference there into why this is important.
+17:21:47 <jle`> Nevoic: my point is that an IORef isn't any more monadic than [1,2,3]
+17:21:55 <EvanR> i'd say most people don't even think of functors when they think of lists
+17:22:01 <jle`> Nevoic: yeah, the difference here is that when people say "the list monad", they refer to the list + its monadic API
+17:22:10 <jle`> it's list + bind + pure, the full package
+17:22:20 <jle`> if you just have the list alone, you wouldn't really call it 'the list monad'
+17:22:32 <EvanR> Monad is not what makes IO special
+17:22:38 <EvanR> basically
+17:22:44 <jle`> if i say "let's use the list monad to do <blah>", it means that i'm using list + bind + pure to do <blah>
+17:23:09 <EvanR> yes you're drawing attention to the specific monad behavior
+17:23:17 <Nevoic> Would anyone actually ever say that instead of "lets use the list to do <blah>"?
+17:23:26 <jle`> Nevoic: they would say that if they use monadic api
+17:23:38 <EvanR> i'd say most list code doesn't use monads
+17:23:40 <jle`> "let's use the list monad to compute a cartesian product"
+17:23:46 <jle`> > do x <- [1,2,3]; y <- [4,5,6]; return (x,y)
+17:23:49 <lambdabot>  [(1,4),(1,5),(1,6),(2,4),(2,5),(2,6),(3,4),(3,5),(3,6)]
+17:23:52 <Nevoic> what if the monadic API is mimicked in a more reified/less generic sense?
+17:23:57 <jle`> that's "using the list monad to compute a cartesian product"
+17:24:02 <Nevoic> Like what if you do `map (*2) numbers`?
+17:24:13 <EvanR> that's certainly not using monads
+17:24:18 <Nevoic> Yeah I'm talking about Functors now
+17:24:24 <Nevoic> I don't have a good example in my head for monads
+17:24:24 <Nevoic> lol
+17:24:39 <jle`> i think that's walking the line of ambiguity
+17:24:46 <Nevoic> But you wouldn't say the above is "using the List Functor" because it's using `map` and not `fmap`.
+17:24:57 <jle`> so it's not 'for sure' either way, but i think either way is a reasonable interpreation
+17:25:00 <Nevoic> But you would say it's using the `List Functor` if you wrote the code as `fmap (*2) numbers`?
+17:25:08 <EvanR> walking the line of tediousness!
+17:25:27 <jle`> i think 'using the list functor' is true of the second case. it could probably go either way in the first case
+17:25:33 <EvanR> concretely, IORef operations don't involve IO's monad interface
+17:25:37 <Nevoic> Seems like an arbitrary distinction. I don't see what we get from this semantic distinction.
+17:25:39 <jle`> ^ that's the main point
+17:25:45 <Nevoic> List *is* a Functor, an IO *is* a monad.
+17:26:12 <jle`> it's an important distinction for communication
+17:26:30 <jle`> there are some blurred lines, but the general case is clear i think.
+17:26:39 <EvanR> Nevoic: and to continue with what i was saying, the monad i was talking about has nothing to do with IO or with IO's monad stuff
+17:26:52 <jle`> if you don't do anything remotely related to the functor or monadic aspect of list, iw ouldn't say you are "using the list monad", or that you are doing anything monadic or functoral
+17:27:42 <jle`> using map vs. fmap, i think, is not too important in the distinction. it can go either way, if we're talking about how to communicate ideas
+17:27:51 <jle`> but `foldr (+) 0` is definitely a negative on saying 'using the list functor'
+17:28:00 <jle`> and `fmap (+1)` is definitely a positive on saying 'using the list functor'
+17:28:20 <Nevoic> But what information are you conveying by saying "I'm using the list monad to construct a list" vs. "I'm constructing a list of a single item"?
+17:28:42 <Nevoic> Just that you can generalize the action over a monad?
+17:28:47 <jle`> Nevoic: i'm saying that i'm using the API exposed by list's monad instance to construct a list, vs. in the second way, the method of construction is not defined
+17:28:48 <EvanR> let me know when this is over
+17:29:08 <jle`> *not specified
+17:29:24 <Nevoic> EvanR I think relating to my original question everything is cleared up, or at least you helped me clear it up enough to do more research and actually get writing again.
+17:29:30 <Nevoic> So thanks for the help!
+17:30:08 <jle`> so for example there is more than one way to construct a singleton list: you can (1) use the list monad instace 'return', (2) use a list literal [x], (3) use the list constructors (:) / [], etc. 
+17:30:32 <EvanR> return is definitely not a very special way to build a list
+17:30:40 <jle`> if someone tells you they are using the list monad to create some list, it means that they are using the API exposed by the Monad instance to do something
+17:30:42 <EvanR> > pure 0
+17:30:44 <lambdabot>  error:
+17:30:44 <lambdabot>      • Ambiguous type variable ‘f0’ arising from a use of ‘show_M528662595822...
+17:30:44 <lambdabot>        prevents the constraint ‘(Show (f0 Integer))’ from being solved.
+17:30:49 <EvanR> > pure 'a'
+17:30:51 <lambdabot>  error:
+17:30:51 <lambdabot>      • Ambiguous type variable ‘f0’ arising from a use of ‘show_M353427297181...
+17:30:51 <lambdabot>        prevents the constraint ‘(Show (f0 Char))’ from being solved.
+17:30:55 <EvanR> > pure 'a' :: [Char]
+17:30:56 <Axman6> it's not a `pure` as I'd like though (Think of the characters!)
+17:30:57 <lambdabot>  "a"
+17:31:48 <EvanR> the special part of Monad is the (>>=) operation (and the laws you can rely on)
+17:31:53 <Nevoic> So all you meant when you said "yes the only way of creating an IORef from the IORef API requires IO, but not the IO Monad" is that to create an IORef you don't need to use bind/return?
+17:32:02 <jle`> yes
+17:32:03 <Nevoic> Why was that even an important point? lol
+17:32:25 <jle`> Nevoic: it's an important distinction, because the IORef creation is not itself a monadic act
+17:32:27 <Axman6> you'll probably need to use the IO monad to use said IORef though
+17:32:33 <EvanR> Nevoic was actually talking about IO vs some other monad that can be used for hidden state (which IO can't)
+17:32:50 <jle`> Nevoic: it can lead to confusion because the implication that monads are involved in the creation of an IORef
+17:33:01 <EvanR> Nevoic wasn't asking about creating IORefs
+17:33:23 <jle`> or more generally, nothing about IORef is 'monadic' in any way
+17:33:26 <Nevoic> alright, well I somewhat understand that.
+17:34:10 <Nevoic> I feel like every question I have about something that I think is simple eventually devolves into a 15 minute discussion about monads, functors, lens, optics, or some other relatively advanced topic compared to what I was trying to do.
+17:34:33 <Nevoic> Not necessarily a bad thing I guess, it's a sign that Haskell has a deeper level of specification than most OO languages.
+17:34:47 <Nevoic> Similar to how defining a type in Kotlin takes more work than defining it in Python, just sort of taken to an extreme.
+17:34:57 <Nevoic> or defining a value I mean, defining a class can actually be easier.
+17:35:00 * hackage skylighting-core 0.8.2.1 - syntax highlighting library  https://hackage.haskell.org/package/skylighting-core-0.8.2.1 (JohnMacFarlane)
+17:35:01 <jle`> heh, in this case it's sort of the opposite; i think -- in this case monad was brought into a conversation where it isn't relevant
+17:35:18 <jle`> so it's the constant pull of the desire to bring in advanced concepts, where they might not be relevant
+17:35:33 <EvanR> we were specifically about to talk about using (not IO) monads to help with the passing of the (something) around
+17:35:50 <EvanR> but then we changed subject to IO and somethings
+17:36:00 * hackage skylighting 0.8.2.1 - syntax highlighting library  https://hackage.haskell.org/package/skylighting-0.8.2.1 (JohnMacFarlane)
+17:36:04 <mozzarella> what's a monad?
+17:36:21 <Nevoic> Sure, that's why I said the conversation "eventually devolves". It's not always relevant, but it seems to happen with an insane level of consistency.
+17:36:32 <mycroftiv> Nevoic: there is a nice 'teach em to fish' principle behind this - answers like 'type this thing to do what you want' can be helpful in the moment, but peopke here try to provide a deeper understanding
+17:36:36 <Nevoic> Like asking "how do I parse JSON" will turn into a conversation about lens and prisms.
+17:36:39 <Nevoic> or optics I mean
+17:36:43 <EvanR> let's hope that's not as common as you say
+17:36:49 <Nevoic> and "how do I print" will turn into a conversation about encapsulating state over an IO monad.
+17:36:52 <EvanR> because it's annoying
+17:36:55 <Nevoic> both have happened to me.
+17:37:05 <Nevoic> was especially hard when I was just starting to learn Haskell.
+17:37:05 <jle`> Nevoic: hm, that's not ideal, i think. how do i print should be just `putStrLn "hi"`
+17:37:16 <Nevoic> Agreed, it's just been my experience.
+17:37:29 <shapr> mozzarella: a monad is a useful abstraction in the same way objects are a useful abstraction
+17:38:00 <mozzarella> shapr: abstraction of what?
+17:38:17 <mycroftiv> well, i guess it depends what you are looking for. im a relatively recent arrival to haskell/functional, and i really appreciate how people here dig deep into the conceptual foundations. i can understand that it can seem digressive if you just want to do task X with minimal fuss.
+17:38:21 <Nevoic> mycroftiv I appreciate that, I do the same thing in a Discord channel I'm in when helping people starting out with Python/Java etc.
+17:38:28 <Nevoic> the deeper understanding bit.
+17:38:34 <shapr> mozzarella: in most cases, monads are abstractions of control flow
+17:38:48 <EvanR> it's possible to do simple tasks without delving into the arcane, or it should be possible
+17:38:52 <EvanR> for the most part
+17:39:16 <jle`> i think that's one of the weird things about haskell.  the arcane is always just right there, waiting to be used
+17:39:24 <shapr> mozzarella: in my experience, no amount of detailed explanations of monads will help until you write some code that needs a monad.  ( see https://mkremins.github.io/blog/doors-headaches-intellectual-need/ )
+17:39:27 <jle`> so even when it's easy to do things without going into the arcane...it's tempting to try
+17:39:31 <EvanR> when you're comfortable with the arcane in general, that can be good
+17:39:32 <mozzarella> shapr: do you need special support for monads? can you have monads in C?
+17:39:48 <jle`> and also when you're starting out, it's very hard to distinguish if the thing you need is <super simple thing> or <super complex dark magic thing>
+17:40:06 <Nevoic> mozzarella some type systems don't really have the ability to express monads, or at least not express them well.
+17:40:09 <EvanR> otherwise you end up with an advanced degree with computer science and mathematics without asking for one
+17:40:12 <jle`> so this sense of discernment is hard to learn or instill until you get a lot of experience
+17:40:15 <shapr> mozzarella: you can have monads in lots of places, but they aren't as friendly and helpful in a bunch of those places
+17:40:19 <sm[m]> Nevoic its a feature/failing of this channel. There was an attempt at a #haskell-beginners, but it was just the same
+17:40:39 <shapr> mozzarella: for that matter, I strongly suggest you do a bunch of concrete stuff before you dig into monads, see https://twitter.com/lexi_lambda/status/1176959511187394560
+17:40:49 <jle`> so while it's possible to use simple haskell techniques to do 95% of haskell things....it's hard to know if the thing you need to do is in that 5% or not, without experience
+17:41:00 <jle`> which is why we have so many conversations about that 5%
+17:41:11 <jle`> or people sink so much time into it
+17:41:20 <EvanR> Nevoic: i'm on board with the idea of keeping things direct at first, for instance this metadiscussion is too much for me :)
+17:41:34 <shapr> mozzarella: I'm writing a bunch of simple Haskell right now, but I think I've hit a point where I really need to use a monad instead :-/
+17:41:39 <jle`> maybe time to start #haskell-meta ?
+17:41:59 <shapr> jle`: wasn't that #haskell-blah or #haskell-overflow or #haskell-deep ... I forgot that channel name
+17:42:12 <EvanR> /join /dev/null
+17:42:15 <jle`> #haskell-blah is off-topic, #haskell-overflow/#haskell-in-depth is for in-depth conversation about actual topics
+17:42:23 <jle`> #haskell-meta would be about talking about discussions about haskell
+17:42:28 <shachaf> #haskell-offtopic is also offtopic.
+17:42:33 <EvanR> discussions about haskell discussions
+17:42:39 <shachaf> I think it's preferred.
+17:42:42 <shapr> is that offtopic? I don't even know
+17:42:56 <shapr> mozzarella: what got you interested in monads, or perhaps interested in Haskell?
+17:43:30 <EvanR> -offtopic was a dramatic reaction to something, now we have two channels
+17:43:34 <shapr> mozzarella: also, I found an approximation of a monad in C: http://blog.sigfpe.com/2007/02/monads-in-c-pt-ii.html
+17:43:50 <shapr> EvanR: I'm sad to say, it was a dramatic reaction to me.. I was talking about unicycles too much :-(
+17:44:11 <shapr> CosmicRay trained a markov bot on ten years of #haskell logs and it kept trying to talk to me about unicycles. That was a bad sign.
+17:44:32 <EvanR> is that true
+17:44:46 <shapr> er, yes?
+17:45:15 <EvanR> wacky
+17:45:21 <shapr> ski might explicitly remember
+17:45:23 * ski thinks there may be too little talk about unicycling around these parts, these days ?
+17:45:44 <ski> (needs to be a balance, you know ..)
+17:45:52 <shapr> ski: oh that's so punny!
+17:45:57 <EvanR> yeesh
+17:46:26 * ski started typing that, before shapr pinged them, actually ..
+17:46:36 <shapr> mozzarella: would you like more info / details on monads?
+17:46:41 <ski> (.. is this another example of the mind-reading ?)
+17:46:46 <shapr> haha, probably so!
+17:46:48 * ski eyes shapr carefully
+17:47:06 <mozzarella> shapr: I keep hearing about monads everywhere I go, I look it up then give up. As for getting interested into haskell, I would say it's reading about rust that did it. Seems like rust is borrowing a lot from haskell and/or other functional programming languages, and things like higher order kinds are mentioned and I'm like what the hell is a higher order kind, then they mention haskell and I've got no
+17:47:08 <mozzarella> knowledge of haskell so I can't really understand.
+17:47:24 <shapr> mozzarella: oh, I can help with some of that!
+17:47:52 <EvanR> The kind system is really just a simple type system for types
+17:47:53 <shapr> mozzarella: but honestly you don't need to know any of these things to write Rust
+17:48:02 <EvanR> it's not that exciting
+17:48:06 * ski didn't really know Haskell had any higher-order kinds (as opposed to types) ..
+17:48:15 <ski> (.. at least without `TypeInType')
+17:48:33 * sm[m] wonders if a haskell channel with theory chat forbidden would work
+17:48:38 <EvanR> yeah higher order kinds is technically "a new one"
+17:48:40 <shapr> ski: what about higher kinded types?
+17:49:01 <Axman6> #pragmatic-haskell
+17:49:08 <sm[m]> With bot enforcers
+17:49:08 <ski> shapr : oh, (as i've said before), i'd like that term, "higher kinded", to be eradicated :)
+17:49:11 <EvanR> #curbside-haskell
+17:49:29 <mozzarella> lmao
+17:49:36 * ski . o O ( #cubical-haskell )
+17:49:37 <shapr> conal: oh hey, I'm giving a short lightning talk about how to use category theory to do useful things, is there any one of your projects you would especially recommend I read/regurgitate?
+17:49:39 <mozzarella> even the terminology is confusing
+17:49:41 <sm[m]> #haskell-practical
+17:49:43 <EvanR> sm[m]: monoids in an endofunctor category = permaban
+17:50:17 <sm[m]> Damn right !
+17:50:28 * ski . o O ( #haskell-impractical )
+17:50:39 <shapr> What's the difference between a parameterized type and a higher kinded type? is there a difference?
+17:51:02 <jle`> shapr: in the typical distinction, a higher-kinded type is parameterized by a parmaeterized type
+17:51:03 <shapr> mozzarella: what's the type of Option in Rust?
+17:51:15 <ski> shapr : yes, the difference is that "higher kinded type" must die
+17:51:23 <jle`> shapr: or maybe more concretely, a higher-kinded abstraction is an abstraction on things that aren't just types
+17:51:37 <shapr> so, one level up?
+17:51:39 <conal> shapr: There are several examples in http://conal.net/papers/compiling-to-categories/, and a detailed derivation of automatic differentiation (generalizing forward and reverse modes and more).
+17:51:49 <jle`> so Eq would be a normal sort of abstraction, but Functor would be a "higher-kinded abstraction", according to the typical usage
+17:51:49 <mozzarella> shapr: Option<T>?
+17:51:56 <shapr> conal: thanks! I thought that was the most likely, I'll tell you how it goes tomorrow!
+17:51:57 <conal> shapr: second link: http://conal.net/papers/essence-of-ad/
+17:51:59 <jle`> because it abstracts over something non-Type
+17:52:16 <conal> shapr: good luck!
+17:52:17 <shapr> conal: do you think compiling to categories is more likely to be accessible?
+17:52:18 <jle`> so a "higher-kinded abstarction" would be abstracting over things like Option<->
+17:52:21 * shapr decides yes
+17:52:36 <jle`> instead of things like T
+17:52:50 <ski> mozzarella : no `Option<T>' *is* a type. `Option<T>' is not the type of `Option'
+17:53:33 <conal> shapr: for accessibility, see the link to “Teaching New Tricks to Old Programs” there
+17:53:35 <jle`> i think there's a good reason to draw a distinction between abstractions over * and abstractions over abstractions (like abstractions over parameterized types), since it can be a line that a lot of languages cannot cross
+17:53:40 * shapr searches
+17:53:43 <jle`> but i think higher-kinded isn't the best word for it either
+17:53:53 * shapr reads
+17:54:06 <conal> shapr: ("there" being http://conal.net/papers/compiling-to-categories/)
+17:54:11 <nshepperd2> Higher kinded abstraction might also be called "first class type constructors"
+17:54:19 <shapr> conal: reading it now, thanks
+17:54:34 <conal> :)
+17:54:58 <ski> nshepperd2 : s/constructors/functions/ ?
+17:55:11 <mozzarella> ski: option is an enum
+17:55:13 <shapr> mozzarella: so you could think of Option at the type level as a type that takes another type, yeah?
+17:55:18 <mozzarella> Some(T) or None
+17:55:27 <nshepperd2> ski sure
+17:55:30 <ski> mozzarella : i know
+17:55:45 <ski> mozzarella : that's not what shapr had in mind, though, i think
+17:56:02 <shapr> ski: what did I have in mind? I don't remember!
+17:56:15 <shapr> I'd wandered off to write boring Haskell code and read about category theory for tomorrow's lightning talk!
+17:56:26 <mozzarella> shapr: yeah
+17:56:27 <ski> shapr : you were thinking about parameterized types, and their kinds ?
+17:56:35 <shapr> uh, sure!
+17:56:41 * shapr scrambles mentally
+17:56:44 <EvanR> a higher order function, i recall from ancient times, is the idea of a function that can take functions as arguments. I'll buy this terminology, that's pretty higher order
+17:56:47 <crestfallen> hi I still have questions about these conversion functions, particularly on line 7 . g takes a function of the form (\_ -> "hello"). so on line 10, g evaluates to  '   (\() -> "hello) ()  '  right?        https://paste.ee/p/YJN1H
+17:56:52 <nshepperd2> Although "functions" makes me think type families which is a whole other bag of fish
+17:56:54 * ski scrambles eggs
+17:57:28 * ski scrambles down the comonads and up the monads
+17:57:33 <EvanR> a higher order type isn't really a function in general so the same pattern can't work here. Same for kinds. Higher kinded? no idea
+17:58:21 <shapr> mozzarella: could you write the more general type of things like Option? that is, can you write the type for something that would take parameterized types?
+17:58:38 <EvanR> Something of the kind * -> * is really a type former, rather than a type function. Ignoring type families
+17:58:48 <EvanR> I see nothing higher order about it
+17:58:50 * ski . o O ( let's all agree "higher kinded" is bunk, and agree never to use the term again, okay ? )
+17:59:02 <shapr> Option is one, I forget the names of the others, does Rust have an Error? I know there's an Either in there somewhere
+17:59:10 <nshepperd2> "higher" just means that it's not *
+17:59:12 <shapr> ski: ok, I'm with you
+17:59:40 <EvanR> really :\
+17:59:41 <c_wraith> rust has Result 
+18:00:08 <EvanR> i would agree haskell supports Higher Than Thou types
+18:00:13 <shapr> zing!
+18:00:19 * ski smiles
+18:00:42 <shapr> I guess if the type with a hole has to fit in the hole, it's holeier than thou?
+18:00:44 <EvanR> i know it's not grammatical
+18:01:03 <crestfallen> g returns - (\_ -> "hello") () '    but I still need to supply the argument () to myconvert on line 11. so it seems its getting two ()'s
+18:01:13 <EvanR> seems legit
+18:01:30 * hackage pandoc-citeproc 0.16.3 - Supports using pandoc with citeproc  https://hackage.haskell.org/package/pandoc-citeproc-0.16.3 (JohnMacFarlane)
+18:01:40 <shapr> ski: so what do you call them if not that word you don't like?
+18:01:41 <rotaerk> are comonads used often in practical code?
+18:01:41 <crestfallen> i.e. why does g return k () on line 7 ?
+18:01:55 <shapr> rotaerk: github uses them
+18:02:05 <rotaerk> I've got a basic idea of what they are, but I've never really looked into them
+18:02:09 <shapr> for the "jump to definition" feature
+18:02:12 <rotaerk> much less used them
+18:02:19 <ski> shapr : depends on what people mean to say. e.g. "parameterized type" or "type function". also "higher-order type"
+18:02:27 <shapr> hm, ok
+18:02:30 <shapr> I like it.
+18:02:51 <shapr> mozzarella: are you familiar with how Haskell types are written?
+18:02:51 <rotaerk> "my language supports parameterized type parameters"
+18:03:06 <mozzarella> shapr: like T<U, V> and being generic over T?
+18:03:19 <mozzarella> a bunch of arrows
+18:03:21 <ski> rotaerk : "my language supports abstracting over parameterized types"
+18:03:30 <dolio> You can be parameterized without being higher order, no?
+18:03:33 <ski> rotaerk : "my language supports abstracting over non-concrete types"
+18:03:43 <ski> dolio : sure
+18:04:07 <mozzarella> why does haskell use arrows even for arguments? like you're writing the type of a point-free function?
+18:04:27 <shapr> partial application, I think?
+18:04:32 <ski> in mercury, type variables can only stand for concrete types. so, although Mercury has type classes (even multi-parameter type classes), you still can't had a monad/1 type class in it :/
+18:04:47 <EvanR> mozzarella: that's it. Haskell's new logo will be a quiver full of arrows, with or without legolas
+18:05:00 <ski> mozzarella : i don't understand the question, please rephrase ?
+18:05:23 <shapr> :t (+)
+18:05:25 <lambdabot> Num a => a -> a -> a
+18:05:26 <rotaerk> I think they're expecting (a, b, c) -> d, instead of a -> b -> c -> d ?
+18:05:40 <shapr> mozzarella: do you mean those arrows? like a -> a -> a  for addition?
+18:05:46 <mozzarella> yeah
+18:05:56 <mozzarella> exactly what rotaerk said
+18:06:15 <shapr> mozzarella: partial application! I like to use it like object instances
+18:06:16 <EvanR> (a,b,c) -> d loses nothing and gains some convenience a -> b -> c -> d
+18:06:30 <shapr> > let addOne = (+) 1 in addOne 5
+18:06:31 <EvanR> with respect to
+18:06:32 <lambdabot>  6
+18:06:42 <shapr> > let addOne = (+) 1 in map addOne [97, 42, 6]
+18:06:44 <lambdabot>  [98,43,7]
+18:07:15 <shapr> mozzarella: you can fill in any of the arguments and get back a new function that only needs the rest of the arguments filled in when you want it to do something
+18:07:27 <ski> mozzarella : it's called curried style. it's a way (the most common, in Haskell) to encode "multi-parameter functions" (in Haskell, all functions take exactly one input)
+18:07:52 <rotaerk> mozzarella, a -> b -> c means the same as a -> (b -> c).  as in, it's a function that returns a function.  it's a way to express multi-argument functions.  tuples are another, (a, b) -> c.  however, the former is "curried", and enables partial application
+18:08:13 <ski> mozzarella : while writing a function of type `(a,b,c) -> d' would be encoding multi-parameter functions, using "tupled style"
+18:08:15 <EvanR> i have definitely encountered resistance to the curried function type. Regardless of how it handles when writing code, some people don't like the way the type looks
+18:08:22 <Axman6> _all functions take one argument_ this is always true in Haskell
+18:08:23 <mozzarella> oh, so you *can* use the parentheses syntax in haskell?
+18:08:33 <shapr> I think yes?
+18:08:36 <EvanR> Yes
+18:08:38 <rotaerk> yeah, though it's not the same as what you would see in something like C# or C
+18:08:51 <Cale> mozzarella: You can put parens around any expression, it's just grouping
+18:08:55 <EvanR> a -> (b -> c) is valid. (a,b) -> c is valid
+18:09:03 <ski> rotaerk : "and enables partial application in a more handy way" (one can encode partial application with both of them)
+18:09:06 <Axman6> but mewans something else
+18:09:09 <Axman6> means*
+18:09:25 <Cale> So, where we might write f "hello", you can write f("hello"), but that's just a redundant pair of parens.
+18:09:28 <crestfallen> anyone mind taking a look? having a meltdown ..  https://paste.ee/p/YJN1H
+18:09:44 <ski> EvanR : "i have definitely encountered resistance to the curried function type" -- in what neighbourhoods ?
+18:09:48 <rotaerk> mozzarella, in C#, `foo :: (a, b, c) -> d` would be represented as `D Foo(Tuple<A, B, C>)`
+18:10:05 <EvanR> ski: meetup environments where most people are not using haskell but had questions about it
+18:10:19 <EvanR> (most people = everyone except me)
+18:10:21 <crestfallen> re: line 7 and how it evaluates
+18:10:24 <ski> of course
+18:10:26 <rotaerk> there's no way in haskell to literally represent `D Foo(A, B, C)`; no truly multi-argument functions, but it's not needed
+18:10:36 * ski thinks EvanR isn't most people
+18:10:58 <Cale> I don't know, the tuple seems fine as a way of decomposing that.
+18:11:06 <EvanR> foo : (A,B,C) -> D -- exists...
+18:11:06 <mozzarella> oh I get, but I mean, even though it's not needed, wouldn't it be clearer?
+18:11:24 <mozzarella> you could still haev partial application
+18:11:36 <mozzarella> except the type would look neater
+18:11:37 <shachaf> whoa, is C#'s Tuple a value type?
+18:11:38 <Cale> What does it mean to be "truly multi-argument"? Even in mathematics, we tend to formalise multiparameter functions as functions from Cartesian products...
+18:11:40 <shachaf> That would be way too reasonable.
+18:11:46 <shapr> mozzarella: I think that's just what you're used to
+18:12:04 <ski> crestfallen : what about them ?
+18:12:11 <shapr> that is, I hypothesize that what "looks neater" is most likely whatever you are accustomed to seeing.
+18:12:27 <mozzarella> I guess
+18:12:30 <dolio> Cale: It means like in a bad language where you have 3 incompatible types of multi-argument function.
+18:12:37 <shapr> mozzarella: yeah, I could totally be wrong. It's just a hypothesize
+18:12:42 <shapr> hypothesis*
+18:12:50 <EvanR> mozzarella, I think the cases where you do partial application is pretty high, and you'll notice it takes so syntactic effort to curry a not-curried call
+18:13:00 <EvanR> some*
+18:13:03 <ski> Cale : <https://en.wikipedia.org/wiki/Multicategory> :)
+18:13:33 <EvanR> (\x y z -> f (x,y,z)) x y
+18:13:33 <shapr> mozzarella: is this helping any? or just more confusing?
+18:13:44 <EvanR> as opposed to f x y
+18:13:59 <EvanR> (if this looks ridiculous, this is your life in javascript)
+18:14:16 <EvanR> and lua
+18:14:31 <ski> EvanR : also `\y -> f (x0,y,z0)' vs. `\y -> f x0 y z0'
+18:14:48 <rotaerk> Cale, in haskell every "multi-parameter function" can be interpreted as a single-parameter function.  you can say that `(a,b,c) -> d` takes 3 parameters, but you can also say it takes 1 tuple.
+18:14:48 <ski> (those are both "partial applications")
+18:14:50 <EvanR> yeah
+18:15:01 <rotaerk> in C#, that's not true of `D Foo(A, B, C)`
+18:15:31 <EvanR> at some level the call will need to "tuple" the 3 args
+18:15:39 <EvanR> be it in an object or on a stack
+18:15:59 <shachaf> @quote partial.application
+18:16:00 <lambdabot> ddarius says: (f x) is a partial application iff f x == (curry (uncurry f) x)
+18:16:04 * shapr wanders away to look for adventure (aka food)
+18:16:31 <crestfallen> ski thanks see how g returns k () on line 7?
+18:16:46 <Cale> rotaerk: Sure... I suppose it's mostly that some programming languages are impoverished and can't give any sense to the tuple on its own
+18:17:11 <Cale> (even though they use tuple syntax for function arguments...)
+18:17:29 <rotaerk> well C# does have a tuple type, so its analog to `foo :: (a,b,c) -> d` is `D Foo(Tuple<A, B, C>)`
+18:17:36 <shapr> mozzarella: anyway, you might enjoy learning Haskell, it's a great way to stretch your brain into interesting shapes!
+18:17:57 <rotaerk> so it's haskell that *lacks* the multi-argument support that C# has ... but I think that's really a feature
+18:18:50 <EvanR> heh... d Foo(A,B,C, d Bar(A,B,C))... now Foo is a tuple
+18:19:08 <mozzarella> that's what first appealed to me about haskell, it's full of alien stuff
+18:19:33 <dolio> It doesn't really lack it, though. It just doesn't force you to manually mediate between 'multi-argument' functions, curried functions and functions on tuples.
+18:19:58 <dolio> GHC will optimize curried functions like multi-argument functions.
+18:20:11 <dolio> If appropriate.
+18:20:14 <Axman6> depending how they're defined
+18:20:23 <dolio> Right.
+18:20:25 <EvanR> yes at the machine code level, it produces multi-argument procedures?
+18:20:27 <Axman6> may is possibly a better word to use
+18:20:55 <ski> crestfallen : okay ?
+18:21:42 <dolio> Similarly, ML uses tuples all over, but functions on tuples will often be optimized like C#'s by any good compiler.
+18:21:53 <crestfallen> so when running myconvert, it only runs when () is supplied as an argument     ski   right/
+18:21:55 <crestfallen> ?
+18:22:19 <dolio> And it doesn't force you to distinguish between multi-argument functions and functions on tuples.
+18:22:39 <EvanR> really
+18:22:42 <ski> but O'Caml tends to employ curried style more
+18:22:53 <EvanR> so like, f x y and f (x,y) both work?
+18:22:57 <crestfallen> I don't see what parts of the composition takes which arguments. seems like g already supplies the ()
+18:23:03 <ski> (still, some functions are traditionally in curried style, in SML. like `map', e.g.)
+18:23:12 <ski> EvanR : nope
+18:23:20 <EvanR> k crisis averted
+18:23:21 <dolio> No, I mean like Scala has f(x, y) and f((x, y)).
+18:23:50 <EvanR> that both work?
+18:24:14 <ski> crestfallen : yes
+18:24:22 <dolio> The first works when f is a two-argument function, the second works when f is a single argument function taking a pair.
+18:24:35 <dolio> And those aren't interchangeable, generally.
+18:24:43 <ski> crestfallen : i wouldn't say `f' and `g' are inverses, though. only almost
+18:24:44 <EvanR> that seems exactly like haskell
+18:24:59 <dolio> No, it doesn't.
+18:25:05 <crestfallen> ski I really don't get this program
+18:25:07 <EvanR> where two-arg means curried
+18:25:09 <dolio> There's also f(x)(y), which is like Haskell.
+18:25:22 * ski nods to dolio
+18:25:28 <EvanR> alright so there are 3 styles in Sala
+18:25:43 <ski> crestfallen : what in particular do you have trouble following, comprehending ?
+18:26:30 <crestfallen> what g returns which is : k () . those are the arguments for f , right ski ?
+18:27:36 <ski> crestfallen : `k ()' will be passed as `x' to `f', yes. so it's not "the arguments" but "the argument" (or "the first argument", if you're using sloppy language)
+18:28:21 <crestfallen> ok , that I see ski ... however
+18:28:23 <dolio> There's also f : () => A and f : Unit => A that aren't the same, I think.
+18:28:39 <MarcelineVQ> "the argument" in that k () isn't multiple arguments, it's k applied to ()
+18:28:43 <EvanR> ... and what is the iff between () and Unit
+18:29:01 <crestfallen> with myconvert it runs only when () is supplied as the argument
+18:30:01 <ski> crestfallen : yes, see :
+18:30:06 <ski>      myconvert ()
+18:30:10 <Axman6> there is never a need in Haskell to use () as an argument, laziness has the same effect
+18:30:13 <ski>   =  convert (\() -> "hello") ()
+18:30:21 <ski>   =  (f . g) (\() -> "hello") ()
+18:30:32 <ski>   =  f (g (\() -> "hello")) ()
+18:30:39 <dolio> The Unit one takes one argument that's a Unit, and the other one takes zero arguments. It might be a synonym for `=> A`.
+18:30:41 <ski>   =  (\x _ -> x) (g (\() -> "hello")) ()
+18:30:51 <ski>   =  g (\() -> "hello")
+18:30:55 <crestfallen> geez
+18:31:00 <ski>   =  (\() -> "hello") ()
+18:31:05 <ski>   =  "hello"
+18:31:06 <EvanR> funny
+18:31:19 <ski> crestfallen : make sure you follow what's happening, in each step, okay ?
+18:31:38 <crestfallen> MarcelineVQ: k is applied to () ?
+18:31:45 <dolio> And `x.f()` is actually syntax for the Unit one I think, although the compiler will automatically promote in that case and complain at you.
+18:31:53 <dolio> Or maybe that's backwards, I forget.
+18:32:16 <crestfallen> working on that thanks ski
+18:32:33 <MarcelineVQ> yep, that's the literal meaning of k () in a haskell expression. just like sum [1,2,3] is sum applied to [1,2,3]
+18:32:38 <ski> crestfallen : yes, `k' is applied to `()'. in this case, `k' becomes `\() -> "hello"'. so applying it to `()' is `(\() -> "hello") ()', which reduces/simplifies to just `"hello"'
+18:35:35 <crestfallen> so essentially g is supplying the ()      for     (\() -> a)  on the rhs
+18:38:37 <ski> crestfallen : yes, i think so (depending on what you mean by "on the rhs". the definiens of what ?)
+18:39:04 <crestfallen> g k = k ()
+18:40:24 <crestfallen> so it's a full expression, k ()   . Is that correct ski ?
+18:40:48 <ski> i'm not quite sure what you're asking about ? ("full" meaning what ?)
+18:40:54 <ski> `k ()' is an expression, sure
+18:41:28 <crestfallen> ok, so just to be certain I am sane here :  so the final () needed to run convert is for   f :: a -> () -> a
+18:41:30 <crestfallen> ski
+18:42:11 <crestfallen> that is the argument for f, not for g
+18:42:16 <ski> which final `()' ?
+18:42:30 <ski> you mean the `()' in `myconvert ()' ?
+18:42:43 <crestfallen> yeah to run myconvert
+18:42:51 <ski> (which stayes at the end, in the reduction trace, above)
+18:42:56 <ski> yea, sure
+18:43:34 <ski> crestfallen : you could try to make a similar reduction trace, but start only from `myconvert', with no `()' after it, and see what the difference would be ..
+18:44:02 <crestfallen> thanks , hold on let me work on that
+18:44:42 <crestfallen> also you were saying these are not perfect inverses?
+18:47:51 <ski> consider `mycovert undefined' vs. `(\() -> "hello") undefined'
+18:48:32 <ski> (you could also consider how you might go about, trying to fix that, if you wanted to ..)
+18:53:32 * ski idly considers renaming `f' to `overt' and `g' to `covert'
+18:55:04 <crestfallen> ski still hanging in there, I get your first trace...
+18:55:07 <Axman6> covert . overt = co
+18:55:22 <Axman6> uh, c
+18:56:30 * hackage ipython-kernel 0.10.1.0 - A library for creating kernels for IPython frontends  https://hackage.haskell.org/package/ipython-kernel-0.10.1.0 (VaibhavSagar)
+18:57:30 * hackage ihaskell 0.10.0.1, ghc-parser 0.2.1.0 (VaibhavSagar): https://qbin.io/cord-ftp-s40j
+19:05:26 <crestfallen> ski you on?
+19:05:53 * ski is off and on
+19:06:59 <crestfallen> is this right on line 23 of the trace ?
+19:07:03 <crestfallen> https://paste.ee/p/lwcSw
+19:09:05 <ski> yes
+19:09:12 <shapr> mozzarella: feel free to ask any questions that you find, there's tons of awesome stuff in the world of Haskell!
+19:09:24 <shapr> mozzarella: even better, there are worlds beyond Haskell that are even MORE awesome!
+19:09:50 <shapr> for example, conal's amazing category theory magic: https://github.com/conal/2017-talk-teaching-new-tricks-to-old-programs/blob/master/README.md
+19:09:58 <ski> crestfallen : in `g k = k ()', `k' becomes `\() -> "hello"', because we're calling `g (\() -> "hello")', so that the body `k ()' becomes `(\() -> "hello") ()'
+19:10:00 <crestfallen> ski so that () on line 23 , that shouldn't be written on line 22 as well?
+19:10:21 <ski> crestfallen : correct, it shouldn't
+19:11:07 <ski> crestfallen : btw, note that (e.g.) `(f . g) (\() -> "hello") ()' really means `((f . g) (\() -> "hello")) ()' (because `foo blah bleh' always means `(foo blah) bleh')
+19:11:13 <ski> @src (.)
+19:11:13 <lambdabot> (f . g) x = f (g x)
+19:12:57 <crestfallen> ski right, so g supplies that . so that is lazy evaluation, where g is holding off on supplying that () ? 
+19:13:31 <ski> crestfallen : so that, `x' in that definition of `(.)' becomes `\() -> "hello"', so the part `(f . g) (\() -> "hello")' of `(f . g) (\() -> "hello") ()' becomes `f (g x)', with `x' bound to `\() -> "hello"', iow becomes `f (g (\() -> "hello"))' -- do that the whole `(f . g) (\() -> "hello") ()' (iow `((f . g) (\() -> "hello")) ()') thing becomes `f (g (\() -> "hello")) ()' (iow `(f (g (\() -> "hello"))) ()')
+19:14:08 <crestfallen> oh man, well is my above last comment correct?
+19:15:04 <crestfallen> ski 
+19:15:58 <ski> crestfallen : no lazy evaluation (or non-strict semantics, say) is really involved, here. it would evaluate/reduce basically the same in a strict language, like Scheme,Erlang,SML,OCaml,ECMAScript,Java,&c.
+19:16:50 <crestfallen> ok anyway you are deep, really appreciate it, I DO understand how it evaluates from line 22 to 23, so I'm home free ski 
+19:16:53 <ski> (the only thing i can think of which wouldn't be quite the same is the `_' vs `()' patterns)
+19:17:05 <ski> heh, okay :)
+19:17:57 <crestfallen> ski in the (your) evaluation, we don't see () from g k = k () until line 23
+19:19:41 <ski> that's because it's only by then we use the definition of `g'
+19:20:39 <ski> the earlier `()' (not talking about the one in `\() -> "hello"') came from the initial call `myconvert ()'
+19:20:43 <crestfallen> right application is left to right
+19:20:51 <ski> yes, left-associative
+19:21:02 <ski> `foo blah bleh' means `(foo blah) bleh'
+19:21:06 <crestfallen> got it excellent thanks so much friend
+19:21:06 <ski> function returning function
+19:21:16 <ski> np :)
+19:33:09 <agohoth> is there a gui bittorrent client in haskell?
+19:33:47 <Axman6> I don't know of any gui ones, but combinatorrent is a command line one - not sure how up to date it is
+19:33:58 <Axman6> it'd be a fun project to write using Brick
+19:44:03 <iqubic> I need to learn Brick.
+19:45:02 <Axman6> I write s simple twitter client using it, it just listened to a doncuit of tweets and displayed them
+19:46:14 <Axman6> wrote*
+19:48:34 <vaibhavsagar> can GHC desugar do-notation into explicit uses of `>>=`?
+19:49:38 <vaibhavsagar> I know this is pretty straightforward for most monadic code, but it's super complex in the presence of -XRecursiveDo and/or -XApplicativeDo, which is why I ask
+19:50:18 <rotaerk> what do you mean? are you wanting GHC to spit out de-sugared haskell code or something?
+19:50:24 <shachaf> Do you mean print out generated Haskell code?
+19:50:35 <vaibhavsagar> yes
+19:52:28 <shachaf> There's -ddump-ds
+19:52:59 <shachaf> I suspect it does more than you want, though.
+19:54:18 <vaibhavsagar> shachaf: perfect, thank you!
+19:54:52 <shachaf> Maybe not!
+19:56:32 <ski> @quote can.Haskell.do
+19:56:33 <lambdabot> cjb says: "didn't Oleg develop.." ~= "Can Haskell do.."
+19:58:02 <dansho> is it possible to use hLock to prevent interleaving putStr? this doesn't seem to work http://codepad.org/AUBA5CJv
+19:58:30 <vaibhavsagar> shachaf: this is pretty great already, but I would love something that works before it gets converted to Core
+19:59:09 <vaibhavsagar> apparently some of the machinery already exists so that they can report useful errors when ApplicativeDo is on
+20:03:56 <dansho> oh maybe i just need to enable line buffering?
+20:06:03 * ski . o O ( lens buffering )
+20:10:54 <shachaf> Does GHC desugar recursive do to Haskell or directly to Core?
+20:12:24 <shachaf> Looks like it's to Haskell.
+20:15:34 <vaibhavsagar> I'm not seeing a Haskell desugaring step
+20:15:48 <vaibhavsagar> it seems to take a typechecked module and desugar it to core
+20:16:09 <vaibhavsagar> would love to be wrong about though
+20:16:46 <vaibhavsagar> my use case is a widget that has a do-expression on one side and the desugaring (in terms of Haskell) on the other side
+20:16:56 <vaibhavsagar> I think it could be great for teaching
+20:17:39 <shachaf> vaibhavsagar: I don't think it's an official step, just that the code that handles rec seems to generate HsExprs.
+20:17:59 <vaibhavsagar> oh, I see
+20:19:30 * hackage sign 0.4.4 - Arithmetic over signs and sets of signs  https://hackage.haskell.org/package/sign-0.4.4 (MasahiroSakai)
+20:36:14 <iqubic> How hard is it to learn Brick?
+20:37:29 <sarahzrf> hard as a brick
+20:37:32 <sarahzrf> jk, i have no idea
+20:43:46 <koz_> Such brick, very density.
+21:00:49 <sm[m]> iqubic: not too hard to do something with it. There are examples
+21:01:09 <sm[m]> definitely easier to learn it than do produce equivalent functionality without it
+21:23:19 <iqubic> Yeah. That's my opinion.
+21:36:30 * hackage log4hs 0.2.0.0 - A python logging style log library  https://hackage.haskell.org/package/log4hs-0.2.0.0 (gqk007)
+21:51:27 <dmwit> Personally, I found brick very easy to learn. I read through the very excellent README, then was basically immediately productive with it.
+22:00:48 <Axman6> sadly, some people find reading documentation much harder than just asking open ended questions on IRC
+22:01:18 <iqubic> Axman6: I will read the documentation, when I get a spare afternoon to dedicate to it.
+22:14:36 <sm[m]> It won’t take that long
+22:15:12 <sm[m]> At least, I wouldn’t give it that much time up front
+22:16:02 <sm[m]> Anyone more work on brick for windows I wonder
+22:20:37 <turab> @pl \t -> f t (g t t)
+22:20:37 <lambdabot> ap f (join g)
+22:21:28 <iqubic> :t app
+22:21:29 <lambdabot> ArrowApply a => a (a b c, b) c
+22:21:31 <iqubic> :t ap
+22:21:33 <lambdabot> Monad m => m (a -> b) -> m a -> m b
+22:21:35 <ski> @type (<*>)
+22:21:37 <lambdabot> Applicative f => f (a -> b) -> f a -> f b
+23:35:24 <Zer0xp> Is the append function a monoid ?
+23:35:46 <suzu> is the /function/ a monoid?
+23:35:56 <suzu> or do you mean does having that function make something a monoid?
+23:38:58 <iqubic> Zer0xp: Lists form a monoid with 'mempty = []', and'mappend = (++)' if that's what you want.
+23:48:30 * hackage antiope-optparse-applicative 7.4.3 - Please see the README on Github at <https://github.com/arbor/antiope#readme>  https://hackage.haskell.org/package/antiope-optparse-applicative-7.4.3 (arbornetworks)
+23:49:30 * hackage antiope-sns 7.4.3, antiope-swf 7.4.3, antiope-sqs 7.4.3, antiope-core 7.4.3, antiope-athena 7.4.3, antiope-messages 7.4.3, antiope-shell 7.4.3, antiope-dynamodb 7.4.3, antiope-s3 7.4.3, antiope-contract 7.4.3 (arbornetworks)

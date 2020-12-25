@@ -1,0 +1,1291 @@
+00:04:13 <jle`> oh neat i just ran into a bug involving applying a foldable method to a tuple
+00:04:57 <nh> the boobs operator
+00:08:27 <EvanR> ⊙⊙
+00:08:29 <EvanR> ⌣
+00:13:44 <EvanR> ⏝  probably better
+00:22:52 <kuribas> dminuoso: I was toying around with my own unlift: https://gist.github.com/kuribas/aead185cca821bdbdcd37cd5d6ac6466
+00:23:12 <kuribas> dminuoso: it looks easier than monadbasecontrol, and supports StateT, ExceptT and MaybeT
+00:25:39 <kuribas> dminuoso: and it also works with bracket, etc...
+00:27:06 <kuribas> For simple callbacks you can use liftCallback: liftCallback (withFile fp ioMode) $ \h -> ...
+00:30:12 <kuribas> with bracket: rewrapIO $ liftA3 bracket <$> unwrapIO acquire <*> unwrapIO_CB release <*> unwrapIO_CB comp
+00:31:43 <kuribas> erm, no liftA3...
+00:31:54 <kuribas> rewrapIO $ bracket <$> unwrapIO acquire <*> unwrapIO_CB release <*> unwrapIO_CB comp
+00:32:55 <Mo0O> Hi there
+00:33:09 <kuribas> or finally: rewrapIO $ finally <$> unwrapIO this <*> unwrapIO that
+00:33:39 <Mo0O> do you know if there is a way to print function? like printing the function name for any passed function
+00:33:59 <Mo0O> or printing a function representation
+00:34:07 <dminuoso> kuribas: Did you read the article I linked?
+00:34:12 <Mo0O> a bit like what `:t` do
+00:34:16 <kuribas> dminuoso: I skimmed it...
+00:34:39 <dminuoso> kuribas: I recommend you give it a thorough read. Im willing to bet that your implementation is sketchy and buggy in edge cases.
+00:35:02 <kuribas> dminuoso: which edge cases?
+00:35:05 <kuribas> I doubt it
+00:35:50 <kuribas> dminuoso: but I didn't support ContT
+00:36:26 <kuribas> dminuoso: also state isn't generally threaded between blocks.
+00:36:40 <kuribas> dminuoso: because that's impossible to implement generically
+00:36:55 <kuribas> dminuoso: but state is passed to the result though
+00:37:05 <EvanR> Mo0O: not all functions have a name
+00:37:48 <EvanR> :t fmap chr . reverse
+00:37:49 <lambdabot> [Int] -> [Char]
+00:39:49 <EvanR> Mo0O: but you could try to import the instance at Text.Show.Functions and see what happens
+00:40:20 <Mo0O> thanks EvanR 
+00:42:31 <dminuoso> kuribas: How does it behave wrt to state in bracket?
+00:43:00 <dminuoso> kuribas: But honestly, give that article a thorough read.
+00:44:15 <kuribas> dminuoso: state is passed to each block, but not between blocks.
+00:44:32 <kuribas> dminuoso: so only the state from release is passed on.
+00:45:40 <dminuoso> kuribas: At that point catch becomes fairly useless.
+00:45:47 <dminuoso> kuribas: Any exception would reset your state.
+00:46:30 <dminuoso> kuribas: Furthermore you couldn't use `finally` in a sensible way either
+00:46:31 <kuribas> yeah...
+00:46:59 <kuribas> but the only way to pass state is with an IORef
+00:47:02 <dminuoso> kuribas: But this discussion is described in detail in the article. :)
+00:47:18 <dminuoso> kuribas: And that leaves you with `ReaderT (IORef Thing) ...`
+00:47:27 <dminuoso> kuribas: All roads eventually lead to MonadUnliftIO :-)
+00:47:39 <dminuoso> (Which is just a nicer interface around ReaderT like things)
+00:47:44 <kuribas> hmm, ok...
+00:48:23 <kuribas> dminuoso: then what to do with servant Handler, which is "ExceptT ServerError IO a" ?
+00:49:11 <dminuoso> kuribas: In my servant apps I transport these exceptions in pure IO.
+00:49:59 <dminuoso> kuribas: `throwIO err404`
+00:50:04 <EvanR> ExceptT over IO doesn't make much sense to me
+00:50:26 <dminuoso> EvanR: Well its useful for local effectful calculations. Just not so much for global stacks
+00:50:33 <kuribas> EvanR: it's what servant uses
+00:50:34 <EvanR> alright
+00:51:15 <EvanR> i'm seeing a pattern... problem isn't with these droids, but problem with global stacks
+00:51:27 <EvanR> shoulda known
+00:51:35 <alp> 'ExceptT ServerError IO SomeType' should be interpreted as: handlers can do IO, the happy path returns a 'SomeType' value, but you can also give up on that and return a raw HTTP (error) response
+00:52:02 <kuribas> and an IO exception is a 500 error then?
+00:52:10 <dminuoso> kuribas: So what I do is this:
+00:52:13 <EvanR> ah the ServerError is used for a specific purpose rather than an exception
+00:52:15 <alp> an IO exception is whatever warp does with it
+00:52:22 <alp> which is a 500 usually yes
+00:52:56 <dminuoso> kuribas: I have some: newtype FreyjaM a = FreyjaM { runFreyjaM :: ReaderT Env (LoggingT IO) a }
+00:53:02 <alp> but I frankly haven't used exceptions much in web apps, except those of the libraries I was using.
+00:53:26 <alp> I'm often using an ExceptT with a custom, domain specific error type
+00:53:35 <dminuoso> kuribas: Then I have a function `toHandler :: Logger -> StartupEnv -> FreyjaM a -> Handler a` which essentially runs the stack, catches remaining exceptions, analyzes what they are, and then turns servant exceptions into Left ServantError and anything else into Right result
+00:53:41 <alp> sometimes access to some config as well
+00:53:55 <alp> I very rarely just define all my handlers in Handler directly
+00:54:14 <dminuoso> kuribas: e.g. https://gist.github.com/dminuoso/463e879a1d3946e0e39d5ec53e29af5c
+00:54:33 <alp> right, ^^^ what dminuoso is describing is pretty close to what I do and have seen other servant users do
+00:54:57 <alp> note that there has been a lot of thoughts put into supporting "exhaustive specifications" of endpoints
+00:55:44 <kuribas> my idea was to add a unique token (maybe timestamp) to each 500 error, then log the error message.
+00:55:51 <alp> where you don't just give up and ask for a ServerError when things go wrong, but you describe the status code and response type that the user gets in all the error cases as well. see servant ticket #841 as well as the servant-uverb-* libraries on github
+00:56:00 <kuribas> I don't want to expose the user to implementation details.
+00:56:27 <alp> kuribas, each 500 error in the whole app?
+00:56:35 <alp> wouldn't a middleware be better suited here then?
+00:56:39 <kuribas> alp: yeah
+00:56:48 <kuribas> alp: yeah that would be a middleware
+00:57:06 <kuribas> alp: I don't like how in clojure often malformed input ends up as a 500 error.
+00:57:14 <alp> hah ok, sorry I must have missed some context, don't mind me =)
+00:59:19 <kuribas> I also like to return json responses
+00:59:24 <kuribas> for errors
+01:01:58 <bahamas> hello. I remember reading somewhere that generally you should avoid deriving `Show` and use a pretty printer instead. do you consider that good practice?
+01:02:06 <dminuoso> bahamas: Yes.
+01:02:36 <EvanR> can we have the pretty printing just be built in plz
+01:02:38 <dminuoso> bahamas: In principle there's nothing wrong with Show for quick debugging purposes, but if your goal is to produce messages for a user, then a pretty printer is likely a better option.
+01:02:48 <kuribas> dminuoso: btw, with my version, I could define new versions of finally, brackets, etc, that do pass monadic effects.
+01:02:58 <dminuoso> kuribas: Do read that article.
+01:03:13 <dminuoso> kuribas: It will go into all the subtle details of why your attempts will be doomed to fail.
+01:03:33 <dminuoso> kuribas: Snoyman has published multiple other related articles you might find interesting as well.
+01:03:45 <EvanR> oh, i want built in pretty printing for debugging purposes. And for user application purposes something even prettier
+01:03:59 <EvanR> that i don't expect to be built in
+01:04:00 <dminuoso> EvanR: Tbf, Show is a sort of pretty printer.. :p
+01:04:05 <EvanR> yeesh
+01:04:08 <dminuoso> EvanR: At least the deriving generated Show.
+01:04:19 <EvanR> if Show is pretty, don't show me ugly :)
+01:04:27 <kuribas> EvanR: so pretty-simple?
+01:04:37 <kuribas> http://hackage.haskell.org/package/pretty-simple
+01:04:52 <EvanR> i tried that at some point and didn't like it
+01:05:10 <EvanR> also by saying "built in" i was basically saying "not haskell ever"
+01:05:32 <kuribas> dminuoso: sounds ominous.... But I'll read it more thoroughly when I find some time.
+01:05:52 <bahamas> dminuoso: does that mean that the section of the Standard Prelude called "Converting to and from String" is of little use to know about? http://hackage.haskell.org/package/base-4.12.0.0/docs/Prelude.html#g:22
+01:06:06 <bahamas> I'm assuming there are better alternatives, like using a pretty printer instead of `Show`
+01:06:55 <dminuoso> kuribas: https://www.youtube.com/watch?v=KZIN9f9rI34 might also be interesting for you 
+01:09:11 <kuribas> dminuoso: I don't watch videos > 10 minutes
+01:21:00 <tdammers> I only watch videos for entertainment. I find them very inefficient for learning purposes
+01:22:42 <bahamas> tdammers: they're the worst when you want to skim, but they're great for tutorials, when you want every single step you need to take
+01:26:21 <EvanR> the issues with videos are largely the same as the issues with tutorials
+01:26:48 <EvanR> low information density in space and time
+01:29:51 <bahamas> EvanR: why is it low information density?
+01:34:58 <EvanR> the same reason a WAV file of a 3 minute MP3 takes up hundreds of megabytes instead of 1
+01:35:53 <EvanR> whatever the point of the video is has usually been expanded greatly for the purposes of entertainment, ads, ability of the presenter, accident
+01:36:15 <EvanR> same amount of point, more video
+01:36:30 <bahamas> EvanR: ok, I was curious more why you think that about tutorials
+01:36:38 <EvanR> i guess i'm showing my age talking about MP3s
+01:36:58 <ziman> what would today's kids talk about instead?
+01:37:02 <EvanR> tutorials tend to cover very little with a lot of webpage
+01:37:10 <EvanR> mp3's still exist?
+01:37:52 <ziman> i think they're still the most widespread audio format, aren't they?
+01:38:06 <kuribas> EvanR: are mp3's passé?
+01:38:16 <EvanR> i mean does anyone interact with the files themselves... nevermind off topic
+01:39:09 <kuribas> EvanR: you can join #haskell-offtopic :)
+01:39:45 <EvanR> i don't want to ruin whatever backroom ridiculed of me is going on in there
+01:40:00 <bahamas> EvanR: that's because tutorials have beginners as a target audience. too much information will overwhelm them
+01:40:41 <EvanR> i have a feeling a lot of tutorials are really targeted at the author 
+01:41:20 <bahamas> EvanR: the author's past, beginner self I would imagine. or future, forgetful self :)
+01:41:34 <int-e> EvanR: I really hate the fact that videos impose their own speed on the audience.
+01:42:14 <int-e> (Or at least put an upper bound on the speed. You can pause videos to digest them, but speeding them up without potentially missing important details is really hard.)
+01:42:35 <EvanR> i put a gardening video on 4x and it was still too slow
+01:42:57 <maerwald> int-e: potentially solvable though, by separating the video into sections you can skip 
+01:43:01 <EvanR> just gimme a damn book
+01:43:30 <EvanR> are there still books?
+01:43:44 * EvanR makes sure the nuclear bunker door is still locked tight
+01:51:25 <lavalike> on the other hand there are skills and nuances of processes that are close to impossible to to write down in an effective way and extremely easy to pass on by showing as has been done since forever
+01:52:12 * hackage advent-of-code-api 0.2.3.0 - Advent of Code REST API bindings and servant API  https://hackage.haskell.org/package/advent-of-code-api-0.2.3.0 (jle)
+01:55:12 * hackage hadolint 1.17.3 - Dockerfile Linter JavaScript API  https://hackage.haskell.org/package/hadolint-1.17.3 (lorenzo)
+01:55:33 <EvanR> true
+02:10:49 <__dingbat__> Hi, I am trying to use the batch query feature of CQL library, - http://hackage.haskell.org/package/cql-io-0.16.0/docs/Database-CQL-IO.html#t:BatchM
+02:11:39 <__dingbat__> I am not sure how to pass the monadic actions from repeated 'addQuery' calls into the subsequent 'batch' function call.
+02:13:50 <__dingbat__> here is the code snippet - https://www.codepile.net/pile/VRXgO4AN
+02:14:01 <__dingbat__> any help would be greatly appreciated!
+02:20:12 <sim590> Why does "let a = 150; n = 10; z = 10 in expomod a n z == (a^n) `mod` z" evaluates to False while both expressions both sides of == display 0 when evaluated separately ?
+02:21:48 <boxscape> how/where is expomod defined?
+02:42:51 <opqdonut> sim590: `mod` and (==) precedences aren't what you think
+02:43:06 <opqdonut> no wait, they are
+02:44:01 <opqdonut> sim590: my next guess is different defaulting, maybe add some type signatures
+02:44:52 <opqdonut> > ((3::Int)^400) `mod` 10
+02:44:55 <lambdabot>  7
+02:44:57 <opqdonut> > ((3::Integer)^400) `mod` 10
+02:44:59 <lambdabot>  1
+02:56:49 <sim590> hmm
+02:58:08 <sim590> I wrote this "let a = (150::Int); n = (10::Int); z = (10::Int) in expomod (a::Int) (n::Int) (z::Int) == ((a::Int)^(n::Int)) `mod` (z::Int)" and I still get False...
+02:58:33 <sim590> boxscape: I haven't shared it, but here you go: https://paste.debian.net/1117250/
+03:00:53 <sim590> Huh. I changed expomod type signature's Int to Integer everywhere and it works OK now ...
+03:01:13 <sim590> weird. Why can't I make this work with Ints?
+03:04:09 <Rembane> sim590: Do you perhaps produce results that are bigger than 2^63?
+03:04:42 <int-e> sim590: (a^n) `mod` z  is likely to overflow.
+03:05:02 <int-e> (as opqdonut demonstrated)
+03:07:31 <int-e> apart from that, the logBase 2 juggling makes me queasy. Why not something like  ishifts = takeWhile (/= 0) (iterate (`div` 2) n)? (Actually I dislike the whole list/foldl... it seems to be obfuscating more than it clarifies here.)
+03:08:46 <sim590> int-e: I didn't think about takeWhile!
+03:09:39 <int-e> modExp a e m | e == 0 = 1 | odd e = modExp a (e-1) m * a `mod` m | otherwise = modExp (a*a `mod` m) (e `div` 2) m -- something along these lines feels clearer to me.
+03:10:30 <int-e> > iterate (`div` 2) (-1)
+03:10:32 <lambdabot>  [-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,...
+03:13:23 <sim590> int-e: yeah, it's good. I first literaly wrote the while loop I saw in the book as best as I could using fold as I normally do. I'll consider your approach!
+03:29:07 <sim590> int-e: I've tested your code and it seems to be equivalent, but I have trouble figuring out that it does correspond to the same computation. Initial algorithm (from the book) is https://i.imgur.com/SVwJ93I.png. I seem to understand better the correspondance between a fold, some initial value and a while loop. I know that recursion can do the same thing, but I'm not quite seeing how the code
+03:29:08 <sim590> corresponds. You must have a better understanding of recursion patterns than I do.
+03:30:53 <__monty__> sim590: A fold is a specific instance of recursion though.
+03:31:26 <sim590> __monty__: Yes, indeed, but I'm not seeing how he simplified the code so much.
+03:32:57 <int-e> sim590: It's not a perfect match. You can rewrite the case of odd `e` as a * modExp (a*a `mod` m) (e `div` 2) `mod` m  to get closer.
+03:33:38 <int-e> sim590: You can also introduce a wrapper to do an `a `mod` m` up front.
+03:34:07 <int-e> sim590: wrapper: modExp' a e m = modExp (a `mod` m) e m. Probably not with these exact names :)
+03:36:01 <sim590> int-e: you say that it's not a perfect match, but your code works. I've tested it for like 2400 values (of a, n and z) and it worked everytime.
+03:36:10 <int-e> sim590: But actually my real incentive is that each line of the code I wrote is a verifiable equality.
+03:37:12 <int-e> sim590: Take the last case: If e is even (not odd), then  modExp a e m = modExp (a*a `mod` m) (e `div` 2) m,   because a^(2k) mod m = (a^2)^k mod m = (a^2 mod m)^k mod m.
+03:37:36 <int-e> (Actually the first case, for e = 0, is wrong if m = 1 or m = -1.)
+03:38:03 <int-e> (It should be  1 `mod` m)
+03:39:09 <sim590> int-e: Indeed, I didn't test for those values. I tested for m in [2..24].
+03:44:43 <int-e> sim590: incidently, the code you have would also get 1^0 mod 1 wrong :)
+03:46:36 <int-e> sim590: http://paste.debian.net/1117256/ corresponds fairly closely to that loop.
+03:47:09 <int-e> (I renamed x to b for 'base')
+03:56:23 <sim590> int-e: thanks. This will help me figure out what to look for to transform imperative code to recursive.
+04:06:36 <jpcooper> I have a GADT `T :: * -> *`, whose sole constructor `T :: Fam t -> T t`, where `Fam` is a type family. I would like to define an `instance Distributive T`, but `instance Functor T` is required. `Functor` requires `fmap :: (a -> b) -> T a -> T b, but only certain `a` and `b` are allowed, namely those in `Fam`. Does anyone know a nice solution to this? I am aware that there are generic versions of both `Functor` and `Distributive`. Maybe
+04:06:36 <jpcooper> there's something there? 
+04:32:17 <boxscape> In https://medium.com/@jaredtobin/practical-recursion-schemes-c10648ec1c29 , the author constructs a type like "NatF r = ZeroF | SuccF r deriving Show", and says that something like "Fix (SuccF (Fix SuccZero))" can be shown automatically by ghci. Yet for that to work I have to give NatF a Show1 instance. Is that something that has changed since
+04:32:18 <boxscape> 7.10?
+04:33:01 <bollu> How does one prove that a type that one has is isomorphic to Void? Is just establishing a function f :: MyType -> Void enough? why?
+04:33:38 <bollu> intuitively, I can see why, since having such a total function f allows us to go from MyType to Void, and Void is uninhabited, so MyType should also be uninhabited (??)
+04:33:40 <bollu> but how do I formalize this?
+04:33:57 <jpcooper> bollu: const $ error "NO"
+04:34:09 <bollu> jpcooper "total function" :) 
+04:34:23 <bollu> that disallows use of bottoms and error
+04:35:42 <jpcooper> You prove falsity by trying to compile a false programme, no?
+04:35:58 <boxscape> bollu if you assume that this function exists, and also that there exists an inhabitant `x` of MyType, then you can use `f x` to get an inhabitant of type Void. But there are no inhabitants of type Void. Therefore one of our assumptions must be wrong.
+04:36:13 <boxscape> So either the function doesn't exist, or MyType is uninhabited.
+04:37:38 <nil> bollu: an isomorphism is a pair of (total) functions (f :: MyType -> Void, absurd :: Void -> MyType) such that `f.absurd == id @Void` and `absurd.f == id @MyType`
+04:41:10 <bollu> nil Right, but my problem is, how does one estabish f . absurd == id? The problem is that we define == extensionally
+04:41:26 <bollu> but if we begin with the premise that MyType and Void are uninhabited, this is trivially true
+04:41:43 <nil> absurd is an empty relation, so both f.absurd and absurd.f are too
+04:42:21 <nil> therefore extensional equality is always trivially true (because a universally quantified proposition over an empty set is always true)
+04:42:28 <bollu> so would it not be an isomorphism for any choice of total f?
+04:42:44 <bollu> ie, having any total function f : MyType -> Void would immediately imply that MyType and Void are isomorphic, right?
+04:42:45 <nil> there is only one such choice
+04:42:53 <nil> yes
+04:43:04 <bollu> OK, thank you :) 
+04:44:32 <jpcooper> So how do we build such a total function so that the programme does not compile?
+04:45:24 <nil> i'm not sure what you mean by <jpcooper> You prove falsity by trying to compile a false programme, no? 
+04:45:44 <jpcooper> A proposition in a programme is false if it does not compile
+04:45:59 <jpcooper> Is that not correct?
+04:47:03 <opqdonut> no
+04:47:13 <opqdonut> it merely means the proof is not correct
+04:47:28 <boxscape> I wouldn't even say that that's necessarily the case
+04:47:33 <boxscape> unless maybe if compile == typecheck
+04:47:41 <opqdonut> "f :: X" not type-checking means f is not a proof of X
+04:47:52 <opqdonut> that has nothing to do with whether X is true or not :)
+04:48:21 <jpcooper> So proving falsity is showing isomorphism to false
+04:48:27 <boxscape> yes
+04:49:00 <jpcooper> Okay
+04:50:32 <dminuoso> jpcooper: Proving falsity?
+04:51:00 <jpcooper> Proving that a proposition is false
+04:52:58 <dminuoso> jpcooper: Proving falsity is something different though.
+04:53:17 <jpcooper> If MyType is a proposition, then it is not
+04:53:31 <dminuoso> jpcooper: Think of ex falso quodlibet.
+04:53:41 <dminuoso> % :t absurd
+04:53:41 <yahb> dminuoso: Void -> a
+04:54:21 <boxscape> "Proving falsity" in the canonical sense would be to prove that Void is inhabited, right?
+04:54:35 <dminuoso> boxscape: Right. And Haskell lets you do this, which is why its unsound.
+04:55:25 <dminuoso> boxscape: And by extension, every type is inhabited by bottom - so you have a trivial proof for anything.
+04:56:10 <jpcooper> Not if you strictly evaluate your proof
+04:56:45 <dminuoso> jpcooper: This has nothing to do with runtime.
+04:57:25 <dminuoso> jpcooper: Types as propositions and programs as proofs. The act of type checking tests whether your proofs are correct.
+04:57:43 <jpcooper> No
+04:57:53 <jpcooper> The act of type checking plus strictly evaluating does
+04:58:29 <boxscape> you don't need to strictly evaluate to be sure your proof is correct if your language isn't unsound
+04:58:47 <jpcooper> Change the definition of soundness. We're okay with axioms, right?
+04:59:20 <boxscape> I mean you could change the definition of soundness but it seems like that would be confusing if there's already a different definition
+04:59:49 <jpcooper> The definition of soundness is whatever ensures a duality between the language and the chosen logic system
+05:00:25 <dminuoso> jpcooper: What does evaluation have to do with anything?
+05:00:45 <jpcooper> dminuoso: It ensures total functions
+05:01:27 <dminuoso> 13:57:31  jpcooper | The act of type checking plus strictly evaluating does
+05:01:40 <dminuoso> jpcooper: Strict evaluation is not necessary.
+05:02:06 <jpcooper> In Agda, maybe
+05:02:27 <boxscape> jpcooper it only ensures that a function can terminate for the specific inputs you provide, not for all possible inputs, so I don't think it ensures totality as such
+05:05:14 <boxscape> I do think it's probably fair to say that if you strictly evaluate a proof that typechecks, even in an unsound language, you can be sure that this proof is true for this specific case (unless there are some weird corner cases where that's not true)
+05:05:56 <dminuoso> Plus the matter of totality in a turing complete language is not possible to check.
+05:06:06 <dminuoso> Not in the general case, anyhow.
+05:06:22 <jpcooper> If the proof finished evaluating, then it is a correct proof
+05:06:47 <jpcooper> A proof must by definition finish evaluating in finite time
+05:07:36 <lyxia> how do you know when to stop when evaluating a recursive function
+05:07:39 <szabolcs> Is this the place to ask beginner questions as well? Or is there a dedicated channel
+05:07:48 <jpcooper> When I said "it ensures total functions", I should have said, it ensures that we have constructed a valid proof in Haskell
+05:07:50 <lyxia> szabolcs: sure here is fine
+05:08:11 <jpcooper> If I'm missing something, then apologies
+05:08:30 <boxscape> szabolcs there's also #haskell-beginners but it's less active, might be useful if at some point you have a question that gets drowned out by other chatter, but yeah here is fine
+05:08:40 <szabolcs> Thanks
+05:09:15 <boxscape> jpcooper it only ensures that the proof is valid for the specific inputs you evaluated it with, not that it's valid in general
+05:09:24 <szabolcs> So, I have the feeling that what I set up in https://repl.it/@szabi1/DepMe can be much easier and more readably achieved with some language extensions (DataKinds)? -- but I can
+05:09:30 <szabolcs> 't figure it out
+05:10:41 <szabolcs> Lines 5-13 with the types inhabited with only a bare constructor and a class around them seems utterly verbose just to gain that kind of type safety I got in main for that.
+05:10:48 <dminuoso> szabolcs: Yes, DataKinds and Proxy or TypeApplications :)
+05:11:19 <jpcooper> boxscape: Okay. mea culpa
+05:11:25 <dminuoso> szabolcs: Alternatively, you could use multiple GADT constructors as well.
+05:12:21 <dminuoso> szabolcs: That is, enable DataKinds and then you can use any of 1) Proxy pattern, 2) TypeApplications or 3) Multiple GADT constructors.
+05:12:32 <szabolcs> Multiple GADT constructors on TimeSpan you mean?
+05:12:53 <dminuoso> szabolcs: Yeah. It's a sort of different direction, depending on how you want to use `add/TimeSpan` it might not be useful for you.
+05:13:12 <lyxia> data F = MkF F     fIsAbsurd (MkF y) = fIsAbsurd y    how do you evaluate fIsAbsurd without going into an infinite loop? Coq and Agda have static checks that allow this definition, but also special forms for recursive functions with special evaluation rules, Haskell has none of that to allow normalization if you evaluate under binders
+05:14:07 <dminuoso> szabolcs: Depending on how you want to use this, you might find https://blog.jle.im/entry/introduction-to-singletons-1.html and the following 2 parts interesting.
+05:14:33 <boxscape> lyxia the idea is that you can be sure it's correct if it *does* terminate, but don't gain any information if it doesn't
+05:15:21 <dminuoso> boxscape: But it's still not a proof. If I claim `Integer -> Double`, then you have to prove totality for the entire domain.
+05:15:43 <jpcooper> In conclusion, Agda enforces total functions, to that by a programme type checking, you can be sure that the programme runs in finite time for all inputs, hence your proof
+05:15:45 <dminuoso> Any single terminating example is still not a proof of the initial proposition
+05:16:05 <dminuoso> (In fact, because the domain is infinite, you couldn't ever produce a proof by evaluation)
+05:16:07 <szabolcs> dminuoso: With separate TimeSpan constructors you'd have to extend the TimeSpan GADT definition every time you add a possible value to the TimeUnit type, right?
+05:16:14 <dminuoso> szabolcs: Right.
+05:16:26 <boxscape> dminuoso it's not a proof of that statement in general, but if you have a function f :: Integer -> Double and in ghci you type "f 5" and it gives you "5.5", you can be sure that given the Integer 5, you can obtain a Double
+05:16:43 <dminuoso> boxscape: It's still not a proof of the *proposition* `Integer -> Double`
+05:16:43 <jpcooper> dminuoso: If your types are finite, then you can evaluate your proof on all inhabitants
+05:16:51 <boxscape> dminuoso I agree
+05:17:07 <dminuoso> jpcooper: Perhaps, perhaps not. If its a recursive function without termination? 
+05:18:02 <szabolcs> so, `{-# LANGUAGE DataKinds #-}; data TimeUnit' = Day | Week | Month | Year deriving (Eq, Show)` and then Proxy or TypeApplications is what I will look into, I guess?
+05:18:04 <jpcooper> Are there any proofs involving such functions (serious question)?
+05:19:06 <dminuoso> szabolcs: Right. I recommend the proxy pattern to start with.
+05:19:28 <dminuoso> jpcooper: Providing a program that type checks.
+05:19:36 <szabolcs> Ok, thanks. (Is Proxy or TypeApplications considered more "idiomatic" nowadays for suchlike?)
+05:19:55 <jpcooper> szabolcs: http://hackage.haskell.org/package/dimensional is a brilliant example of this sort of thing. Maybe take a look at the code
+05:19:56 <dminuoso> % f :: Integer -> Double; f = realToFrac
+05:19:56 <yahb> dminuoso: 
+05:20:11 <dminuoso> jpcooper: ^- There. Proof for the proposition, and the type checker verified the proof.
+05:20:44 <lyxia> I think the question was more a way of saying that it's a dumb example of curry-howard
+05:20:48 <jpcooper> dminuoso: realToFrac is not a recursive function without termination
+05:21:15 <dminuoso> Ah fair enough.
+05:21:59 <szabolcs> jpcooper: Thanks, I will! Also, I am not planning to reimplement a dimensional calculus library the example was simple enough to type up in repl.it
+05:22:30 <jpcooper> I mentioned it more as an example of what is possible with DataKinds
+05:22:41 <dminuoso> szabolcs: Proxy is probably cleaner and works in the general case.
+05:23:12 <dminuoso> szabolcs: TypeApplication has some limitations, requires an extra extension and it relies on type variable ordering.
+05:24:03 <boxscape> Hmm, will there still be a reason to use Proxy (aside from not needing extensions) once visible type application is in ghc?
+05:24:28 <kuribas> dminuoso: read the thing.  What I get from it is that if you write a bad instance, you get bad behaviour (duh).  Also generalised newtype deriving doesn't work with type families.
+05:24:39 <szabolcs> And did I get it right that what I'd actually like to easily express/use are 'dependent types'?
+05:24:45 <jpcooper> boxscape: Proofs over Proxy? ʕ ͡° ͜ʖ ͡°ʔ
+05:25:08 <dminuoso> szabolcs: No.
+05:26:38 <szabolcs> Then I need to learn more about the concepts and terminology, I guess
+05:26:39 <dminuoso> szabolcs: It's rather, you are using singleton types, and they happen to be one of the ways to do dependently typed Haskell.
+05:27:19 <szabolcs> But conceptually, I want types which depend on not other types, but values of a type...
+05:27:28 <szabolcs> I thought that's the definition of dependent types.
+05:27:32 <jpcooper> szabolcs: Have a read of http://www.cse.chalmers.se/~ulfn/papers/thesis.pdf. I definitely need to again
+05:28:02 <dminuoso> szabolcs: The definition of dependent types is different.
+05:28:17 <szabolcs> Well, here we go! .-)
+05:28:25 <Mo0O> Hi
+05:28:28 <dminuoso> szabolcs: So lambda calculus lets terms bind terms. Type applications lets types bind typ9es.
+05:28:48 <dminuoso> szabolcs: Polymorphism lets terms bind types (you can expose this fact in GHC haskell by using TypeApplications on polymorphic terms)
+05:28:53 <dminuoso> szabolcs: And dependent types lets types bind terms.
+05:29:21 <Mo0O> I've got a time represented in second and want to display it in hour:minute:second format, do you know if there's something already done for that? or should I implement it myself
+05:29:23 <dminuoso> szabolcs: So in Haskell you can say something like `10 @Int`, and in dependent types you could say something like `Vec 10 Int` where `Vec` is a type level construct.
+05:29:45 <dminuoso> szabolcs: (And then write functions to work with such types, and have a type checker that works in this)
+05:30:00 <dminuoso> *GHC Haskell
+05:30:59 <jpcooper> The paper "Hasochism: the pleasure and pain of dependently typed haskell programming" looks interesting
+05:31:35 <boxscape> there's also richard eisenberg's thesis on introducing dependent types in haskell https://cs.brynmawr.edu/~rae/papers/2016/thesis/eisenberg-thesis.pdf
+05:31:40 <szabolcs> Mo0O: if that's the full specification, the implementation is simple enough to not incur another library? Are you looking for a `Int -> String` or `Int -> (Int, Int, Int)`-function?
+05:38:57 <Mo0O> szabolcs: that's true (by the way I'm looking for `Int -> String`)… yes I'm a bit lazy  ^^
+05:39:01 <xenon-> Mo0O there's probably something in the time package, but I agree, it is trivial to do that (and might be a good practice if you're new)
+05:41:38 * hackage log-domain 0.13 - Log-domain arithmetic  https://hackage.haskell.org/package/log-domain-0.13 (EdwardKmett)
+05:47:22 <Mo0O> szabolcs: xenon- I've made a simple version: https://repl.it/repls/HilariousExoticMining
+05:47:39 <Mo0O> maybe not the best one, let me know your through
+05:48:17 <boxscape> Mo0O the divMod function might be useful
+05:48:25 <boxscape> % 10 `divMod` 3
+05:48:26 <yahb> boxscape: (3,1)
+05:49:43 <szabolcs> yahb is nice!
+05:55:06 <boxscape> Indeed. It just pipes the input directly into ghci, as opposed to lambdabot, which uses a different REPL
+05:55:24 <Mo0O> boxscape: sure, it's realy better using divMod https://repl.it/repls/HilariousExoticMining
+05:55:35 <boxscape> nice
+05:55:55 <Mo0O> thanks boxscape :)
+05:56:02 <boxscape> you're welcome
+06:06:45 <xenon-> Mo0O I'd split the work into multiple functions. secToTime :: (Int, Int, Int), then showTime :: (Int, Int, Int) -> String
+06:07:09 <xenon-> showTime could be just this:   showTime = printf "%d:%d:%d"
+06:07:39 <xenon-> a bit more complex than that, you have to unpack the tuple, but you get the idea
+06:08:22 <xenon-> secToTime :: Int -> (Int, Int, Int), even
+06:09:39 <Mo0O> xenon-: sounds a good idea, I'll to refactor my functions
+06:13:38 * hackage some 1.0.1 - Existential type: Some  https://hackage.haskell.org/package/some-1.0.1 (phadej)
+06:14:48 <pavelz> so I have heard that using standard haskel library is strongly discouraged, what are the names of replacements ?
+06:14:54 <pavelz> just gettting started
+06:15:16 <dminuoso> pavelz: You mean replacements of your friends? :)
+06:16:07 <xenon-> where did you hear that?
+06:16:51 <pavelz> video about going functional first from js to elm then from ruby to haskell for webdev backend
+06:16:54 <dminuoso> pavelz: To rephrase my joke: You should replace the friends who told you that, not the base libraries.
+06:17:22 <dminuoso> pavelz: Overall the base libraries are packed with lots of good things. There's certainly criticism to be had, but overall there's plenty of good things.
+06:18:42 <maerwald> Well, you could say it's quite controversial, but I don't see really good replacements
+06:19:00 <maerwald> e.g. one that removes all that lazy IO with e.g. streamly... would be a start
+06:19:09 <maerwald> or the FilePath madness
+06:19:54 <pavelz> hmm ok
+06:21:19 <maerwald> if you are just getting started, there are better things to worry about
+06:22:50 <absence> if i have a lens to a list, how can i do something similar to "over", but return a value in addition? for example when using Data.List.partition
+06:23:18 <dminuoso> absence: What do you mean with "return a value in addition" ?
+06:23:29 <maerwald> sounds like a tuple
+06:24:39 <absence> yes, partition returns a tuple of two lists, and i want one to replace the one the lens focuses on, and "somehow" get my hands on the other
+06:25:16 <absence> i don't know if return is a good way of describing it
+06:26:43 <xenon-> maerwald, what FilePath madness?
+06:27:02 <xenon-> the fact that it is a string? like in virtually every other language
+06:28:20 <maerwald> xenon-: no, a list of unicode code points
+06:29:04 <xenon-> and that bothered you so much, in practice?
+06:30:25 <maerwald> uhm
+06:30:37 <maerwald> basically it's wrong :)
+06:30:58 <maerwald> https://gitlab.haskell.org/ghc/ghc/wikis/proposal/abstract-file-path
+06:31:05 <tdammers> the problem with filenames is that *all* choices are wrong
+06:31:08 <bahamas> pavelz: this will come in handy http://dev.stephendiehl.com/hask/
+06:31:38 <tdammers> some filesystems / OS use unicode, and enforce it, to others, a filename is basically just a byte array in an unspecified encoding
+06:31:40 <maerwald> imagine you have esoteric encoding and you are trying to split by file extension... good.
+06:31:53 <maerwald> luckily, '/' is specified by POSIX
+06:31:56 <maerwald> the rest isn't
+06:32:11 <tdammers> AFAIK, "extension" isn't even a thing in POSIX, is it
+06:32:15 <maerwald> yeah
+06:32:55 <maerwald> rust handles it better: https://doc.rust-lang.org/std/ffi/struct.OsString.html
+06:33:25 <absence> can / show up as part of the encoding of any of the unicode transformation formats, triggering a false positive?
+06:33:50 <xenon-> maerwald, I don't care about esoteric encodings. or non-POSIX. I guess I'm just pragmatic. wonder how many of these problems you actually encountered in practice.. my guess would be.. none
+06:34:21 <maerwald> xenon-: oh, because I didn't break anyones data yet...
+06:34:47 <xenon-> maerwald, meh
+06:35:16 <maerwald> doesn't matter right? 
+06:35:17 <tdammers> absence: I believe it can. Not in UTF-8 though, because UTF-8 is backwards compatible with ASCII.
+06:35:35 <xenon-> maerwald, you're exaggerating the issue. as usual
+06:35:59 <xenon-> #haskell is too liberal, a troll like would be banned ages ago in another channel
+06:36:07 <maerwald> xenon-: ah, you think that's why hvr and snoyman came up with the abstract filepath proposal? :)
+06:36:10 <xenon-> every time I'm in here you're whining about something in haskell
+06:36:44 <maerwald> it is a problem and was just an example, you asked why
+06:37:05 <maerwald> calling out people as trolls when they explain is quite rude
+06:37:46 <xenon-> you are a well known #haskell troll. who has been tolerated for years. oh well
+06:38:02 * xenon- goes back to work
+06:40:16 <absence> fwiw i haven't noticed any trolling over the years. maybe you're the one exaggerating?
+06:40:39 <maerwald> he clearly wasn't interested in a discussion
+06:41:03 <maerwald> anyway, fixing it is too backwards incompatible, so people gave up, mostly
+06:41:29 <maerwald> because it isn't a huge problem in practice, only in corner cases
+06:41:46 <xenon-> absence, every single time I'm in here, he's complaining about something haskell related
+06:41:55 <maerwald> lazy IO is more problematic
+06:42:05 <maerwald> but streamly could solve it
+06:42:21 <Rembane> The combination of using UNIX pipes and String in Haskell could break things if you're unlucky, but they usually break in a very obvious way, so then you can change your implementation to ByteString or Text which isn't a too big deal.
+06:43:21 <maerwald> xenon-: you asked about what problems FilePath has and then complain when someone tells you? :)
+06:43:32 <maerwald> Check the proposal
+06:43:53 <absence> xenon-: haskell is an old beast and has lots of historical cruft. i don't think discussing its shortcomings is trolling
+06:44:11 <xenon-> absence, if that is all you ever do, then that's exactly what it is
+06:44:25 <maerwald> or it could be perceptional bias ;)
+06:46:33 <absence> xenon-: that's not my idea of what trolling is, but anyway let's keep things civil
+06:48:26 <xenon-> absence, if you're in a channel X, and all you ever do is talk about how bad X is, then that is trolling, by definition.
+06:48:55 <dminuoso> xenon-: http://catb.org/jargon/html/T/troll.html
+06:49:03 <dminuoso> xenon-: I think this is the most authoritative definition on the subject.
+06:50:48 <maerwald> I consider asking a question and then calling out people trolls when they answer... well. Impolite :)
+06:51:04 <maerwald> Let's move on
+06:51:31 <xenon-> dminuoso, 1; regularly posts specious arguments, flames or personal attacks to a newsgroup, discussion list, or in email for no other purpose than to annoy someone or disrupt a discussion. Trolls are recognizable by the fact that they have no real interest in learning about the topic at hand - they simply want to utter flame bait.
+06:51:39 <xenon-> fits him to a T
+06:52:36 <maerwald> so answering your question was trolling?
+06:54:10 <xenon-> it even describes the little argument we had with him earlier.. "FilePath madness". why is FilePath so horrible? because it may, in theory, break some code, that is running on "non-posix" with "esoteric encoding"
+06:55:08 <maerwald> well and you lose information about the encoding... it is also space inefficient
+06:55:11 <dminuoso> xenon-: If what you say was true, do you think arguing will do anything but create noise in this channel?
+06:55:38 * hackage filelock 0.1.1.4 - Portable interface to file locking (flock / LockFileEx)  https://hackage.haskell.org/package/filelock-0.1.1.4 (AkioTakano)
+06:56:01 <xenon-> dminuoso, if we get closer to banning the troll, then yes. go through the logs, grep for his messages. I get that 90% or more of of them are about crapping on haskell, or defending his attacks on the language
+06:56:16 <dminuoso> xenon-: And you believe having a discussion with him would bring you closer to that goal?
+06:56:16 <maerwald> yeah, or giving support on ghcup ^^
+06:56:44 <dminuoso> xenon-: Note Im not even debating on what you are suggesting, just your reaction about it.
+06:57:24 <dmwit> dminuoso, maerwald, xenon-: You are all welcome to continue this discussion in #haskell-ops.
+06:57:48 <dmwit> I am doing a short review of my logs now.
+06:58:30 <xenon-> is that website still working? where you could enter someone's nick, and it would return all of the messages he/she had in a specific channel
+07:00:35 <absence> xenon-: i'm not familiar with your argument, but is your opinion that FilePath is fine and nothing should be done about it?
+07:27:03 <svipal> Yo. Any way to change a function so that it behaves differently under ghci ?
+07:27:26 <dminuoso> svipal: To what end?
+07:27:46 <svipal> want to deactivate some concurrent parts when under ghci, they make it unbearably slow
+07:27:58 <svipal> and are not essential to the parts I want to test
+07:29:07 <dminuoso> svipal: Couldn't you add some parameter that controls whether they are turned on?
+07:29:35 <svipal> I could and then just call :main ghci
+07:29:48 <svipal> for instance
+07:29:50 <svipal> but I was kind of hoping there was an inbuilt way
+07:30:12 <dmwit> Well... you can check the buffering of stdin. =P
+07:30:18 <dmwit> I'm kidding. Don't do that.
+07:30:20 <dminuoso> Haha
+07:30:20 <geekosaur> it's not really supposed to be visible
+07:30:42 <shapr> dmwit: I enjoyed your talk yesterday, was there a video recorded?
+07:30:49 <dminuoso> By the way, how do programs detect whether a terminal is attached?
+07:30:53 <geekosaur> and telling the difference between ghci and runghc is probably not possible at all
+07:30:55 <dminuoso> (Or an interactive terminal, rathat is)
+07:31:22 <geekosaur> dminuoso, attempt a tty ioctl cal (usually indirectly via C's isatty())
+07:31:35 <svipal> gee now I 'm curious
+07:31:37 <dmwit> shapr: There was a video recorded yesterday. I don't know when it will be edited and posted, but in the meantime you can watch a recording of the Twitch version of my talk here: https://www.youtube.com/watch?v=Qig4-N5Y4Qg
+07:32:05 <dminuoso> geekosaur: Ah! Cheers.
+07:32:06 <geekosaur> this doesn't indicate that it's the controlling terminal, but most programs don't care; if they do need to know, they can open /dev/tty and operate on that
+07:32:34 <geekosaur> (mostly that's for programs like sudo that want to make sure they get eg. passwords from the right place)
+07:33:16 <dminuoso> geekosaur: What do you mean by controlling terminal?
+07:33:52 <geekosaur> that's somewhat complex, it's a unix attribute. most noticeably is it's the one where keys like control-c are translated to signals
+07:34:21 <geekosaur> most of the time you don't care, because the right thing happens automatically
+07:48:31 <job123> hi, i have a question regarding SwaggerItems from here[tm]: http://hackage.haskell.org/package/swagger2-2.4/docs/Data-Swagger.html#t:SwaggerItems. i have a value swaggerItems of type SwaggerItems ? and i would like to build a case of expression that deconstructs the three different possible types as cases. Can someone please explain to me how that
+07:48:31 <job123> works?
+07:52:39 * hackage cabal-plan 0.6.2.0 - Library and utility for processing cabal's plan.json file  https://hackage.haskell.org/package/cabal-plan-0.6.2.0 (phadej)
+07:58:48 <Cale> job123: You just want to know what the basic syntax would look like?
+08:00:10 <Cale> case swaggerItems of
+08:00:26 <Cale>   SwaggerItemsPrimitive mcf ps -> ...
+08:00:48 <Cale>   SwaggerItemsObject s -> ...
+08:00:57 <Cale>   SwaggerItemsArray ss -> ...
+08:01:03 <Cale> something like that?
+08:01:43 <Cale> The variable names there are arbitrary, you can name the parts you're matching however you like
+08:02:36 <job12378> any answers yet on my question (i had a connection loss)
+08:02:40 <job12378> ?
+08:03:20 <Cale> oh, I asked whether you just wanted the basic syntax and provided a case expression that did a simple pattern match against the three possible constructors
+08:04:14 <job12378> Cale: yes, if you could provide that would be great. If i don't understand something, i'll let you know.
+08:04:19 <Cale> case swaggerItems of
+08:04:23 <Cale>   SwaggerItemsPrimitive mcf ps -> ...
+08:04:26 <Cale>   SwaggerItemsObject s -> ...
+08:04:28 <Cale>   SwaggerItemsArray ss -> ...
+08:04:42 <Cale> The variable name choices are arbitrary
+08:05:29 <job12378> Cale: thank you. That is what i tried. ghc then says: Couldn't match type ‘'SwaggerKindParamOtherSchema’                     with ‘'SwaggerKindSchema’      Inaccessible code in        a pattern with constructor:          SwaggerItemsObject :: Referenced Schema                                -> SwaggerItems 'SwaggerKindSchema,        in a
+08:05:29 <job12378> case alternative
+08:06:18 <Cale> Ah, so that means you know that swaggerItems :: SwaggerItems SwaggerKindParamOtherSchema
+08:06:54 <Cale> However, SwaggerItemsObject and SwaggerItemsArray can only produce values of type SwaggerItems SwaggerKindSchema
+08:07:04 <Cale> (I have no idea what these types mean, but whatever)
+08:07:29 <Cale> The point is, you know that the only possibility is that it was constructed with SwaggerItemsPrimitive
+08:07:34 <Cale> so you don't need those other matches
+08:09:39 <job12378> ah ok. the kind (is it a kind?) SwaggerKindParamOtherSchema is then probably inherited from the function parameter which has type ParamSchema SwaggerKindParamOtherSchema
+08:10:42 <Cale> I guess it's a SwaggerKind :D
+08:11:06 <job12378> yes agree
+08:11:49 <Cale> They're using the DataKinds extension, which turns the SwaggerKind t type into a kind, and turns SwaggerKindNormal, SwaggerKindParamOtherSchema, and SwaggerKindSchema into types (of that kind)
+08:11:55 <boxscape> %  type family Test (a :: ()) :: t where Test '() = Int
+08:11:55 <yahb> boxscape: 
+08:12:03 <boxscape> %  :k Test '()
+08:12:03 <yahb> boxscape: Test '() :: forall {t}. t
+08:12:10 <boxscape> %  :k Test '() :: forall t . t
+08:12:10 <yahb> boxscape: ; <interactive>:1:10: error: parse error on input `::'
+08:12:12 <Cale> (they'd normally be values)
+08:12:15 <boxscape> uh
+08:12:32 <boxscape> % :k Test '() :: forall t . t
+08:12:32 <yahb> boxscape: ; <interactive>:1:10: error: parse error on input `::'
+08:12:35 <boxscape> hm
+08:12:48 <boxscape> I was going to ask why this throws a kind error
+08:13:00 <Cale> Isn't it Int?
+08:13:14 <boxscape> well, look at the result of  :k Test '()
+08:13:22 <boxscape> it says forall {t} . t
+08:13:23 <Cale> That seems weird and wrong
+08:13:26 <boxscape> indeed
+08:13:46 <boxscape> actually maybe it's not a parse error for me because I'm on 8.8
+08:14:26 <boxscape> (still seemingly weird and wrong and wrong on 8.8 though)
+08:14:36 <boxscape> s/wrong and wrong/wrong
+08:15:06 <Cale> Whoa, yeah, it's like it didn't even kind check your type family instances
+08:15:16 <boxscape> yeah it doesn't seem to do that
+08:15:24 <boxscape> the equations can have different kinds
+08:15:27 <Cale> I'd call that a bug
+08:15:42 <boxscape> (I actually found it quite useful a minute ago but also quite strange)
+08:15:49 <boxscape> I suppose I'll open a ticket
+08:16:02 <Cale> Good :)
+08:16:40 <boxscape> (once I'm home in an hour and have checked it on HEAD)
+08:17:06 <lyxia> type families are implicitly dependent on the kind parameters
+08:17:28 <boxscape> Okay
+08:17:46 <boxscape> does that mean it's fine?
+08:17:49 <lyxia> It's really     Test t (a :: ()) :: t    ;    Test Type '() = Int
+08:18:14 <lyxia> but if your write   Test t '()   it doesn't yet match that clause
+08:18:33 <boxscape> hm, okay
+08:18:40 <boxscape> that makes sense I suppose
+08:18:58 <lyxia> I would say it's working as designed although it's certainly surprising and counterintuitive
+08:19:05 <Cale> ahhh, it's like a GADT... sorta?
+08:19:29 <lyxia> a little
+08:19:37 <Cale> But the reported kind is absurd though
+08:19:45 <Cale> I don't think this should be allowed
+08:21:33 <szabolcs> I need quick pointers.
+08:21:48 <szabolcs> If this works: 
+08:21:52 <szabolcs> % main = print $ scanl (&) 7 [(*3), (*2)]
+08:21:52 <yahb> szabolcs: 
+08:22:11 <szabolcs> why doesn
+08:22:13 <szabolcs> t
+08:22:21 <ski> > scanl (&) 7 [(3 *),(2 *)]
+08:22:23 <lambdabot>  [7,21,42]
+08:22:33 <szabolcs> ```
+08:22:39 <ski> % main
+08:22:39 <yahb> ski: [7,21,42]
+08:22:50 <ski> defining `main' didn't execute it
+08:23:27 <boxscape> Cale hm, I'm coming at it from the other side right now, it kind of makes sense to me that that's the kind but I still don't understand why then "Test '() :: forall t . t" isn't accepted
+08:24:18 <szabolcs> So, if the above works (it does), why doesn't https://repl.it/@szabi1/StackProblem
+08:25:49 <szabolcs> compared to `main = print $ scanl (&) 7 [(*3), (*2)]` only changed the type I operate on from `Int` to `(Int, Int)`.
+08:25:50 * ski idly wonders how to coerce it to show the code
+08:26:17 <geekosaur> need js
+08:26:19 <Cale> boxscape: Well, the kind parameter is implicit
+08:26:38 <szabolcs> ski: wrt. my code?
+08:26:47 <Cale> boxscape: We don't have any concrete syntax for writing it properly. I'm actually surprised you got GHC to somehow print forall {k}. ...
+08:27:00 <szabolcs> Supposedly you can coedit here: https://repl.it/join/jahgywoz-szabi1
+08:27:02 <ski> (looking at page source doesn't give a clue either, to a "raw"/"text" link ..)
+08:27:02 <boxscape> Cale I enabled -fprint-explicit-foralls
+08:27:06 <Cale> ah, okay
+08:27:27 <geekosaur> no, it's a fancy online IDE, not a pastebin
+08:27:29 <lyxia> szabolcs: "(undefined, 5)" is probably part of the list
+08:27:42 <boxscape> Cale I'm trying to compare it to the term level, where you have undefined :: forall {t} . t, but then can still use undefined :: forall t . t
+08:28:05 <szabolcs> lyxia: oh, damn, of course, in print I try to evaluate undefined...
+08:28:35 <Cale> boxscape: Yeah, it's pretty terrible
+08:29:17 <szabolcs> lyxia: for whatever reason I expected repl to print [(undefined, 5), ... ]
+08:29:34 <Cale> I think you probably just shouldn't be allowed to write that closed type family, even though it makes some sense.
+08:30:39 * hackage happstack-authenticate 2.4.0.2 - Happstack Authentication Library  https://hackage.haskell.org/package/happstack-authenticate-2.4.0.2 (JeremyShaw)
+08:31:42 <boxscape> Cale: Thing is, you get the same behavior if you don't give it any equations, and I think in that case you should be allowed to write the family
+08:32:04 <Cale> Specifically, I think that if a type family implicitly has a kind parameter, then the binding should occur at the scope of the definition of the family as a whole -- so all the instances would then have to be polymorphic in the choice of k
+08:32:52 <Cale> (only because it's implicit)
+08:32:57 <boxscape> I could imagine doing something like "Test @Type '() = Int" to match on the implicit paramter
+08:33:11 <boxscape> instead of that part somehow happening behind the scenes
+08:33:37 <Cale> type family Test (a :: Bool) :: k where Test 'True = Int; Test 'False = Maybe
+08:33:43 <Cale> You can do this as well at the moment
+08:34:06 <boxscape> yeah
+08:34:07 <Cale> which at first appears not to kind-check, but only because the first instance there only applies at kind *
+08:34:13 <Cale> and the second at kind * -> *
+08:34:30 <Cale> but I think if the kind parameter is implicit in this definition, the instances ought to be required to be polymorphic in it
+08:35:08 <boxscape> % type family Test k (a :: Bool) :: k where Test Type 'True = Int; Test (Type -> Type) 'False = Maybe
+08:35:08 <yahb> boxscape: 
+08:35:15 <Cale> (Just because it's really confusing otherwise)
+08:35:24 <maerwald> https://git.io/Je6yW is this expected in optics?
+08:35:25 <boxscape> this seems fine, I think? i.e. giving the implicit parameter explicitly
+08:35:31 <Cale> yeah, that should be allowed, imo
+08:35:37 <maerwald> I would expect this to be a compile time error... instead it just creates a Getter :o
+08:36:29 <boxscape> in analogy to that I suspect "type Test :: forall k . Bool -> k; type family Test a where @Test Type 'True = Int; Test @(Type -> Type) 'False = Maybe" will be allowed at some point
+08:36:39 <boxscape> uh that first @ is in the wrong place
+08:38:02 <phanimahesh> Why doesn't RIO re-export catches?
+08:39:20 <nshepperd> % type family Test2 (a :: Bool) :: k where Test 'True = Int; Test 'True = Maybe
+08:39:20 <yahb> nshepperd: 
+08:39:40 <nshepperd> % kind! Test2 'True (Test2 'True :: Type)
+08:39:41 <yahb> nshepperd: ; <interactive>:37:13: error:; * Syntax error on 'True; Perhaps you intended to use TemplateHaskell or TemplateHaskellQuotes; * In the Template Haskell quotation 'True
+08:39:57 <nshepperd> wat
+08:40:11 <nshepperd> % kind! Test2 True (Test2 True :: Type)
+08:40:11 <yahb> nshepperd: ; <interactive>:38:1: error:; * Variable not in scope: kind :: Array i0 e; * Perhaps you meant one of these: `find' (imported from Data.List), `BSL.find' (imported from Data.ByteString.Lazy), `BS.find' (imported from Data.ByteString); <interactive>:38:7: error: Data constructor not in scope: Test2 :: Bool -> * -> i0; <interactive>:38:19: error: Data constructor not in scope: Test2 :: Bool -> 
+08:40:21 <nshepperd> oh
+08:40:26 <nshepperd> % :kind! Test2 'True (Test2 'True :: Type)
+08:40:26 <yahb> nshepperd: Test2 'True (Test2 'True :: Type) :: forall {k}. k; = Test2 'True Int
+08:40:41 <nshepperd> % :kind! Test2 'True (Test2 'True :: Type) :: Type
+08:40:41 <yahb> nshepperd: ; <interactive>:1:35: error: parse error on input `::'
+08:41:19 <nshepperd> % :kind! (Test2 'True (Test2 'True :: Type) :: Type)
+08:41:19 <yahb> nshepperd: (Test2 'True (Test2 'True :: Type) :: Type) :: *; = Maybe Int
+08:42:58 <boxscape> I assume in 8.10 you can use visible kind application to force this instead of :: Type
+08:44:04 <boxscape> (though maybe only if you have a standalone kind signature?)
+08:49:31 <boxscape> % type family Any0 :: k
+08:49:31 <yahb> boxscape: 
+08:49:43 <boxscape> % :kind! (Any0 :: forall t . t)
+08:49:43 <yahb> boxscape: (Any0 :: forall t . t) :: forall k. k; = Any0
+08:49:55 <boxscape> % type family Any1 a :: k
+08:49:55 <yahb> boxscape: 
+08:50:02 <boxscape> % :kind! (Any1 Int :: forall t . t)
+08:50:02 <yahb> boxscape: ; <interactive>:1:2: error:; * Expected kind `forall t. t', but `Any1 Int' has kind `k0'; * In the type `(Any1 Int :: forall t. t)'
+08:50:20 <boxscape> lyxia is this also intended? I don't really understand the difference
+08:50:33 <boxscape> between `Any0` and `Any1 Int`
+08:50:48 <nshepperd> % :kind! (Any0 Int :: forall t . t)
+08:50:48 <yahb> nshepperd: ; <interactive>:1:2: error:; * Expected kind `forall t. t', but `Any0 Int' has kind `k0'; * In the type `(Any0 Int :: forall t. t)'
+08:54:18 <nshepperd> boxscape: i think the difference is that (I'm guessing) type application is rank1
+08:54:55 <boxscape> and what's not rank1?
+08:55:01 <nshepperd> Any0 is polymorphic. its kind is forall k. k
+08:55:26 <boxscape> and what's the kind of Any1 Int?
+08:55:37 <nshepperd> Any1 is polymorphic also. its kind is forall a k. a -> k
+08:56:03 <nshepperd> to apply Any1 to Int, you need to instantiate its type variables
+08:56:19 <boxscape> oh, all of them
+08:56:41 <nshepperd> yeah
+08:56:44 <boxscape> ok
+08:56:53 <lyxia> % type family Any1' a :: forall t. t
+08:56:53 <yahb> lyxia: 
+08:57:01 <nshepperd> so the kind of Any1 Int is k0, where k0 is a fresh type variable
+08:57:04 <lyxia> % :kind! (Any1' Int :: forall t . t)
+08:57:04 <yahb> lyxia: (Any1' Int :: forall t . t) :: forall t. t; = Any1' Int
+08:57:21 <boxscape> I see
+08:57:38 <nshepperd> and kind variables are not generalised, so you can't get back to Any1 Int :: forall k. k
+08:57:57 <boxscape> okay
+08:58:10 <boxscape> type variables are, then?
+08:59:42 <boxscape> have to go actually
+09:00:00 <boxscape> thanks guys for helping me understand it more or less, I'll play around a bit more with it in HEAD later
+09:00:03 <nshepperd> type variables in let bindings are, at least. subject to monomorphism restriction and monolocalbinds and whatever else
+09:01:42 <phanimahesh> beginner question: How do I repeat an IO action every n seconds?
+09:03:16 <phadej> forkIO $ forever $ action >> threadDelay (n * 10000000)
+09:03:30 <phadej> (don't really do that way if you don't understand what happens)
+09:03:42 <nshepperd> that's slightly too many zeros :p
+09:03:49 <phadej> that's on purpose!
+09:03:54 <nshepperd> haha
+09:05:24 <phadej> more seriously, there are libraries e.g. like https://hackage.haskell.org/package/auto-update
+09:06:08 <phadej> which does something slightly different
+09:06:54 <phadej> but it's still might be good idea to look how it's built
+09:08:11 <phanimahesh> phadej: I kind of understand that - starts a new thread that does the equivalent of `while true; do action; sleep n; done` in bash. Or did I miss something?
+09:08:37 <phadej> yes
+09:10:23 <nshepperd> basically, but threadDelay takes the time in microseconds
+09:11:01 <phanimahesh> also auto-update looks like overkill. I just need to run a data import job every few minutes.
+09:11:08 <nshepperd> which i kind of dislike, since i'm always multiplying by a million to use it
+09:11:15 <phanimahesh> I have half the mind to just chuck it in a bash loop
+09:12:11 <phanimahesh> actually, bash loop it will be. Don't need another stupid import. Plus easier testing for single run case that way without adding even more options parsing.
+09:12:28 <phadej> whatever suits you
+09:12:43 <phanimahesh> yeah. Thanks phadej 
+09:12:45 <phadej> (but if you don't do things in Haskell, you won't learn it)
+09:12:53 <nshepperd> we oughta have a proper Duration type so you'd have to write threadDelay (seconds 5)
+09:13:01 <phanimahesh> True that too.
+09:13:15 <phadej> nshepperd: surely it's in some other lib
+09:13:28 <phadej> too large design space to have it `base`
+09:13:34 <phadej> in*
+09:13:35 * nshepperd . o O (or even (5 `seconds`) with PostfixOperators?)
+09:14:14 <maerwald> phanimahesh: there are cron libraries
+09:14:25 <maerwald> but no anacron afair
+09:14:45 <phadej> ... because everyone is just putting things into bash loop :P
+09:14:51 <maerwald> haha
+09:14:58 <phanimahesh> nshepperd: `data Duration a = ....;` then `instance Num Duration` ought to do it, but having microseconds be the "default" implementation for duration is a bad idea
+09:15:36 <phanimahesh> maerwald: why didn't I search for cron libraries already.. damn. Either way, this is sufficient flexibility for me.
+09:16:18 <nshepperd> nah, no Num instance
+09:16:57 <phadej> there's NominalDiffTime already if you just want seconds
+09:17:55 <phadej> (it has nominal precision of picoseconds, should be enough!)
+09:18:53 <maerwald> wonder if anyone counted all the time types out there
+09:19:10 <phanimahesh> picoseconds. I'm yet to see a useful picosecond time measurement in day to day code.
+09:19:41 <phanimahesh> on the other hand elasticsearch thinks milliseconds is enough precision for everyone.
+09:21:09 * hackage filestore 0.6.4 - Interface for versioning file stores.  https://hackage.haskell.org/package/filestore-0.6.4 (JohnMacFarlane)
+09:21:14 <koz_> [insert another 'should be enough for anyone' joke here]
+09:22:41 <maerwald> https://gist.github.com/timvisee/fcda9bbdff88d45cc9061606b4b923ca
+09:22:58 <maerwald> just avoid dealing with time :P
+09:24:25 <koz_> Time is hard, yo.
+09:24:42 <EvanR> maerwald: i made this a while back http://i.imgur.com/g6rTcZK.png
+09:24:54 <maerwald> nice
+09:25:14 <koz_> Day - Day = Integer wtf
+09:25:47 <EvanR> correctimundo!
+09:25:58 <maerwald> is it picoseconds? :P
+09:26:39 <koz_> Unfortunately, something I'm working on requires (very tangential) use of UTCTime.
+09:26:40 <EvanR> Day is an abstract type that is calendar agnostic
+09:26:41 <evelyn> it's the number of days since the start of the new calendar
+09:27:20 <evelyn> 1858-11-17 is the start of all known time. There was nothing before that.
+09:31:42 <MarcelineVQ> hey at least we can measure intervals accurately, seconds don't change duration depending where you are do they? ;]
+09:31:51 <EvanR> lol
+09:32:08 <EvanR> Data.Time.Relativity
+09:32:38 <EvanR> ^ why we need all these abstract types, to avoid physics
+09:33:46 <EvanR> are you a human or are you a phase space configuration
+09:33:48 <nshepperd> data ProperTime (t :: Trajectory)...
+09:34:14 <MarcelineVQ> I can't heard phase space without thinking of jurassic park
+09:37:22 <EvanR> supposedly wrong thing: "Thread.sleep(1000) sleeps for >= 1000 milliseconds."
+09:37:38 <EvanR> is this because superuser can mess with OS timing during that second?
+09:40:15 <EvanR> i guess that one depends on runtime/language specifics
+09:40:18 <maerwald> EvanR: appears to be Java: "The actual time thread sleeps before waking up and start execution depends on system timers and schedulers."
+09:40:21 <Geekingfrog> it's unlikely the scheduler will wake up your thread at the exact right millisecond. Then you can have clock skew, VM suspension, or a million other thing (including user messing around)
+09:41:10 <EvanR> yes the previous bullet point was = 1000 milliseconds, which is obviously wrong
+09:41:20 <MarcelineVQ> Also more directly you can interrupt a sleep with exceptions or whatevever other means you are provided
+09:41:27 <EvanR> ah ha
+09:42:32 <EvanR> that gist provides proof that "everything is wrong if you think hard enough"
+09:42:54 <MarcelineVQ> 'everything you know is wrong' is probably my favorite weird al lyrics.
+09:43:01 <EvanR> that too
+09:46:48 <sm[m]> EvanR: that’s a really nice cheat sheet that could save a lot of time-ache - submit it to time’s haddock ?
+09:47:57 <sm[m]> should it say something about NominalDiffTime (& DiffTime ?) representing seconds when interpreted as a number ?
+09:48:05 <merijn> EvanR: Pfft, everything is wrong with only moderate thought ;)
+09:51:49 <heatsink> Everything is not yet proven right
+09:51:53 * heatsink dons tinfoil hat
+09:58:12 <nil> any help on this? https://gist.github.com/niiiil/155431216547ffd50280ffa2e0ab2b08
+09:59:56 <heatsink> The library already defines a MonadState instance for StateT, so you can't define another one
+10:00:36 <nil> oh, even if they have different constraints?
+10:00:53 <nil> is there an extension to allow this?
+10:01:04 <heatsink> right.  Type class matching is based on the part after the =>
+10:01:37 <heatsink> If it matches, then the constraint must be satisified or else there's a type error.  There is no notion of falling back to a different matching constraint.
+10:01:50 <heatsink> different matching instance
+10:01:57 <nil> is there a rationale behind this?
+10:04:01 <jle`> nil: how else would you do it?
+10:04:29 <nil> check that constraints are satisfied before considering it a match?
+10:04:36 <heatsink> There are two issues, decidability and coherence.
+10:04:42 <Cale> nil: In general it's impossible to know that a constraint won't be satisfied later
+10:04:47 <nil> well i'm already using UndecidableInstances
+10:05:02 <jle`> nil: what if more than one instance matches?
+10:05:03 <nil> Cale: ah.
+10:05:03 <Cale> Unless you're actually building the final executable, but the compiler builds a module at a time
+10:06:59 <Cale> In any case, you wouldn't want the selection of instances in already-compiled modules to depend on the non-existence of instances that are later provided in a module that someone writes later.
+10:07:04 <heatsink> Cale, is that situation different from having a compile error because you forgot to import the instance?
+10:07:38 * hackage advent-of-code-api 0.2.4.0 - Advent of Code REST API bindings and servant API  https://hackage.haskell.org/package/advent-of-code-api-0.2.4.0 (jle)
+10:07:57 <heatsink> That also sounds like, the constraint would be satisified if you had the whole program
+10:08:24 <Cale> Well, if it was allowed to use the non-existence of an instance to decide to pick an instance when compiling module A, and then you import module A and define the instance which was missing, what then?
+10:08:59 <Cale> Does it go back and say "oops" and recompile all the affected code in module A?
+10:09:09 <Cale> Or does it just pick incoherently?
+10:09:31 <heatsink> There is an IncoherentInstances extension.  Though I don't think it does what nil was asking for.
+10:10:10 <nil> it... does.
+10:10:17 <Cale> Yeah, that's kind of different -- it has to do with a similar situation which arises when you allow polymorphic instances that overlap with each other
+10:10:17 <heatsink> oh
+10:10:22 <nil> turning that on makes the program output "foo"
+10:10:31 <nil> that's interesting
+10:11:05 <Cale> If you're tempted to turn on IncoherentInstances, usually you shouldn't even be using type classes in the first place
+10:11:13 <jle`> nil: is that what you expected?
+10:11:23 <nil> jle`: yes
+10:11:32 <nil> Cale: why not?
+10:11:34 <Cale> (and instead passing arguments explicitly)
+10:12:16 <jle`> your code becomes 'incoherent', which basically defeats the whole purpose of typeclasses in the first place
+10:12:25 <Cale> Well, it admits a lot of obnoxious behaviour when you start linking programs together, where the instance that gets selected for any given type can vary depending on which module you're looking at in the same program
+10:12:41 <jle`> imagine having incoherent Ord instances
+10:12:42 <Cale> The purpose of type classes is to establish conventions
+10:12:50 <jle`> for a type like MyInt
+10:12:59 <jle`> then `Set MyInt` will behave differently in different modules
+10:13:18 <jle`> since you have different instances in different modules of Ord for MyInt
+10:13:31 <nil> i'm having trouble imagining what an incoherent choice of instance actually looks like
+10:13:45 <jle`> nil: someone could easily import your module and define an instance of MonadState () Identity
+10:13:55 <Cale> Worse yet, if you pass a Set MyInt constructed by code in one module to code that uses an incompatible instance, your program might just crash, because the internal Set invariants might not be satisfied
+10:14:10 <nil> jle`: so what?
+10:14:11 <jle`> and now both modules will maybe have different instances for MonadState (State s)
+10:14:17 <jle`> so one will use 'get' from one instance
+10:14:21 <jle`> and one will use 'get' from the other
+10:14:34 <jle`> and then now you import code from both of them and each one is different
+10:14:44 <nil> hm
+10:15:06 <jle`> so one written to expect a given instance will now be run in a situation with an entirely different instance
+10:15:07 <Cale> Moving code around between modules becomes dangerous with IncoherentInstances
+10:15:27 <Cale> Because the type checker won't complain, you'll just get different behaviour
+10:17:02 <nil> ok, using `instance {-# OVERLAPS #-}` works as well
+10:17:07 <nil> is this better?
+10:17:21 <jle`> Set expects things to be 'arranged' in increasing order internally. so if you have two Set MyInt's, but they have different internal structure, you're going to get bad behavior for all methods
+10:17:22 <Cale> Well, what are we actually doing?
+10:17:55 <Cale> Ah, you linked code
+10:17:58 <nil> yes
+10:18:08 <Cale> oh, this is awkward
+10:18:21 <Cale> Yeah, don't do this
+10:18:54 <nil> why not?
+10:19:29 <Cale> Generally, this doesn't really come up because you either use StateT for a record type that holds the various pieces of your state, or else you're newtyping a bunch of new transformers you're defining.
+10:19:45 <Cale> (In either case, there's probably a newtype involved actually)
+10:20:09 <nil> the thing is i have a "global" state and a "local" state
+10:20:34 <nil> so the computation starts with only the global state, then adds a local state on top of that for each of the sub-computations
+10:20:39 <Cale> In fact, what I recommend is that you define a new type class with more meaningful operations than "get" and "put"
+10:20:47 <Cale> If you even need the polymorphism
+10:20:54 <nil> i found this easier to express with two StateT layers than with a single type
+10:20:58 <Cale> (if there's more than one actual monad in use)
+10:21:07 <Cale> right, okay
+10:21:11 <jle`> nil: how does this help with what you have?
+10:21:33 <jle`> *how will this help with your problem
+10:21:44 <nil> jle`: i can define getGlobal and getLocal with the appropriate types, so that getGlobal works no matter whether there's only one layer or two layers
+10:22:04 <nil> if i didn't, i'd have to use get when there's one layer, and `lift get` when there's two
+10:22:09 <jle`> another common pattern is to write a state lifter, StateT Local m a -> StateT Global m a, so you can write to Local and lift it to Global when you can
+10:22:18 <jle`> nil: what does that have to do with MonadState instances?
+10:22:41 <jle`> what would the type of getGlobal and getLocal be?
+10:22:44 <nil> jle`: see my linked example, and pretend that Local is Int and Global is String
+10:22:59 <nil> getGlobal :: MyStack Global
+10:23:02 <Cale> Usually you want to keep the usage of MonadState/MonadReader/etc. to a minimum -- you should use those operations to define the primitives of the little language you're building, and then forget you had them
+10:23:13 <jpcooper> Is it possible to import the constructors C D of `data T = C | D` while hiding T?
+10:23:26 <Cale> Just because "get" and "put" are so vague
+10:23:56 <nil> Cale: i agree with this
+10:24:11 <jle`> ah so typed-indexed layers
+10:24:16 <Cale> I hate the term "monad stack" in fact
+10:24:17 <nil> but i can't abstract "get" away if i need to choose between "get" and "lift get"
+10:24:23 <nil> jle`: yes
+10:24:39 <nil> Cale: is "functor stack" better? :D
+10:24:42 <Cale> because if you have to think about your monads as being like a stack, you're probably doing it wrong
+10:24:57 <nil> well that's what it is, at least internally
+10:24:58 <jle`> it's still pretty brittle i think and would break if someone sneezes in a weird way
+10:25:05 <Cale> You wouldn't call f (g (h x)) a "value stack" or even a "function stack"
+10:25:07 <jle`> but if you have control over all the code then it's your own headache to manage i suppose
+10:25:08 <nil> but then you probably don't want to think about the internals when using it
+10:25:21 <nil> jle`: yes, that's my perspective
+10:25:30 <jle`> alternatively, you can use a robust method that is just as convenient
+10:25:34 <jle`> and is sneeze-resistent
+10:26:10 <nil> jle`: like what?
+10:26:23 <jle`> Cale mentioned a way
+10:26:27 <Cale> You might be applying a bunch of transformers at once to make your monad, but there's generally very little code which has to care about how many lifts you need to obtain a particular effect
+10:26:45 <jle`> another way also is like I said, a way to turn a Local state action into a Global state action
+10:26:52 <Cale> and that code should hide the fact that you used monad transformers from you
+10:27:30 <nil> Cale: yeah, maybe this is true.
+10:27:39 <Cale> If you're doing it right, from outside the module where you defined your monad, you usually shouldn't be able to tell if it was defined using monad transformers
+10:27:39 <nil> jle`: i'm trying to process your idea
+10:27:46 <jle`> and yeah, a class with both a getLocal and a getGlobal
+10:27:52 <Cale> (even if it is itself a monad transformer)
+10:28:21 <Cale> Often there are even better operations you can define than get and put
+10:28:34 <jle`> nil: so you would write your code in terms of what state you need specifically for that code
+10:28:41 <Cale> Like, why are you carrying the state around? Is there something more semantically meaningful than reading/writing directly?
+10:28:45 <jle`> nil: and you can 'run' one in the other, by doing state transforming
+10:28:52 <nil> jle`: i don't see how you would write a `StateT Local m a -> StateT Global m a` lifter
+10:29:25 <jle`> hm, I can, but i think that might actually be in the opposite direction you are looking for
+10:29:46 <Cale> No, that's probably the direction you'd want, and it makes sense.
+10:29:51 <jle`> but actually I'm not quite sure what you are looking for either
+10:30:02 <Cale> Lens has the zoom stuff
+10:30:04 <jle`> the description of the problem is that 'local' state functions are supposed to be able to access global state
+10:30:12 <Cale> Or you could just write it by hand
+10:30:45 <nil> yeah, it's not so clear, my apologies. i'm not entirely sure myself what exactly i need, i'm still in the thinking phase
+10:30:57 <nil> but you've given me plenty of ideas to think about, so thanks
+10:31:13 <jle`> :t \x -> StateT $ \(s,t) -> fmap (,t) <$> runStateT x s
+10:31:14 <lambdabot> Functor m => StateT t1 m a -> StateT (t1, t2) m a
+10:31:33 <Cale> Think about which operations you want first, and then worry about maybe how to use a monad transformer to implement the thing.
+10:31:39 <nil> oh, so integrating one type inside the other
+10:31:39 <jle`> nil: yeah, if you're still not sure what you need now, try taking a path that doesn't explode with the slightest disturbance
+10:32:13 <jle`> because halfway down the line you might realize that this super fragile method doesn't work for you and you end up taking hours to debug and then hours to re-write
+10:32:37 <jle`> or weeks to rewrite, if it's a large project
+10:32:56 <jle`> and trust me, you don't want to be fighting instance resolution
+10:33:04 <nil> :D
+10:33:17 <nil> especially if it's incoherent
+10:33:30 <jle`> debugging overlapping and deep instance resolution is a nightmare in haskell because instances are global magic that work outside the language
+10:34:13 <nil> isn't there a ghc flag that makes instance resolution verbose?
+10:35:05 <Cale> Probably...
+10:35:22 <Cale> (but the secret is just to avoid overlapping instances altogether as much as you can)
+10:36:39 <Cale> There is one case in which I think overlapping instances are 100% fine: when you don't export the class from the module it's defined in. :)
+10:37:09 <jle`> i remember one of my first libraries relied on a weird overlapping instance trick ... and was fragile and broke every time someone actually used it (worse because it's a library so people imported it to write applications, so i don't have control over instances)
+10:37:10 <nil> well, that's my case.
+10:37:16 <EvanR> sm[m]: i sent it to the author's email... though maybe i came on too strong
+10:37:31 <EvanR> i got very little positive feedback in general :)
+10:37:45 <jle`> nil: if you do'nt export the class from the module it's defined in, does that mean everything takes place in one module?
+10:37:55 <Cale> nil: Well, your case was discussing MonadState, wasn't it? MonadState is already publicly available.
+10:37:58 <EvanR> sm[m]: i mean, i never heard back from them
+10:38:02 <sm[m]> a PR could be effective
+10:38:17 <nil> er, sorry, yeah.
+10:38:33 <EvanR> sm[m]: in the present era though, it needs some gold plating :)
+10:38:57 <EvanR> and it's opinionated
+10:39:20 <sm[m]> and if not, then plan B.. ? add to the haskell wiki and lambdabot and relentlessly share it here I guess
+10:39:23 <Cale> Basically, OverlappingInstances lets you do certain type-level computation stuff which is okay, it's just that if you export the class, future modules can mess with how that computation proceeds in a way that can get really confusing quickly.
+10:39:27 <nil> isn't there a way to mark an instance so that it's not exported with the module?
+10:39:35 <Cale> No.
+10:39:41 <Cale> Instances are always exported
+10:39:44 <Cale> and always imported
+10:39:46 <nil> ok
+10:39:47 <EvanR> sm[m]: good plan. Checking if my wiki account still works
+10:39:57 <sm[m]> because even if it's not perfect, this diagram could have saved a lot of pain for folks learning time up to this point
+10:40:06 <nil> jle`: for some value of "everything", i guess
+10:40:13 <EvanR> the wiki feels a little like going through a hoarders house after they died
+10:40:20 <nil> everything i haven't (yet) deemed necessary to split across more modules
+10:40:24 <Cale> This is sort of what I meant by type classes being used to establish global conventions
+10:40:46 <EvanR> sm[m]: it used to be on my github, but the image link broke...
+10:41:01 <Cale> If you don't want a global convention, you can instead just define a record type with fields corresponding to the methods of what would have been your class
+10:41:09 <Cale> and pass those records around
+10:41:09 * hackage advent-of-code-api 0.2.4.1 - Advent of Code REST API bindings and servant API  https://hackage.haskell.org/package/advent-of-code-api-0.2.4.1 (jle)
+10:41:32 <Cale> (a.k.a. good ol' functional programming, a.k.a. object oriented programming, lol)
+10:41:37 <EvanR> haskell: global variables are bad mkay. Use global typeclass instances!
+10:41:49 <EvanR> very global
+10:42:24 <Cale> Of course, for stuff like Monad, that would be obnoxious -- imagine explicitly passing a record around containing (>>=) and return
+10:42:56 <Cale> But in principle it'd work
+10:43:08 <sm[m]> EvanR: if not the wiki, gist.github.com & @remember ?
+10:45:39 <EvanR> i'm the wiki
+10:45:45 <EvanR> i'm in 
+10:46:08 <EvanR> i forgot how this worked
+10:46:50 <EvanR> dude... https://wiki.haskell.org/Time
+10:48:42 <mycroftiv> is there anyone who has an understanding of the codensity monad in a way that can be explained to someone who understands monads but not category theory? or do i need to bite the 'right Kan extension' bullet?
+10:48:44 <EvanR> fixed a typo. My duty is done
+10:48:58 <zacts> hello
+10:49:06 <zacts> can vim be effectively used as a haskell IDE?
+10:49:15 <zacts> or are there other alternatives
+10:49:20 <zacts> I just need fundamental vim keybindings
+10:49:25 <zacts> but I don't mind the implementation
+10:49:33 <Cale> mycroftiv: Well, I would say just look at the definition in that case and ignore the explanation
+10:49:46 <EvanR> you just need vim keybindings. Well ... there's vim
+10:50:30 <Cale> mycroftiv: newtype Codensity m a = Codensity { runCodensity :: forall b. (a -> m b) -> m b }
+10:51:23 <Cale> Note that any m action can be turned into a Codensity m action, by just partially applying (>>=)
+10:51:26 <mycroftiv> Cale: thanks, good advice to work with the code rather than just the concepts, found some very interesting papers linking the codensity monad to ultrafilters but I dont have the category theory to get it yet. i know it has some relation to continuations and is used as an optimization
+10:51:38 <sm[m]> EvanR: not at all, I don't see your image on that page
+10:54:19 <Cale> mycroftiv: Does my remark there make sense? I mean, you can have  lift :: m a -> Codensity m a  defined as  lift x = Codensity (x >>=)
+10:54:38 <Cale> and that gives you a way to think about what the type there means
+10:55:25 <Cale> It's like, something that if you gave it the right-hand function argument to (>>=), it would be able to finish the m-action for you.
+10:56:08 <Cale> Are you aware of the trick for concatenating strings where you instead compose functions?
+10:56:41 <Cale> (like ShowS and DList)
+10:56:46 <mycroftiv> Cale: that does help, it clarifies the relation to continuations. Im not sure if I know the specific trick you are talking about but it I understand continuation passing so I think I see what you are getting at
+10:57:24 <EvanR> sm[m]: ... ok ... i slapped it up there
+10:58:06 <Cale> So, if you have an algorithm which does a lot of (++) on lists, it can result in quadratic-time behaviour because xs ++ ys takes O(length xs) time to fully evaluate
+10:58:46 <Cale> So, sometimes it can be effective to temporarily replace the type [a] with the type [a] -> [a], where we'll use the convention that a list corresponds to the function which would add its elements to some given list
+10:58:57 <Cale> and so [] becomes id
+10:59:02 <Cale> and [x] becomes (x:)
+10:59:07 <Cale> and (++) becomes (.)
+10:59:19 <mycroftiv> aha yeah! awesome
+10:59:22 <Cale> and since (.) is constant time rather than linear time, this can speed things up
+10:59:30 <Cale> e.g.
+10:59:34 <Cale> reverse [] = []
+10:59:44 <Cale> reverse (x:xs) = reverse xs ++ [x]
+10:59:48 <Cale> can turn into
+10:59:52 <Cale> reverse' [] = id
+11:00:01 <Cale> reverse' (x:xs) = reverse' xs . (x:)
+11:00:04 <Cale> and then
+11:00:13 <Cale> reverse xs = reverse' xs []
+11:00:24 <Cale> linear time instead of quadratic
+11:00:53 <Cale> This codensity thing can be like the same trick, but for monadic compositions.
+11:02:29 <mycroftiv> Cale: this is starting to really crystallize, great explanation
+11:04:00 <sm[m]> EvanR: nice, how about this minor edit moving it below intro: https://wiki.haskell.org/Time
+11:04:51 <EvanR> cool
+11:06:07 <sm[m]> why is lambdabot's help so bad
+11:06:23 <sm[m]> all I want is a list of commands.. is that so hard <sob>
+11:07:24 <mycroftiv> Cale: thanks a lot for the explanation, my context is trying to get a glimmer of what is going on in this Leinster paper https://arxiv.org/abs/1209.3606 on "Codensity and the Ultrafilter Monad" , if you take an interest in the pure math side
+11:07:53 <EvanR> security by obscurity
+11:07:54 <Cale> ah, yeah, that's a whole other perspective :D
+11:09:16 <sm[m]> it's hilarious. It's like a sadistic pre-infocom text adventure game
+11:09:43 <Cale> sm[m]: hahahaha
+11:09:47 <mycroftiv> Cale: right, its very interesting that this technique that was originally worked out as 'this will be a useful programming technique' turns out to correspond to an almost notoriously challenging abstract math concept
+11:09:58 <sm[m]> I give up.. how do you save a url for @where ?
+11:10:26 <nshepperd1> You are in a maze of twisty lambdabot commands, all different
+11:10:52 <Cale> @help where+
+11:10:52 <lambdabot> where+ <key> <elem>. Define an association
+11:11:02 <sm[m]> if you'd like to play: I challenge you to find out the answer to the above question, from lambdabot :)
+11:11:10 <mycroftiv> Cale: which i am seeing happens a surprising amount of the time, i was stuck in math understanding for a long time until i started to get into functional coding and curry-howard interpretation, and all of a sudden tons of math vocabulary is clarified as 'oh, its just code that does such-and-such'
+11:11:16 <Cale> Personally, I just browsed to https://github.com/lambdabot/lambdabot/blob/master/lambdabot-reference-plugins/src/Lambdabot/Plugin/Reference/Where.hs
+11:11:22 <Cale> in order to know the solution
+11:11:31 <boxscape> the intended way is to run
+11:11:34 <boxscape> @list where
+11:11:34 <lambdabot> where provides: where url what where+
+11:11:44 <sm[m]> ack, spoiler!
+11:13:41 <Cale> mycroftiv: Yeah, I think there's a lot which both sides of that bridge can learn from each other. It's interesting how far the Curry-Howard correspondence goes -- even to structural things like software engineering discipline / how we structure our presentation of areas of mathematics
+11:14:02 <sm[m]> well, now we can get to the wiki page and EvanR's cheatsheet with @where time
+11:14:38 <Cale> But time is like... everywhere dude
+11:14:45 <EvanR> @where time
+11:14:46 <lambdabot> https://wiki.haskell.org/Time
+11:20:43 <boxscape> @what time
+11:20:43 <lambdabot> https://wiki.haskell.org/Time
+11:20:52 <boxscape> hm seems like that should just tell you the time
+11:21:26 <MarcelineVQ> @which time
+11:21:26 <lambdabot> Unknown command, try @list
+11:21:30 <MarcelineVQ> or is it
+11:22:23 <lavalike> @when time
+11:23:59 <ski> @time lambdabot
+11:24:01 <sm[m]> EvanR: alright if I add your nick there for updates ? otherwise it's just a dead image
+11:24:14 * ski blinks
+11:25:06 <Zemyla> Oh good, I thought I was the one who had broken lambdabot.
+11:25:36 * ski recalls that working in the past
+11:26:57 <monochrom> @snap monochrom
+11:27:15 <monochrom> Oh oops, nevermind!
+11:27:36 <phanimahesh> Our overlords deem us unworthy and have left us
+11:29:07 <monochrom> Oh hey https://wiki.haskell.org/Time looks like pretty good.  We need to cite it more whenever someone asks or even complains about our time package.
+11:30:26 <sm[m]> EvanR: I did it.. edit if needed
+11:31:53 <EvanR> oh man
+11:32:29 <EvanR> you implicated me in this
+11:32:31 <sm[m]> hehe
+11:32:42 <phanimahesh> yeah it looks good
+11:32:43 <EvanR> i liked it the way it was earlier
+11:33:20 <phanimahesh> I'll go sleep. See you all fine folks in the morning.
+11:33:32 <sm[m]> keep the image anonymous ? Fair enough.. it just means that nobody will ever update it, which seems a loss
+11:33:59 <sm[m]> monochrom: agreed.. and more cleanups to that page welcome, all. We should use the wiki to consolidate more instead of repeating it in here ad infinitum
+11:34:12 <monochrom> Then I just have to "sudo -i -u nobody" and then I can edit it, is that right? >:)
+11:34:17 <sm[m]> (advice)
+11:34:43 <EvanR> i just broke it
+11:35:36 <EvanR> i was trying to put a link to the github source for the diagram
+11:36:44 <sm[m]> EvanR: page still looks fine to me, try harder to break it :)
+11:37:50 <sm[m]> https://www.mediawiki.org/wiki/Help:Links#External_links
+11:38:53 <EvanR> i didn't notice it asking me to do a computation
+11:38:59 <EvanR> i'm basically a bot
+11:39:12 <EvanR> link added 
+11:41:16 <sm[m]> not seeing it yet..
+11:41:28 <EvanR> it's on the page for the picture
+11:41:56 <sm[m]> oh, interesting. nice.
+11:42:08 <sm[m]> thanks for cheatsheet EvanR
+11:42:16 <EvanR> huzzah
+12:17:59 <nil> <Cale> mycroftiv: Yeah, I think there's a lot which both sides of that bridge can learn from each other. It's interesting how far the Curry-Howard correspondence goes -- even to structural things like software engineering discipline / how we structure our presentation of areas of mathematics 
+12:18:02 <nil> can you elaborate on that?
+12:50:39 * hackage atomic-write 0.2.0.7 - Atomically write to a file  https://hackage.haskell.org/package/atomic-write-0.2.0.7 (juanpaucar)
+12:52:00 <refusenick> I'm giving up and switching to Stack. All the Emacs stuff assumes it by default.
+12:52:14 <refusenick> Do I need to reinstall ghcide for every project if I use Stack?
+13:05:57 <Pranz[m]> refusenick: not if you use the same compiler version for every project
+13:29:41 <monochrom> I'm using haskell-mode and maybe in the future dante, but neither assumes stack.
+13:30:30 <monochrom> But life is full of giving up.
+13:31:03 <monochrom> For example by choosing haskell-mode I'm giving up on intero and stack (and even without trying).
+13:32:52 <glguy> intero's maintainer is giving up on intero, so you're in good company: https://github.com/chrisdone/intero/blob/master/README.md
+13:33:03 <monochrom> Oh heh
+13:36:34 <refusenick> monochrom: Do you use flycheck? How do you have it set up?
+13:36:43 <monochrom> I don't use flycheck.
+13:36:49 <refusenick> What do you use?
+13:36:53 <monochrom> haskell-mode
+13:37:49 <monochrom> C-c C-r
+13:40:04 <monochrom> I add -fdefer-type-errors so ghci is still helpful even when I have type errors or variable-not-found
+13:40:32 <juri_> when did new-install show up in cabal?
+13:40:37 <nil> why is there no Control.Monad.Writer.CPS module in mtl?
+13:40:46 <monochrom> (Before I learned of -fdefer-type-errors, I ran ghcid on the side.)
+13:41:09 <monochrom> I don't think mtl provides any CPS at all.
+13:41:56 <nil> i mean, the Control.Monad.Writer.* modules only reexport the modules from transformers along with mtl's typeclasses, right?
+13:42:03 <monochrom> Yes.
+13:42:37 <nil> so why not do that for CPS too?
+13:42:39 <monochrom> No. mtl also hides some things from transformers.
+13:43:04 <monochrom> Perhaps economics? i.e., no one got around to do it?
+13:43:07 <refusenick> Pranz[m]: So, if I install ghcide globally and always run "stack init && stack config set system-ghc true" when starting a project, I won't have to reinstall ghcide and ghc for every project?
+13:43:18 <nil> weird.
+13:43:37 <monochrom> Economics explains everything unexplained by technical possibilities.
+13:43:38 <dcoutts> juri_: I think I started writing it Summer 2016.
+13:43:54 <dcoutts> juri_: or do you mean the 'install' command specifically?
+13:44:29 <nil> hm. http://hackage.haskell.org/package/writer-cps-mtl-0.1.1.6
+13:44:56 <juri_> dcoutts: Just trying to put an epoch on a pair of makefiles, one for before that, one after. :)
+13:45:12 <juri_> dcoutts: looks like i'm looking for '1.24'.
+13:46:11 <monochrom> I don't know whether there will ever be a 1.25, but if you use "< 2" you're safe.
+13:46:15 <juri_> dcoutts: so thanks for thoroughly making a dumpster fire out of my Makefile. oh, and also for the new features and less suckiness and such. :)
+13:51:45 <nil> oh, the "Strict" WriterT actually only uses normal patterns instead of lazy patterns
+13:52:01 <nil> i guess they should be called Lazy/Lazier instead of Strict/Lazy :D
+13:53:09 <monochrom> Similarly for StateT.
+13:53:31 <nil> oh
+13:54:14 <nil> so using State.Strict instead of State.Lazy has no performance benefits either? or am i misunderstanding?
+13:54:59 <sm[m]> refusenick: try it and see ? But doesn’t  forcing use of system ghc defeat stack’s attempting to use one that’s right for each project ?
+13:55:00 <monochrom> I won't talk about performance benefits without context. Double-edged sword.
+13:55:44 <nil> ok, fair. the description of State.Strict sums up my understanding: "In this version, sequencing of computations is strict (but computations are not strict in the state unless you force it with seq or the like)."
+13:56:16 <monochrom> Yeah.
+13:57:10 <monochrom> Here is an example to show the difference.  loopy = do { xs <- loopy; return (0:xs) }.
+13:57:21 <refusenick> sm[m]: I just want to try Haskell snippets interactively and install packages. I tried Cabal, but everything in Emacs assumes Stack (e.g. flycheck).
+13:58:06 <monochrom> Hell I don't even want to use the word "performance".
+13:58:07 <refusenick> Why does Haskell try to fill up my entire hard drive?
+13:58:24 <monochrom> How big is your hard drive?
+13:58:31 <refusenick> 450gb
+13:58:39 * hackage nix-deploy 1.0.4 - Deploy Nix-built software to a NixOS machine  https://hackage.haskell.org/package/nix-deploy-1.0.4 (GabrielGonzalez)
+13:58:42 <monochrom> OK it shouldn't.
+13:58:43 <refusenick> That or 320, I forget
+13:59:06 <monochrom> But I know that stack may fill up your entire hard drive.
+13:59:32 <refusenick> It's all the same.
+13:59:43 <monochrom> stack does not represent haskell.
+13:59:48 <monochrom> fake representative
+14:00:12 <refusenick> Then, is there a sane package manager for Haskell?
+14:00:27 <refusenick> I'm not installing Nix atop my existing distro
+14:00:33 <Eduard_Munteanu> apt-get? :P
+14:00:55 <monochrom> People disagree on the definition of "package manager" but I use cabal-install just fine and it's sane.
+14:01:29 <monochrom> I don't use nix either, don't worry.
+14:01:32 <refusenick> Unfortunately, Emacs doesn't like Cabal. Time to submit an issue, I suppose.
+14:01:48 <monochrom> haskell-mode works just fine with cabal-install.
+14:01:49 <nil> monochrom: running that in GHCi with either State.Strict or State.Lazy hangs without outputting anything
+14:02:05 <nil> i thought the Lazy version would output zeroes
+14:02:19 <monochrom> It should. It does. It will.
+14:02:44 <nil> oh wait. i was using runStateT instead of runState
+14:02:53 <nil> i don't know why that changes anything
+14:02:54 <monochrom> evalState should work best.
+14:03:41 <geekosaur> nil: because in ghci, it'll assume it's a transformer over IO, which is strict
+14:03:47 <monochrom> > let {loopy = do { xs <- loopy; return (0:xs) }} in evalState loopy ()
+14:03:49 <lambdabot>  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0...
+14:04:00 <nil> geekosaur: oooh.
+14:05:05 <monochrom> For a more interesting example:
+14:05:27 <monochrom> > let {loopy = do { x <- get; put (x+1); xs <- loopy; return (x:xs) }} in evalState loopy 0
+14:05:29 <lambdabot>  [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,2...
+14:05:38 <monochrom> Almost magical.
+14:05:54 <monochrom> Most confusing way to write [0..]
+14:06:20 <nil> nice
+14:06:25 <iqubic> How do you even get to the return?
+14:06:36 <monochrom> Magic. Or laziness.
+14:06:39 <nil> using the power of laziness
+14:06:46 <iqubic> Does the "xs <- loopy" cause infinite recursion?
+14:06:52 <monochrom> Yes.
+14:07:20 <monochrom> Does "zs = 0 : zs" cause infinite recursion too? Yes too.
+14:07:52 <nil> > let xs = 0 : map (+1) xs in xs
+14:07:55 <lambdabot>  [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,2...
+14:07:57 <iqubic> > let zs = 0 : zs in zs
+14:08:00 <lambdabot>  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0...
+14:08:03 <iqubic> I see.
+14:08:38 <monochrom> "infinite recursion" is true but irrelevant.
+14:08:48 <iqubic> Why are ASTs a pain in the butt to work with?
+14:08:59 <monochrom> is not.
+14:09:00 <dsal> Pain in the AST?
+14:09:05 <monochrom> hahaha
+14:09:27 <iqubic> I'm trying to write a library for symbolic manipulation.
+14:09:38 <iqubic> It's not the easiest thing in the world.
+14:10:01 <monochrom> What's the easiest thing in the world?
+14:10:08 <iqubic> Not sure.
+14:10:13 <iqubic> Sleeping maybe?
+14:10:20 <monochrom> I agree.
+14:10:24 <iqubic> @quote jle` zzz
+14:10:24 <lambdabot> jle` says: let sleep = pure "zzz" in getSum sleep
+14:10:32 <Eduard_Munteanu> It might be annoying to write AST expressions by hand, but otherwise most manipulations of terms come naturally.
+14:10:33 <dsal> Sleeping is pretty hard.  Lots of books on sleep
+14:10:33 <MarcelineVQ> blinking
+14:10:53 <iqubic> Eduard_Munteanu: You'd think that, but I'm not seeing it.
+14:11:04 <koala_man> fizzbuzz
+14:11:11 <iqubic> See my troubles here: http://dpaste.com/35FQC96
+14:12:06 <monochrom> Algebraic simplication is inherently hard.  So many corner cases.
+14:12:15 <iqubic> Combining like terms here is just a pain.
+14:12:39 <iqubic> I have halted production on this library because I can't find a good way to combine like terms.
+14:12:56 <Eduard_Munteanu> Well, the algorithmic bits might be tricky.
+14:13:16 <monochrom> But ADT is already the least hard approach.
+14:13:24 <iqubic> Yeah. I've found that.
+14:14:09 <boxscape> the examples look very lispy
+14:14:12 <iqubic> I was considering having Add, Sub, Mul, and Div, take a list of Expr instead, but I'm not sure if that will work.
+14:14:19 <monochrom> If you did it with OOP, you would be emulating ADT in OOP, which is even worse (more boilerplates).
+14:14:23 <nil> i think it would be easier with Add [Expr] and so on
+14:14:36 <monochrom> And if you did it in C with unions, it would downright segfault.
+14:14:40 <iqubic> boxscape: I only did that to show the tree structure.
+14:14:59 <iqubic> monochrom: My issue here is that I don't know how to easily combine like terms.
+14:15:12 <iqubic> Actually, I don't know how to do it at all.
+14:15:22 <nil> iqubic: how would you do it, by hand, on paper?
+14:15:31 <Eduard_Munteanu> You should probably look for an algorithm first.
+14:15:34 <monochrom> I wonder if the real problem is you don't know what to do.
+14:15:50 <iqubic> monochrom: That is correct.
+14:15:53 <TheCommieDuck> I feel like this should be easy but I can't work out how to make the lenses agree. https://pastebin.com/BvRQbUy4 I can't get the syntax quite right for trying to do the transitive functions on lenses
+14:15:54 <monochrom> Can you define "combine" "like" terms, mathematically?
+14:16:20 <iqubic> Not easily.
+14:16:48 <monochrom> Write that definition first so you won't be pulling a moving-goal-post on yourself.
+14:17:13 <boxscape> just spitballing here but maybe it would help if instead of using "Add Expr Expr" you had "Add (OrderedList Expr)"?
+14:17:40 <iqubic> I suppose it might.
+14:18:32 <sm[m]> refusenick: fwiw ghcide/flycheck seems to be working quite well for me. As for evaluating snippets, I just type in ghci.
+14:18:33 <Eduard_Munteanu> TheCommieDuck, usually you combine lenses with (.)
+14:19:30 <TheCommieDuck> Yeah, I know; I just can't work out how I'm meant to...somehow pattern match away the outer level (ABUnif) constructors?
+14:19:59 <iqubic> Boxscape: But if I did it that way, I'd need a function to 'flatten' a set of nested add expressions. Add [Add [a, b], c , Add [d, e]] == Add [a, b, c, d, e]
+14:20:06 <boxscape> yeah
+14:20:16 <Eduard_Munteanu> Ah.
+14:21:39 <iqubic> And I'm not sure which pain is worse. The pain of flattening a the list based AST, or the pain of dealing with a binary AST.
+14:22:18 <monochrom> Do both. Then you'll know.
+14:22:40 <monochrom> "Only two ways to find out."
+14:22:42 <Eduard_Munteanu> TheCommieDuck, it depends on whether you want to set AUnif/Other or just the inner X.
+14:22:45 <boxscape> Way I see it, flattening is something you have to do once, and then you can try all your other transformations on the flattened list, whereas if you have Add Expr Expr you need the flattening logic anyway, but apply it with transformation separately. I don't know if that's really how it works out in practice though.
+14:22:50 <TheCommieDuck> I'm trying to read --dd-splice to work out the structure I need. I think it's something like instance HasX AUnif t where _x = case of...?
+14:23:24 <TheCommieDuck> I'd want to get/set on the inner X in the same way I'd get or set 'normal' (simple) lenses
+14:23:47 <iqubic> monochrom: I've tried working with the Binary Tree style. I don't like it.
+14:24:37 <iqubic> Now, is there some sort of data structure that will give me sorted, non-empty lists, or will I have to write that myself?
+14:25:36 <boxscape> iqubic data-ordlist has operations for ordered lists but apparently uses the default list type for it. That said, you could make it work with empty lists too, as long as Add [] = 0 and Mult [] = 1
+14:25:50 <monochrom> I suggest the academic-type old-school no-royal-road instant-degratification turn-off approach.  I suggest getting a book on "term rewriting", taking half a year (or more) to study it, then coming back to this.
+14:26:03 <nil> lol
+14:26:16 <monochrom> I speak from personal experience. It's the only way that worked for me.
+14:26:33 <iqubic> boxscape: How would I handle subtraction and division?
+14:26:52 <iqubic> Sub [] = 0 and Div [] = 0?
+14:27:10 <monochrom> There was a time, when I was relatively uneducated, I played minesweeper and I played Clue, and then I thought, I wanted to write an algorithm that plays minesweeper, I wanted to write an algorithm that plays Clue.
+14:27:23 <monochrom> Then I found out I didn't even know where to start.
+14:27:41 <boxscape> iqubic personally I would just do Add [4, -5] to subtract something and Mult [4, Inverse 5] to divide, but there are many ways, probably
+14:27:57 <iqubic> boxscape: I'm thinking I might just do it that way too.
+14:28:07 <nil> iqubic: i'd suggest to get rid of them, and instead represent a - b as a + (-b) and a/b as a * b^-1
+14:28:09 <monochrom> Some years later, I took a couple of advanced CS courses, like those mentioning SAT and the Davis-Putnam algorithm.  Then I finally knew where/how to start.
+14:28:33 <nil> snap, boxscape is faster than me
+14:28:37 <monochrom> If you're uneducated you're unlikely to be ready to solve those problems.
+14:28:57 <boxscape> where's the fun in spending half a year reading academic papers when you could spend 5 years figuring it out by yourself? :)
+14:30:13 <Eduard_Munteanu> TheCommieDuck, you can write a HasX instance or just write a lens for the inner X.
+14:30:25 <monochrom> In fact you may have two ADTs, one for external, one for internal.
+14:30:33 <boxscape> I actually do think it's generally a good idea to just start out by trying and seeing how far you can get, even if you end up not getting very far
+14:30:44 <monochrom> Even GHC has, like, 4 ADTs.
+14:30:57 <nil> only 4?
+14:31:02 <Eduard_Munteanu> TheCommieDuck, see https://hackage.haskell.org/package/lens-4.18.1/docs/Control-Lens-TH.html for the definition of Has...
+14:32:13 <TheCommieDuck> I've been staring at that page, I'll give it another go
+14:35:11 <TheCommieDuck> I guess I'm just stuck at trying to unwrap constructors in the typeclass instance
+14:35:26 <TheCommieDuck> (since it's working in lenses, not the types)
+14:37:14 <TheCommieDuck> I suppose it's "How can I make a lens from both halves of a prism" or something.
+14:56:08 * hackage rib 0.4.1.0 - Static site generator using Shake  https://hackage.haskell.org/package/rib-0.4.1.0 (sridca)
+14:56:14 * srid smiles
+14:58:35 <Axman6> :o
+15:09:19 <EvanR> "the belief that optics are useful as an abstract concept, and that the purpose of types is to capture abstract concepts and make them useful"
+15:09:54 <EvanR> the sphinx, he's terribly mysterious
+15:18:49 <koz_> Is there some way pre-cooked function for taking two Texts, and telling me their common prefix ("" if they start with different symbols)?
+15:19:42 <koz_> s/common/longest common/
+15:19:47 <Axman6> I believe there is
+15:20:24 <koz_> commonPrefixes appears to do what I wish.
+15:40:12 <EvanR> i'm very impressed with the optics API docs
+15:40:57 <Axman6> as in the optics library or lens' optics?
+15:42:24 <EvanR> optics the library
+15:43:05 <boxscape> so, if I'm understanding this right, a hylomorphism is an anamorphism followed by a catamorphism. Is there the opposite, i.e. a recursion scheme that's a catamorphism followed by an anamorphism?
+15:45:56 <Clint> boxscape: can you think of an example?
+15:47:04 <boxscape> Clint I'm trying to apply a function to every node in a tree, altering the structure of the node contents, and that seemed initially like it might be what I needed but upon thinking about it more probably not
+15:47:28 <boxscape> that said I'm very not firm with recursion schemes at this point
+15:52:50 <boxscape> as a more concrete example, if I have `data TreeF a r = LeafF | NodeF a r a`, I'm wondering what recursion scheme I need to swap the left and right child of every node
+15:53:09 * hackage timers-tick 0.4.2.0 - tick based timers  https://hackage.haskell.org/package/timers-tick-0.4.2.0 (fffaaa)
+15:55:02 <boxscape> (should be `NodeF r a r` actually)
+15:56:20 <boxscape> It looks like I can do it if I just use cata and build up the Tree again while destroying it
+15:56:29 <EvanR> just a catamorphism right
+15:56:32 <boxscape> ok
+15:57:25 <boxscape> kinda feels like the sort of thing where there would be a scheme that abstracts out the building up again part but maybe not
+15:57:38 <EvanR> \reversedL x reversedR -> NodeF reversedR x reversedL
+15:58:04 <EvanR> (for the NodeF case)
+15:58:26 <boxscape> I think the NodeF has to have Fix as well? Unless I'm doing things slightly differently
+15:59:06 <EvanR> why Fix
+15:59:26 <boxscape> I have this https://pastebin.com/GhB9yrRv EvanR
+16:00:25 <boxscape> where type Tree a = Fix (TreeF a)
+16:01:34 <EvanR> ok
+16:01:56 <EvanR> newtype
+16:02:01 <EvanR> er
+16:02:16 <EvanR> yeah looks right
+16:02:21 <boxscape> ok
+16:06:38 * hackage ansi-terminal-game 0.6.1.0 - sdl-like functions for terminal applications, based onansi-terminal  https://hackage.haskell.org/package/ansi-terminal-game-0.6.1.0 (fffaaa)
+16:21:40 <koz_> Does the language-c library, upon ingesting a C file, throw away indentation information?
+16:59:55 <boxscape> is there some sort of lens operator that lets you apply one function on prism contents if a Prism matches and another on the whole object if it doesn't? i.e. something like `Prism' s a -> (s -> b) -> (a -> b) -> b
+17:01:03 <EvanR> well there's
+17:01:06 <EvanR> :t matching
+17:01:08 <lambdabot> APrism s t a b -> s -> Either t a
+17:01:15 <boxscape> ah, yeah that should help, thanks
+17:01:27 <boxscape> I think I saw that function in the docs and assumed from the name that it would return a Bool
+17:02:56 <koz_> EvanR: Does it have an APL-equivalent infix form? :P
+17:03:11 <edwardk> boxscape: maybe foo bar . preview somePrism
+17:03:23 <edwardk> ^? gives you back the maybe
+17:03:33 <dunce> can some one tell me whats up with these ||  in this deffinition or at least what theyre called
+17:03:37 <boxscape> ah nice, thanks edwardk
+17:03:40 <dunce> can_succeed [] s
+17:03:43 <dunce>  = naccept nfa s || any (can_succeed []) (ntransit nfa s Nothing) 
+17:03:49 <edwardk> :t (||)
+17:03:50 <lambdabot> Bool -> Bool -> Bool
+17:03:51 <koz_> dunce: Logical IOR.
+17:03:54 <edwardk> > True || False
+17:03:56 <lambdabot>  True
+17:03:59 <koz_> Also hi edwardk!
+17:04:00 <edwardk> > False || False
+17:04:03 <lambdabot>  False
+17:04:04 <edwardk> heya koz_ 
+17:04:27 <koz_> I'm writing Haskell. At work!
+17:04:50 <edwardk> koz_: gratz!
+17:04:55 <koz_> edwardk: Thank you!
+17:04:56 <edwardk> me too =)
+17:04:59 <dunce> oh
+17:05:01 <dunce> i get it now
+17:05:02 <dunce> sorry
+17:05:03 <koz_> edwardk: We knew that. :P
+17:05:16 <dunce> he wrote it after a return so i thought it was related to |
+17:05:22 <dunce> not like a || b
+17:07:34 <koz_> edwardk: I thought you were doing Kotlin stuff these days?
+17:07:37 <koz_> Or has that changed?
+17:11:07 <jusss> a typeclass can be an instance of another typeclass?
+17:11:52 <edwardk> koz_: i have been writing a bit of kotlin for the last 3-4 weeks, but by and large still going strong on haskell
+17:12:00 <koz_> edwardk: Ah, cool.
+17:12:13 <edwardk> jusss: yes, though there aren't many such things that anybody would use
+17:12:43 <jusss> edwardk: class Monad m => MonadCont m where   callCC :: ((a -> m b) -> m a) -> m a,  this one is?
+17:13:11 <edwardk> that is saying that Monad is a superclass of MonadCont
+17:13:22 <edwardk> not quite what you said
+17:13:49 <edwardk> the thing you said, is also technically possible, but you won't need for a very long time
+17:13:49 <jusss> can you give me an example? about typeclass as an instance
+17:14:09 * hackage ats-pkg 3.4.0.1 - A build tool for ATS  https://hackage.haskell.org/package/ats-pkg-3.4.0.1 (vmchale)
+17:14:17 <koz_> MonadCont - the reason we can't have nice things. :P
+17:15:00 <edwardk> newtype Age = Age Int; now there should implicitly be a of not just Coercible Age Int and Coercible Int Age, but also instance Coercible (Coercible Age) (Coercible Int)
+17:15:14 <edwardk> because Coercible itself has representational role arguments
+17:16:22 <jusss> if Monad is a superclass of MonadCont, then the instances of MonadCont should implement >>=, but I can't find >>= from http://hackage.haskell.org/package/mtl-2.2.2/docs/src/Control.Monad.Cont.Class.html#MonadCont
+17:16:34 <jusss> instance MonadCont (ContT r m) where    callCC = ContT.callCC
+17:16:45 <jusss> they implement callCC not >>=
+17:17:30 <edwardk> https://www.irccloud.com/pastebin/dvvTdQ6v/
+17:18:03 <edwardk> jusss: you if you go to write your own MonadCont instance and do not have a Monad instance for the same type it will fail to typecheck
+17:18:05 <EvanR> to be a subclass you don't have to re-implement anything
+17:18:37 <edwardk> and if you needed (Monad m, MonadCont m) => ...    then MonadCont m suffices to pass the Monad m constraint along
+17:18:46 <edwardk> so you don't need to repeat yourself
+17:18:59 <edwardk> this is why you can call fmap on an Applicative, because class Functor f => Applicative f
+17:19:20 <edwardk> and can use (<*>) on a  monad because class Applicative f => Monad f
+17:19:38 <edwardk> this is the sense in which they are "superclasses"
+17:19:44 <koz_> @pl \e a -> (,) <$> e <*> pure a
+17:19:44 <lambdabot> (((,) <$>) .) . (. pure) . (<*>)
+17:19:48 <koz_> Woah lol.
+17:20:13 <EvanR> p. straighforward koz_ 
+17:20:20 <EvanR> code review should go well
+17:20:30 <koz_> EvanR: My colleagues probably wouldn't appreciate that. :P
+17:20:40 <koz_> (they can't read Haskell)
+17:21:40 <edwardk> @pl \e a -> (\x -> (x, a)) <$> e
+17:21:40 <lambdabot> flip ((<$>) . flip (,))
+17:21:48 <EvanR> :t \e a -> (,) <$> e <*> pure a
+17:21:50 <lambdabot> Applicative f => f a1 -> a2 -> f (a1, a2)
+17:21:58 <edwardk> flip (fmap . flip (,)) -- is a little better
+17:22:21 <koz_> True, but I think I'll still write it long-form.
+17:22:24 <edwardk> yeah
+17:22:41 <koz_> I am as much a fan of pointless style as anyone, but if I saw that in a codebase I had to maintain, I'd be looking for a pickaxe.
+17:23:07 <EvanR> well. now i'm not sure i understand why (((,) <$>) .) . (. pure) . (<*>) only wants 2 args
+17:23:30 <jusss> ReaderT r m is an instance of MonadCont, also Monad, is the most instances of Monad can be instances of MonadCont?
+17:23:30 <EvanR> oh
+17:31:27 <dmwit> ?djinn ((a -> r -> b) -> r -> a) -> r -> a
+17:31:27 <lambdabot> -- f cannot be realized.
+17:31:47 <dmwit> ReaderT r m is only an instance of MonadCont if m already is.
+17:32:04 <koz_> It just 'forwards' the MonadCont operations to m, right?
+17:32:07 <dmwit> And yes, the MonadCont operation can be lifted through most transformers.
+17:33:05 <edwardk> ReaderT r m is only an instance of MonadCont if m is an instance of MonadCont,  but it is an instance of Monad for any Monad m
+17:33:24 <edwardk> jusss: ReaderT e Identity for instance is NOT an instance of MonadCont
+17:33:25 <dmwit> ?pl \e a -> flip (,) a <$> e
+17:33:26 <lambdabot> flip ((<$>) . flip (,))
+17:34:36 <edwardk> i usually am willing to use pointless style when i'm only plumbing the last argument someplace obvious and can do it without flip
+17:34:40 <koz_> Dat nested flipping.
+17:35:07 <koz_> edwardk: Sometimes @pl gives me helpful refactoring suggestions. Sometimes it also tells me to stop trying to be too clever for my own good. :P
+17:35:13 <edwardk> yeah
+17:48:39 <jusss> edwardk: instance MonadCont m => MonadCont (ReaderT r m) where callCC = Reader.liftCallCC callCC
+17:53:07 <edwardk> jusss: yes, but that requires m to be MonadCont, not every monad is a MonadCont or can lift it like that
+17:56:03 <koz_> [insert some kind of 'bro do u even lift' joke here[
+17:56:05 <koz_> ]*
+18:34:21 <jared-w> with the right flock of birds, anything is temporarily readable :p
+18:46:11 <koz_> jared-w: Flock of birds?
+18:47:06 <MarcelineVQ> koz_: https://hackage.haskell.org/package/data-aviary
+18:47:22 <koz_> Oh, _those_ birds.
+18:47:56 <jared-w> Yes. My favorite bit about that package is the fact that its changelog includes the line "Removed the "useful" combinators (to emphasize that Data.Aviary is not a utility library)."
+18:48:11 <koz_> LOL
+18:48:13 <koz_> Yeah, saw that.
+18:48:20 <koz_> Speaking of, I was curious about something.
+18:48:39 <koz_> Suppose we took SKI, and removed K. Which of the birds can we get from this?
+18:48:52 <koz_> (so we're not allowed K, or anything that can construct K)
+18:51:09 <koz_> :t on
+18:51:10 <lambdabot> (b -> b -> c) -> (a -> b) -> a -> a -> c
+18:51:16 <koz_> OH LOOK it's psi.
+18:53:34 <koz_> Also, a lot of these are based on bluebird.
+18:53:56 <koz_> dovekie = bluebird bluebird (bluebird bluebird) -- best definition ever
+19:07:37 <maerwald> that reminds me of the wizard monad
+19:08:03 <maerwald> https://hackage.haskell.org/package/wizard-0.1.1/docs/Wizard.html
+19:12:08 * hackage mx-state-codes 1.0.0.0 - ISO 3166-2:MX State Codes and Names  https://hackage.haskell.org/package/mx-state-codes-1.0.0.0 (lysergia)
+19:33:28 <jared-w> A wizard monad is not lazy. It evaluates its thunks precisely when it intends to
+19:53:39 <maerwald> it's called "fantastical evaluation"
+21:40:39 * hackage pandoc-citeproc 0.16.4 - Supports using pandoc with citeproc  https://hackage.haskell.org/package/pandoc-citeproc-0.16.4 (JohnMacFarlane)
+23:43:39 * hackage egison 3.10.0 - Programming language with non-linear pattern-matching against non-free data  https://hackage.haskell.org/package/egison-3.10.0 (SatoshiEgi)

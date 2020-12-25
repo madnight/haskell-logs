@@ -1,0 +1,2302 @@
+00:10:46 <ibid> @type @libsrc
+00:10:47 <ibid> :)
+00:10:47 <lambdabot> parse error on input `@'
+00:35:06 <gaal> hey. I'm having a few FFI problems. context: this works: http://svn.openfoundry.org/pugs/src/Data/Yaml/Syck.hsc
+00:36:26 <gaal> I'm trying to write an emitYaml to complete parseYaml
+00:37:02 <gaal> when setting up callbacks, I'm doing
+00:37:04 <gaal> syck_output_handler emitter =<< mkOutputCallback outputCallback
+00:37:33 <gaal> which ought to be "the same" as
+00:37:33 <gaal> syck_parser_handler parser =<< mkNodeCallback nodeCallback
+00:37:37 <gaal> in parseYaml
+00:38:08 <gaal> But I get this error: Couldn't match `SyckEmitter -> CString -> CLong -> IO ()' against `FunPtr SyckOutputHandler'
+00:39:22 <gaal> why is "IO (SyckEmitter -> CString -> CLong -> IO ())" expected? I'm installing a callback, so I do want FunPtr.
+00:41:23 <gaal> ...anyone know of a largish module that uses FFI and hsc2hs I can study?
+00:42:52 <Cale> hmm
+00:43:01 <Cale> Well, there's gtk2hs
+00:43:25 <Cale> can you paste your module somewhere?
+00:44:12 <Cale> (or put it online in some form?)
+00:44:19 <gaal> what's the preferred nopaste here?
+00:44:45 <Cale> lisppaste2: url
+00:44:46 <lisppaste2> To use the lisppaste bot, visit http://paste.lisp.org/new/haskell and enter your paste.
+00:45:11 <Cale> that works well -- also, there's an IRC Paste Page on the wiki
+00:46:15 <lisppaste2> gaal pasted "a few FFI problems" at http://paste.lisp.org/display/15132
+00:46:59 <gaal> I've added wrappers (near the end) for my callbacks
+00:47:38 <Cale> not -fffi?
+00:48:02 <gaal> what's that? (this is a hsc file, fwiw)
+00:48:33 <Cale> oh, the compiler option to turn on ffi -- I'm not sure, perhaps -fglasgow-exts includes it
+00:49:07 <gaal> ffi is on, because the old code worked :)
+00:50:01 <gaal> let me annotate with my current errors.
+00:50:29 <lisppaste2> gaal annotated #15132 with "compiler errors" at http://paste.lisp.org/display/15132#1
+00:50:33 <Cale> The type of a wrapper stub has to be of the form ft -> IO (FunPtr ft), where ft  may be any foreign type.
+00:51:27 <Cale> my guess is that function types don't count as foreign
+00:51:35 <gaal> yes; SyckOutputHandler and SyckEmitterHandler are both defined in the syck.h file I'm using.
+00:52:07 <gaal> what puzzles me is that the "old" code did this successfully for SyckNodeHandler and SyckErrorHandler
+00:52:22 <Cale> oh, they are
+00:53:01 <gaal> all four of these are "type"d in the haskell code, and are function pointer typedefs in the c header
+00:53:35 <Cale> yeah, and they satisfy the rules for being foreign types
+00:54:01 <Cale> though the compiler seems to be complaining
+00:54:02 <Cale> oh
+00:54:22 <Cale> SyckEmitter -> SyckEmitterHandler -> IO ()
+00:54:43 <Cale> = SyckEmitter -> (SyckEmitterHandler -> IO ())
+00:55:10 <gaal> ah!
+00:55:32 <Cale> maybe...
+00:55:34 <Cale> hmm
+00:56:10 <gaal> yes, that did help :)
+00:56:29 <gaal> thanks. there'll be other problems I'm sure.
+00:57:05 <Cale> the Couldn't match `Int' against `CLong' looks easy to fix
+00:57:30 <flux__> is darcs useful for one person who wants to maintain the same set of sources at two sites?
+00:57:30 <gaal> just a cast, right?
+00:57:54 <Cale> gaal: yeah, just fromIntegral
+00:58:01 <Cale> flux__: yes
+01:00:14 <flux__> I've used cvs for my ~/src, and that has been pretty ok, and svn for some directories, maybe I'll give darcs a shot at that too
+01:17:15 <gaal> the API I'm using wants pointer to be passed as "long"s and not void*s. I have a Ptr at hand; how do I cast it to a long/CLong?
+01:28:30 <Cale> hmm
+01:32:01 <gaal> void syck_emit( SyckEmitter *, st_data_t );   /* st_data_t is typedeffed to long */
+01:32:30 <Cale> and it's really supposed to be a pointer?
+01:33:25 <gaal> let me make sure
+01:33:48 <gaal> yes.
+01:34:21 <gaal> hmmm wait, maybe no. c is so tricky :)
+01:35:03 <gaal> okay. yes, it's really supposed to be a pointer.
+01:36:45 <gaal> what's more: a pointer to memory owned by the haskell side of the code.
+01:37:02 <pejo> shapr, you around?
+01:37:34 <gaal> you'll see there's a freezeNode :: YamlNode -> IO SyckNodePtr that I'm using there
+01:37:48 <gaal> I just have to represent the result of that in a CLong
+01:38:45 <Cale> hmm
+01:41:00 <Cale> I maybe have a way to deal with that, but it's evil. You may want to simply add a C wrapper around that call.
+01:42:28 <gaal> hmmm I work best with demos; where can I find an inlined wrapper such as this? should I just #def it?
+01:42:39 <Cale> ah
+01:42:40 <Cale> okay
+01:42:46 <Cale> actually, I have a safe way
+01:42:53 <Cale> p `minusPtr` nullPtr
+01:42:55 <Cale> that works
+01:43:01 <Cale> and seems to produce the right thing
+01:43:10 <gaal> heh heh. that's evil too :)
+01:43:20 <Cale> not nearly as evil
+01:43:37 <Cale> I'm not even sure if I should show you the evil way :)
+01:43:55 <Cale> but, perhaps I will :)
+01:44:02 <Cale> coerce e = unsafePerformIO $ do {let r = unsafePerformIO (newIORef undefined) in do {writeIORef r e; readIORef r}}
+01:44:09 <Cale> note that coerce :: a -> b
+01:44:20 <gaal> hahaha
+01:44:23 <Cale> Prelude Foreign Data.IORef> coerce p :: Int
+01:44:23 <Cale> 144410264
+01:44:23 <Cale> Prelude Foreign Data.IORef> p `minusPtr` nullPtr
+01:44:23 <Cale> 144410264
+01:44:43 <Cale> unsafePerformIO lets you totally break the type system
+01:45:55 <gaal> @hoogle Int -> CLong
+01:45:56 <lambdabot> Data.Bits.bit :: Bits a => Int -> a
+01:45:56 <lambdabot> Prelude.toEnum :: Enum a => Int -> a
+01:46:03 <Cale> oh, that's just fromIntegral
+01:46:17 <gaal> ah right.
+01:46:53 <Cale> or coerce :)
+01:47:07 <Cale> but I recommend fromIntegral :)
+01:47:12 <gaal> :)
+01:53:12 <gaal> okay, next problem. This won't work because something isn't Storable:
+01:53:13 <gaal> #{poke EmitterExtras, ps}  emitterExtras outps
+01:53:27 <gaal> No instance for (Storable (GHC.ForeignPtr.ForeignPtr Word8))
+01:53:44 <gaal> #def typedef struct _EmitterExtras { char * ps; int l; } EmitterExtras; /* of void *, whatever */
+01:53:56 <gaal> do I need the stablePtr thing again?
+02:06:12 <Cale> hmm
+02:13:15 <takuan> is hugs still being developped?
+02:16:29 <Cale> takuan: yes
+02:16:56 <Cale> gaal: hmm, ForeignPtrs indeed aren't storable
+02:18:14 <Cale> Somehow I doubt that toForeignPtr is really what you want
+02:19:02 <Cale> perhaps useAsCString?
+02:19:13 * gaal looks
+02:19:40 <gaal> hoogle doesn't know about that function
+02:21:42 <Cale> It's in FastPackedString
+02:22:16 <Cale> (how did you find toForeignPtr? that one took me a minute :)
+02:22:32 <gaal> ah, I had that in my vi
+02:23:10 <gaal> I'm not actually convinced I should be using FastStrings here, I only want them for cheaply concatable strings.
+02:23:20 <gaal> okay, here's how syck uses this data pointer
+02:23:34 <gaal> it just does two things with it:
+02:23:55 <gaal> 1. uses it as an opaque key against recursion
+02:24:05 <gaal> 2. passes it back to my own callback function
+02:24:21 <gaal> so it doesn't assume anythign about its referent's structure.
+02:25:42 <gaal> btw I think in the paste from before I was using unsafePackAddress, that's obvisouly wrong
+02:26:50 <gaal> oh, not there, in the outputCallback. I changed that to use packCStringLen.
+02:28:50 <Cale> yeah, you still don't want toForeignPtr though
+02:30:01 <Cale> hmm
+02:30:32 * shapr boings cheerfully
+02:30:40 <gaal> hey shapr 
+02:30:50 <shapr> How's the holidays?
+02:30:53 <shapr> No side-effects I hope?
+02:32:01 <shapr> gaal: Did you ever try Haskore?
+02:33:05 <gaal> I did manage to compile it eventually :)
+02:33:28 <shapr> Did you check out the TMR article?
+02:34:01 <gaal> yes, it's cool! but like I said this time I'm focusing on the practice
+02:34:17 <shapr> ok, just curious.
+02:35:15 <gaal> it's certainly tempting though. I keep wanting to hack weird tonal systems, "transpose" pieces to different intonations, and so on
+02:35:50 <gaal> but it's more important to me to learn to perceive these things musically than intellectually.
+02:36:01 <shapr> Yeah, I'm interested in the twelve tone oriental system, but I don't know much about it.
+02:36:33 <basti_> shapr?
+02:36:37 <basti_> -blah?
+02:36:38 <gaal> 24-tone you mean? :)
+02:36:45 <shapr> Is it 24 tones in an octave?
+02:36:46 <Cale> I'm interested in 17-tone modes, but I also don't know much about them :)
+02:36:55 <shapr> basti_: Bah, we're talking about Haskore ;-)
+02:37:00 <basti_> ah
+02:37:12 <Cale> 12 tones in an octave in Western scales.
+02:37:13 <shapr> gaal: so, um, gee, how hard do you think it would be to make Haskore handle the different systems?
+02:37:25 <shapr> I guess you could parameterize the structure..
+02:37:28 <gaal> too easy :)
+02:37:33 <Cale> Is the idea to emit pitch bends?
+02:39:34 <Saulzar> I thought oriental music had less tones.
+02:39:43 <Cale> There are lots of modes.
+02:40:03 <gaal> Cale: no, things like pythagorean intonation
+02:40:13 <basti_> lets talk about this in -blah better.
+02:40:21 <basti_> this might get voluminous
+02:40:37 <Cale> http://www.xs4all.nl/~huygensf/doc/modename.html
+02:40:44 <gaal> Saulzar: in arabic music there are typically about 7 notes selected out of 24 quater-tones.
+02:40:52 <gaal> basti_: ok
+02:41:00 <basti_> and not at all haskell related. ^^
+02:41:10 <Cale> basti_: it's Haskore related :)
+02:41:12 <Saulzar> gaal, Hmm, so like keys?
+02:41:21 <Cale> Saulzar: like modes
+02:41:27 <takuan> well, it would seem a lot of people here seem to know quite a bit about music
+02:41:31 <Saulzar> I'm pretty sure you can indirectly relate anything :)
+02:41:54 <Cale> The idea is to extend Haskore with the ability to handle other modes.
+02:42:15 <Saulzar> Hmm, what are modes?
+02:42:19 <shapr> takuan: I think the people know a lot about everything. This channel tends to grab people with lots of intellectual curiosity.
+02:42:24 <Cale> Saulzar: http://www.xs4all.nl/~huygensf/doc/modename.html
+02:42:40 <takuan> shapr: that's what I like ;)
+02:42:43 <shapr> takuan: I think the reason is that Haskell is not commercialized, and the ideas are always larger than the code.
+02:42:47 <Saulzar> Ah, was just there - didn't read it yet sorry :)
+02:43:02 <Cale> Saulzar: you might have heard of church modes, like Dorian, Mixolydian, etc.
+02:43:22 <takuan> shapr: that and the fact that Haskell demands quite a bit of a paradigm-shift from "classical" programming
+02:43:27 <shapr> Does the new version of Haskore support this sort of thing?
+02:43:45 <shapr> takuan: Yeah, this channel catches people who enjoy brain stretching.
+02:44:01 <Cale> It would be neat to extend Haskore to deal with arbitrary tuning / intonation systems.
+02:44:23 <shapr> I know the new version has dramatically different internals.
+02:45:04 <pejo> shapr, you were talking about paralellizing things the other day. Nick Benton has a good introduction chapter in his thesis, albeit a bit old by now. 
+02:46:01 <shapr> pejo: Does it discuss parallelism at the language level?
+02:46:19 * shapr asks google
+02:46:57 <pejo> shapr, it talks about strictness and lazy vs strict languages, etc. You might already know that stuff, I just found it well written and thought you might glance over it if you were interested.
+02:47:18 <Saulzar> Hmm, and only the 12 tone modes map onto the musical notes we're familiar with?
+02:47:25 <shapr> Thanks, I appreciate any useful links.
+02:47:27 <Cale> Saulzar: yeah
+02:47:36 <pejo> shapr, http://www.research.microsoft.com/%7Enick/
+02:47:45 <shapr> pejo: Do you have a blog so I can credit you?
+02:48:48 <pejo> shapr, slit den med h‰lsan!
+02:49:19 <pejo> shapr, nah, I don't have much to contribute with, my thoughts are too disorganized to be put in a blog. :-)
+02:54:43 <shapr> Ah, he's into strong normalization.
+02:55:05 <shapr> I have this long list of open questions that I'm not sure where to ask.
+02:55:43 <shapr> Wow, he publish a paper with Hughes and Moggi
+02:56:26 <shapr> I wish I could somehow add a wrapper on the filesystem to include information like what url the file came from, author, etc.
+02:59:55 <Cale> I wish I could figure out how to use subfiles in reiser 4
+03:00:39 <pejo> shapr, www.citeulike.org? :-)
+03:00:58 <shapr> Bah, I want a local list.
+03:01:10 <shapr> Does citeulike work offline on a laptop?
+03:04:34 <pejo> shapr, nah, I guess you need to mirror it in that case, and you'd lose the search capabilities and such.
+03:04:56 <shapr> So I'll keep on trying to finish FLM then :-)
+03:05:48 <shapr> hiya Andrew_P, how's code?
+03:06:40 <Andrew_P> Hello, shapr, what code are speaking of? If you mean my yesterday's CipherSaber implementation, it's in C, not Haskell :)
+03:07:05 <shapr> Well, any code you're writing?
+03:07:31 <Andrew_P> It works well for now, i'm glad :)
+03:08:31 <Andrew_P> Suffered a lot because of C's subtleness, by the way... will learn Haskell, when I'll have some time ))
+03:30:48 <gaal> Cale: still around?
+03:30:56 <Cale> yeah
+03:31:13 * shapr hugs Cale 
+03:31:25 <gaal> so, should I do something like freezeNode to create a stablePointer for my FastString?
+03:32:04 <Cale> gaal: You want to send something to the C code so that it will pass it back to you?
+03:32:06 <gaal> something like what freezeNode does for YamlNodes, that is.
+03:32:08 <gaal> yes
+03:32:18 <dblhelix> yo shapr: how's code?
+03:32:28 <gaal> it doesn't assume anythign about the structure of that something.
+03:32:34 <Cale> Well, if there's a way to get a StablePtr, that seems to be what those are for
+03:32:35 <gaal> but I do. :-)
+03:33:43 * gaal tries that. (I wish this weren't so splippery)
+03:33:53 <gaal> (and that I could type)
+03:35:14 <musasabi> are FastStrings pinned by default?
+03:35:40 <musasabi> if they are then you don't need StablePtr unless that is the only reference to the FastString.
+03:37:43 <gaal> "pinned"?
+03:38:16 <gaal> http://svn.openfoundry.org/pugs/src/Data/FastPackedString.hs
+03:39:23 <shapr> pinned == stable?
+03:39:45 <gaal> possibly, I'm playing this by ear.
+03:39:45 <shapr> I suspect stable/pinned means "memory location will not change as a result of garbage collection."
+03:40:01 <gaal> that's what stable means, at least.
+03:40:03 <shapr> dblhelix: No code, sadly.
+03:40:20 <gaal> :73
+03:40:22 <gaal> oops
+03:40:50 <dblhelix> shapr: ah, too bad... to busy with other stuff? or just a holiday break?
+03:41:04 <shapr> For some reason I have more motivation to write code when I don't advertise it, or when no one is expecting to see more of it or something like that.
+03:41:05 <shapr> I dunno why.
+03:41:26 <shapr> It's like, it's more fun to write just for myself with no expectations? I'm not sure.
+03:41:33 <dblhelix> yeah, sounds familiar
+03:41:39 <Saulzar> Definately
+03:42:05 <shapr> Sometimes when I talk about colo code I've written, all the charm then rubs off that code.
+03:42:09 <shapr> s/colo/cool
+03:42:13 <dblhelix> this week I'm kind of the only one at the office... but, somehow, it makes coding a lot of fun... don't know why exactly
+03:42:43 <Saulzar> No distractions is nice
+03:42:46 <shapr> I do very much enjoy writing on my blog. I am seeing signs of popularity recently though, I wonder if it'll stop being fun when people start reading?
+03:42:55 <dblhelix> Saulzar:  indeed
+03:43:21 <gaal> shapr: hmmm, I think the feed may be broken, because I don't think I'd picked up anything from there recently
+03:43:23 <dblhelix> shapr: I read your blog
+03:43:47 <shapr> I estimate that I have fifty readers. I'm kind of amazed there's so many :-)
+03:43:52 <dblhelix> feed works okay for me... this morning it showed two new entries
+03:43:58 <shapr> dblhelix: Any feedback you want to share?
+03:44:11 <shapr> I know I need to fix the crappy RSS feed...
+03:44:18 <shapr> Anything other than that?
+03:44:31 <Saulzar> It is nice to get feedback, maybe once you have positive feedback you feel your mission is complete :)
+03:44:37 <gaal> nooooo! it was my stupid default filter
+03:44:43 <gaal> it works all right
+03:44:58 <dblhelix> the cd boxes thing sounded familiar... I remember being upset when my gf threw away some of my boxes and being embarrassed for not knowing why it upset me
+03:45:05 <gaal> sorry 'bout that.
+03:45:39 <dblhelix> I'll have to give the piece on free monoids some more thought, I think
+03:45:46 <shapr> dblhelix: Have you read the ritual addiction link?
+03:46:03 <dblhelix> shapr: no, I haven't (yet)
+03:46:15 <basti_> shapr: what link?
+03:46:23 <shapr> It's interesting stuff.
+03:47:35 <shapr> basti_: It's the first link in the first post of http://www.scannedinavian.com/
+03:48:27 <basti_> thanks
+03:49:23 <shapr> gutentag fabs
+03:49:46 <bilkin> how to substitute the occurence of a substring in a string with another string?
+03:50:20 <fabs> hello shapr ;)
+03:50:22 <Stinger> s/to/do you/
+03:50:34 <shapr> dblhelix: It's nice to hear that I'm not the only one with that inexplicable dislike of throwing out useless but pretty stuff.
+03:50:48 * shapr lags horribly
+03:51:01 <bilkin> Stinger: is that haskell?
+03:51:16 <Stinger> heh no, sed :P
+03:51:41 <Stinger> dont know much haskell sorry :P
+03:51:42 <ADEpt> @index index
+03:51:43 <lambdabot> Data.Ix, Data.Array, Data.Array.IArray, Data.Array.Unboxed, Data.Array.
+03:51:43 <lambdabot> MArray, Data.Array.IO, Data.Array.ST, Data.Array.Storable, Data.Array.
+03:51:43 <lambdabot> Diff, Graphics.Rendering.OpenGL.GL.VertexSpec, Graphics.Rendering.OpenGL.
+03:51:43 <lambdabot> GL, Graphics.Rendering.OpenGL, Graphics.UI.GLUT
+03:52:08 <dblhelix> shapr: maybe it's about decoration... discs look pretty invaluable... putting them in a box with a nice shiny paper gives them a more valuable look... and then what they look like better resembles the value they represent to one...
+03:52:33 <shapr> dblhelix: I've thought the same thing...
+03:53:04 <shapr> dblhelix: And it leads to an amusing conclusion, maybe discs aren't valuable, and the music industry is all marketing and fertilizer?
+03:53:32 <ADEpt> > dropWhile (not.("bar" `isPrefixOf`)) "foobar"
+03:53:33 <lambdabot> Couldn't match `[Char]' against `Char'
+03:54:00 <dblhelix> shapr: maybe we *wanted* it to lead us to *that* conclusion ;)
+03:54:07 <ADEpt> > filter ("bar" `isPrefixOf`) $ repear drop "foobar"
+03:54:09 <lambdabot>  Not in scope: `repear'
+03:54:15 <shapr> Certainly I'd rather the artist themself got all the money I pay for a disc. I'd be happy to skip the packaging, advertising, cross marketing, and even the disc itself. I'd much rather shuttle five euro to the artist and just get FLACs.
+03:54:18 <shapr> But then, I already do that with magnatune.
+03:54:22 <ADEpt> > filter ("bar" `isPrefixOf`) $ repeat drop "foobar"
+03:54:22 <lambdabot>   The function `repeat' is applied to two arguments,
+03:54:22 <lambdabot>   but its type `a -> [a]' has only one
+03:54:37 <shapr> dblhelix: Well, let's look at it from the other side...
+03:54:41 <ADEpt> > filter ("bar" `isPrefixOf`) $ iterate drop "foobar"
+03:54:42 <lambdabot> Couldn't match `Int' against `[Char]'
+03:54:47 * shapr tries...
+03:54:56 * dblhelix tries too
+03:55:11 <shapr> Maybe they should name it the packaging or advertising industry instead of the music industry?
+03:55:37 <dblhelix> the artists being the true music industry, you mean?
+03:55:41 <shapr> I mean, the music is the value, right? So... anything that takes away from the music decreases consumer demand, right?
+03:55:57 <dblhelix> you'd say
+03:56:08 <shapr> Paradoxically, marketing increases demand, irrespective of music quality.
+03:56:19 <shapr> Ok, I have a prediction...
+03:56:42 * dblhelix awaits it...
+03:56:48 <shapr> I think that the current music industry is a longer term cultural equivalent of nigerian spam kings.
+03:56:53 <eivuokko> Maybe they sell something else than just music.  Something on the lines of lifestyle, ideas, feelings...
+03:57:33 <shapr> I predict that in the next ten years, the western culture will wise up to the spam and start buying the music instead of buying the hype.
+03:57:35 <dblhelix> eivuokko: which is all just air, right?
+03:58:30 <eivuokko> Is it?
+03:58:34 <eivuokko> It certainly seems to sell.
+03:58:44 * dblhelix wants to keeps his relationships with widows of deceased african presidents low key... they're going to make me very rich, you see
+03:59:21 <shapr> I think that the current music industry will be forced to shift its market to the gullible part of the population, those who are too inexperienced or not smart enough to know better.
+03:59:40 <dblhelix> eivuokko: so, basically, air sells... well, the sport shoes industrie know that for a long time now
+03:59:42 * shapr decides to think about this while riding a unicycle...
+04:00:08 <dblhelix> /s/industrie/industry
+04:00:12 <shapr> dblhelix: hah!
+04:00:28 <[CotL]Godofe_Kei> hi ppl
+04:00:31 <ADEpt> basti_: I proudly present the most clueless substring substitution ever!
+04:00:34 <ADEpt> > let repl substr replacement str = (\(prefix,rest) -> prefix ++ replacement ++ drop (length replacement) rest) $ head $ filter ((substr `isPrefixOf`).snd) $ zipWith splitAt [1..length str] (repeat str) in repl "bar" "xxx" "foobarbaz"
+04:00:34 <shapr> Admittedly, air filled shoes are more comfortable than air filled promises.
+04:00:35 <lambdabot> "fooxxxbaz"
+04:00:40 <[CotL]Godofe_Kei> isnt there any way to "revive" a lost list?
+04:00:44 * shapr really goes to unicycle now...
+04:00:46 <dblhelix> shapr: have fun unicycling
+04:01:07 <ADEpt> @pl (\(prefix,rest) -> prefix ++ replacement ++ drop (length replacement) rest) $ head $ filter ((substr `isPrefixOf`).snd) $ zipWith splitAt [1..length str] (repeat str)
+04:01:07 <lambdabot> uncurry ((. ((replacement ++) . drop (length replacement))) . (++)) (head
+04:01:07 <lambdabot> (filter ((substr `isPrefixOf`) . snd) (zipWith splitAt [1..length str] (
+04:01:07 <lambdabot> repeat str))))
+04:22:40 <Andrew_P> Hm... Gentle introduction is a bit complicated for a Haskell beginner... will have a look at the Report first
+04:23:25 <Saulzar> @where yaht
+04:23:26 <lambdabot> http://www.isi.edu/%7Ehdaume/htut/
+04:23:32 <musasabi> Andrew_P: yaht is better
+04:24:27 <Andrew_P> thanks, i knew of it, just forgot to have a look
+04:43:41 <shapr> @yow ! I love unicycling!
+04:43:42 <lambdabot> Look!  A ladder!  Maybe it leads to heaven, or a sandwich!
+05:12:36 <Pupeno> Good morning.
+05:12:52 <Pupeno> musasabi: cat you tell me again please where is it that dns server you made ?
+05:17:12 <musasabi> http://cs.helsinki.fi/u/ekarttun/haskell/hdnsd-20051227.tar.bz2
+05:17:51 <musasabi> Pupeno: hope that helps you.
+05:18:09 <musasabi> BSD3 licence so you may use it freely.
+05:18:16 <Pupeno> Thank you.
+05:24:52 <JKnecht> DNS using haskell?
+05:25:05 <shapr> Yeah, there are at least three DNS clients in Haskell.
+05:25:31 <JKnecht> client? what's the point of that?
+05:26:06 <JKnecht> err, do they do anything interesting such as IPV6?
+05:27:12 <shapr> I think two of them support IPv6.
+05:27:40 <shapr> I think there's one DNS server in Haskell.
+05:27:58 <xerox> shapr: that's what musasabi posted, I think.
+05:28:48 <shapr> oh right :-)
+05:28:48 * shapr dohs
+05:28:49 <JKnecht> current regular BIND supports IPV6 so would be surprised if they didn't.
+05:32:22 <JKnecht> given tarball appears to have client and server.
+05:33:03 <Pupeno> I know about one dns server and a half, implemented in Haskell. I am implementing my own.
+05:34:07 <JKnecht> seems like TRTD would be to wrap the authorative BIND.
+05:34:47 <JKnecht> s/TRTD/TRTTD/
+05:35:14 <shapr> Except that, BIND isn't always authorative...
+05:35:35 <shapr> Witness the cache pollution bug that was around for years.
+05:35:59 <JKnecht> are you confusing correct with authorative?
+05:36:42 <shapr> heh
+05:36:45 <shapr> yes!
+05:37:06 <musasabi> shapr: it seems impossible to make DNS secure.
+05:37:29 <musasabi> one can make the attacks harder, but that is just rubber tape.
+05:38:46 <JKnecht> Current BIND makes a lot of effort for security. It is a never ending struggle.
+05:39:05 <musasabi> yes, there is simply no solution (if we exclude DNSSEC)
+05:39:25 <musasabi> hopping source port + truly random id + query combination can help things.
+05:40:43 <JKnecht> I'm looking for a registrar independent of the U.S.
+05:40:59 <musasabi> the various country tlds?
+05:41:34 <JKnecht> TLD != registrar, unless I'm mistaken.
+05:41:34 <Pupeno> JKnecht: then you'll need a domain name space independent of the U.S.
+05:42:24 <JKnecht> you mean a TLD like say .ru ?
+05:42:31 <musasabi> JKnecht: yes, but they usually manage their domains in an independent way.
+05:42:36 <musasabi> yes.
+05:43:30 <musasabi> if you want .com/.net/.org then joker.com is an alternative (of course the root servers are still under US control)
+05:44:09 <JKnecht> Yes, I see the truth of it. And no reason not to have the physical servers anywhere other than in U.S. ISPs net.
+05:44:27 <JKnecht> i.e. not in such a net.
+05:47:10 <JKnecht> I imagine the root server situation will clear itself up in the next few years.
+05:47:36 <shapr> I want a p2p dns system.
+05:47:39 <shapr> As I described in my blog.
+05:48:32 <JKnecht> DNS is alreay P2P, users could eliminate the current root servers by simply deciding to do so.
+05:49:29 <Pupeno> JKnecht: what could really happen is that ISPs could eliminate the root servers (they have the power, as everybody else, and the technical means, something the users lack).
+05:49:40 <shapr> Someone did the whole civil disobedience thing by polluting some second level servers a few years back.
+05:49:52 <shapr> That motivated people to fix the system, happily.
+05:49:52 <JKnecht> by users I mean local admins of DNS servers.
+05:50:12 <Pupeno> ok then.
+05:53:24 <JKnecht> Pupeno: yes that's right. That (elimination of the root servers, more like say NTP) would be the ideal and would make it more P2P.
+05:54:20 <Pupeno> JKnecht: well, I do not know how can DNS be 100% decentralized.
+05:55:56 <shapr> I do!
+05:56:04 <JKnecht> not 100% just elimination of sole source of the root servers and some way to make the TLD info authoritatively distributable. Actually ought to wirk better that way.
+05:56:33 <shapr> http://thunderbird.scannedinavian.com/~shae/blog/2005-11-24.html
+05:56:46 <Pupeno> shapr: I'll take a look at it.
+05:57:52 <tuomov> shapr: hmm... http://modeemi.cs.tut.fi/~tuomov/b/archives/2005/11/26/T20_16_28/
+05:58:02 <shapr> The description is short, and the software is vapor.
+05:58:02 <tuomov> (wrote something about dns recently too)
+05:58:26 * shapr adds tuomov's not a blog to his reading list
+05:58:47 <shapr> I have moral issues with centralization.
+05:59:42 <shapr> tuomov: I like it!
+06:04:43 * JKnecht predicts geopolitics will take care of the situation (U.S. root servers) within 24 months.
+06:05:53 <mahogny> if I have a datatype with multiple constructors and want to check which one is used... is there some nice way to do it without involving all arguments? (like isJust for Maybe)
+06:05:56 <JKnecht> imagine for militaries already has been addressed, so only commercial/public sector remain.
+06:06:25 <Saulzar> mahogny, You can match all the arguments with {}  
+06:06:34 <mahogny> aah
+06:06:36 <mahogny> thx
+06:10:54 <reddi> i have the following signatur: sortTree :: Ord a => (a -> a -> Bool) -> Tree a -> Tree a
+06:11:07 <reddi> how can i test whether a->a->Bool is reflexiv?
+06:12:26 <reddi> somehow pattern matching is not possible... sortTree ordfkt tree = tree works (as a test)
+06:12:54 <reddi> but i need a pattern like sortTree (arg1 arg2 b) tree = tree
+06:13:37 <mauke> I don't get it
+06:13:59 <reddi> i want to extrakt the a->a->Bool
+06:14:27 <mauke> the ordfkt
+06:14:41 <reddi> yes.....
+06:14:44 <Lemmih> > let f :: (a -> a -> Bool) -> a -> Bool; f func a = func a a in f (==) 10
+06:14:46 <lambdabot> True
+06:15:33 <mauke> reddi: ok, so your problem is solved
+06:15:36 <mauke> just use ordfkt
+06:16:33 <xerox> f = join
+06:16:39 <xerox> > join (==) 10
+06:16:40 <lambdabot> True
+06:16:42 <xerox> :-)
+06:16:47 <reddi> ok let think about it ;-)
+06:16:47 <Lemmih> f = example
+06:16:48 <basti_> reddi: haskell can't check if an a->a->Bool is refl.
+06:16:53 <basti_> you have to do that by hand
+06:17:02 <xerox> Lemmih?
+06:18:03 <xerox> It is :(
+06:18:22 <Lemmih> How's code, xerox?
+06:18:49 * xerox coughs
+06:19:26 * boegel|home notices a horrific stench
+06:19:33 <xerox> Had some ideas, but I'm slacking, these holi-days
+06:19:47 <boegel|home> xerox: everybody is slacking these days
+06:20:00 <Pupeno> Having a and IO [a] how do I build IO a:[a] ?
+06:20:19 <boegel|home> @type 1:[2,3]
+06:20:20 <lambdabot> forall a. (Num a) => [a]
+06:20:23 <araujo> Good morning.
+06:20:27 <boegel|home> @type [1,2,3]
+06:20:28 <lambdabot> forall a. (Num a) => [a]
+06:20:31 <boegel|home> Pupeno: ?
+06:20:32 <Lemmih> Pupeno: liftM (a:) ioAction
+06:20:35 <xerox> Pupeno: \x -> `fmap` (return (x:)
+06:20:48 <boegel|home> ok, nvm then, my stupid faullt
+06:20:48 <xerox> Today's a CONTEST with Lemmih.
+06:21:08 <xerox> Mismatched parens, Lemmih won.
+06:21:16 <Saulzar> boegel, Some are slacking on real work to use haskell instead :)
+06:21:27 <Lemmih> Pupeno: Basically: do list <- ioAction; return (a:list)
+06:21:30 <boegel|home> Saulzar: still, you _are_ slacking
+06:22:08 <xerox> boegel|home: I think that these kind of comments are what Haskell taught us, heh
+06:24:30 <Pupeno> Lemmih: thank you.
+06:28:18 <Saulzar> Hmm, redesign time again. It seems I may as well make just absolutely everything a reactive object for uniformity, even if they don't react at all...
+06:29:07 <Lemmih> What are you working on, Saulzar?
+06:30:13 <Saulzar> I'm aiming at a little AI game, with bots using Yampa/Haskell
+06:30:30 <shapr> nifty!
+06:31:03 <Lemmih> URL/darcs repo?
+06:31:15 <Saulzar> It has some way to go... 
+06:32:06 <Saulzar> I don't have a site or repository setup (at least not public)
+06:33:27 <shapr> Are you basing your code on the robot soccer demo?
+06:33:34 * Lemmih ponders how to limit the uploading in Conjure without choking downloads.
+06:33:59 <Lemmih> Any Conjure people around?
+06:34:06 <Saulzar> Nope, though I have investigated it after you told me last time. 
+06:35:12 <reddi> ok u said just before that i only have to use the ord-fkt
+06:35:18 <reddi> ERROR "C:\Dokumente und Einstellungen\LR\Desktop\aufgabe8_edit.hs":43 - Inferred
+06:35:18 <reddi>  type is not general enough  
+06:35:45 <reddi> http://pastebin.com/482851
+06:35:47 <Saulzar> They have some nice ideas for usability, the mergable records for output and typeclasses for giving capabilities to robots which I may use
+06:36:38 <reddi> does that mean that Integer is not element of Ord?
+06:36:52 <Lemmih> reddi: 10 is not of type 'a'.
+06:38:31 <reddi> Lemmih: cause a is Tree hm....
+06:39:40 <reddi> and what can i do against it?
+06:40:53 <Lemmih> eh? You can remove the 'ordfkt 10 10'.
+06:41:05 <Lemmih> Or the type signature.
+06:41:12 <reddi> but i need to test wheter the fct. is reflexiv
+06:41:15 <reddi> whether
+06:41:21 <reddi> and 10<10 -> false
+06:41:26 <reddi> 10 <=10 -> true
+06:41:52 <Lemmih> The function doesn't take numbers as arguments.
+06:42:29 <mauke> reddi: you can't test that
+06:42:55 <reddi> but i have to test it ;-(
+06:43:23 <Lemmih> Extract a value from the tree, then.
+06:44:43 <reddi> Lemmih: do u mean that i have to use e.g. the root node?
+06:45:57 <RemiTurk> hi all
+06:46:55 <shapr> hoi RemiTurk 
+06:47:01 <reddi> if this is my data structure:  data Tree a = Leaf a | Branch (Tree a) (Tree a) deriving (Eq,Ord,Show)
+06:47:04 <Lemmih> reddi: Why do you have to test if the function is reflexive?
+06:47:29 <reddi> cause the result shall be the input if the function is NON-reflexiv
+06:47:40 <reddi> if the function is reflexiv i have to do something with the tree
+06:47:46 <reddi> and output the modified tree
+06:48:00 <reddi> Lemmih: do u understand my problem?
+06:48:47 <Lemmih> No.
+06:49:36 <reddi> ok... i have to write a function which does either do something with an inputed tree (if the function is reflexiv) or does nothing with the inputed tree (if the function is NOT reflexiv)
+06:50:18 <mahogny> what does reflective mean in this case?
+06:50:52 <reddi> hm it means that the value itself is on the left and on the ride side of the relation
+06:51:00 <reddi> e.g. 3<3 --> fale
+06:51:01 <reddi> false
+06:51:06 <reddi> 3 <=3 -> true
+06:51:39 <mahogny> right. hrm. but you only take one tree? what is the left and right side?
+06:52:05 <mahogny> the left and right branch?
+06:52:29 <reddi> hm... i have to SORT the tree
+06:52:44 <reddi> if the function is reflexiv i have to output the sorted tree
+06:52:59 <reddi> if the function is not reflexiv than i only have to output the input
+06:53:00 <Lemmih> Why not use the functions from the Ord typeclass, then?
+06:53:34 <reddi> Lemmih: do u mean <=, ==, >=, == ?
+06:53:40 <mahogny> reddi, so.. uhm. what is so hard about this?
+06:54:08 <Lemmih> reddi: Well, (==) is from the Eq class but yeah.
+06:54:08 <reddi> mahogny: that i dont know how to test in my case ;-(
+06:54:25 <RemiTurk> reddi, could you give us a few examples of what it should do?
+06:54:57 <mahogny> reddi, the only way to know if a function is reflexive is if you can test the entire test space... which as I see is only possible on paper or with a theorem prover. unless you only consider the tree as the test space?
+06:55:21 <reddi> http://pastebin.com/482872
+06:56:58 <reddi> mahogny: why? maybe the problem is easier
+06:57:10 <reddi> hm... i pass a function to MY function
+06:57:24 <reddi> i know which functions can be passed (functions from the Ord-class)
+06:57:41 <reddi> and i test which function was passed, would that be a possible approach?
+06:57:42 <mahogny> reddi, if you use the operator xyz, and it says  5 xyz 3 is reflexive, it says nothing about if 7 xyz 5 is reflexive
+06:57:50 <mauke> you can't compare functions
+06:58:12 <reddi> hm.. cause it is undecisionable hm
+06:58:40 <RemiTurk> reddi, so sortTree :: Ord a => (Tree a -> Tree a -> Bool) -> Tree a -> Tree a, and sortTree f x = x iff f is reflexive?
+06:58:51 <reddi> RemiTurk: yes
+06:59:40 <mahogny> reddi, actually, to sort the thing you would need more than reflexivity :) what are you trying to achieve *really*? that is, what will you use this for?
+06:59:45 <RemiTurk> that's not going to work, bacause the only way (in general) to find out whether a function is reflexive is to try it out on all inputs, and there's an infinite number of trees
+07:00:26 <mahogny> yeah. as I stated above. you need more powerful tools to do this. in particular, you need to know what the function contains
+07:00:34 <reddi> but i can only pass ordering functions which are from the ord class... i think?
+07:00:44 <reddi> or do i see that right?
+07:00:49 <reddi> wrong sry
+07:01:14 <RemiTurk> The only thing one can do with a funtion (in Haskell) is apply it to an argument..
+07:01:58 <reddi> ok fine, so the exercise is not solveable?
+07:02:29 <mahogny> from haskell98
+07:02:32 <RemiTurk> if I understand you correctly, and you understand your exercise correctly, no
+07:02:34 <mahogny> "The Ord class is used for totally ordered datatypes"
+07:03:03 <reddi> but.... when i look @ this exercise i know that the only passable functions are (==) , (<=), (>=),(<) and (>)
+07:03:25 <reddi> so i know that ==, > and < are non reflexive -> output the input
+07:03:28 <RemiTurk> if sortTree :: Ord a => (Tree a -> Tree a -> Bool) -> Tree a -> Tree a, one could pass e.g. (\x y -> True)
+07:03:34 <mahogny> so in fact I don't see why you even have to pass a function for the order. there already is one for the data
+07:03:34 <reddi> and i know >= and <= are reflexive -> sort
+07:04:00 <Lemmih> reddi: What exercise are you looking at?
+07:04:04 <RemiTurk> or do you merely have to distinguish between (==), (<=), (>=), (<) and (>)?
+07:04:12 <basti_> == is non reflexive?
+07:04:17 <reddi> sry
+07:04:20 <reddi> == is reflexive
+07:04:27 <mahogny> reddi, why are you passing a function and use Ord at the same time?
+07:05:28 <shapr> What irritates me most about the default bittorrent is that you can't reconfigure it at runtime.
+07:05:32 <reddi> mahogny: i dont know?
+07:05:51 <shapr> Wish I had time to redirect my frustration to fixing conjure.
+07:06:00 <mahogny> reddi, there is no need to use Ord if don't intend to use the comparison operators that are assigned to the object
+07:06:10 <mahogny> +you
+07:09:18 <shapr> bwaha this is cool! http://x86vmm.blogspot.com/2005/10/house-haskell-os.html
+07:09:34 <reddi> ok moment... my signature sais that tree is derivcing from show, etc. 
+07:10:05 <reddi> but: how does haskell know HOW to order trees?
+07:11:13 <mahogny> it doubt it can know. there is no natural order for trees given the normal datatype in use. you'd have to tell it
+07:11:53 <reddi> maybe the exercise was meant that the function is reflexive if it is reflexive on INTEGER
+07:12:00 <reddi> and i know which functions are reflexive
+07:12:24 <reddi> and if (the signature says yes) my function is deriving from the class ord
+07:12:46 <reddi> than i only have the typical ordering relations....?
+07:13:01 <RemiTurk> no
+07:13:12 <mahogny> a function that is reflexive need not take arguments from Ord
+07:13:26 <mahogny> Ord implies much more + it's completelly unrelated to the function
+07:14:06 <RemiTurk> (\_ _ -> True) isn't one of the typical ordering relations but can be passed anywhere where the typical ordering relations can be passed. (and it's reflexive, btw)
+07:14:19 <mahogny> quite frankly, your excercise seem to suck. skip it :P
+07:14:37 <reddi> hm.... i think that i will ask my professor ;-)
+07:14:42 <reddi> maybe he knows ggggggg
+07:15:36 <reddi> but... maybe the exercise means that only the typical 5 relations can be passed hm
+07:15:39 <reddi> but i will ask ;-)
+07:17:17 <RemiTurk> more relations _can_ be passed, but that's why I was asking if it could be the case that you had a guarantee (not by the typesystem but by your professor) that only those functions _would_ be passed...
+07:18:36 <reddi> RemiTurk: if only the functions which i said before ARE passed than the exercise is solveable... do i see that right?
+07:19:24 <RemiTurk> I think you're seeing that correct yes
+07:19:33 <reddi> ok... 
+07:19:52 <reddi> RemiTurk: and if only this few functions are passed, HOW can i test which function was passed?
+07:20:13 <RemiTurk> for example, if you have some (x::Tree Integer) and a function f, and you know e.g. that f is either (==) or (<) you can simply ask "f x x"..
+07:21:09 <mahogny> if you relax the constraint such that it is enough that it is reflexive only over the members of the tree, then no restrictions need be made on the f you send
+07:22:34 <RemiTurk> mahogny, you mean the tree is just a set over which f needs to be reflexive? that's another possibility indeed..
+07:22:55 <mahogny> it's not the same as real reflexivity though
+07:23:45 <RemiTurk> depends on what you see as "real reflexivity" ;)
+07:24:11 <mahogny> yeah
+07:24:13 <RemiTurk> but it's definitely not the same as "the haskell function is reflexive"
+07:29:52 <reddi> ok ok
+07:30:05 <reddi> if i have the following function: http://pastebin.com/482912
+07:30:24 <reddi> which does it job when i pass Main> checkReflexiv  (==) 2
+07:30:24 <reddi> True   
+07:30:38 <reddi> why cannt i simply check with that function in sorttree?
+07:31:05 <reddi> http://pastebin.com/482913
+07:31:08 <reddi> why is that not possible?
+07:31:21 <reddi> http://pastebin.com/482914
+07:31:50 <RemiTurk> I've made 2 tiny changes to it...
+07:32:23 <mahogny> it still need not be Ord :) the reason you "can't" check is because it is not well-defined in your excercise what they mean with reflexivity. the reflexivity we normally refer to cannot be checked because the space of all values is infinite
+07:32:27 <RemiTurk> and yes, that does "work", for some definition of work...
+07:33:08 <RemiTurk> (as in, it doesn't seem to do all that much useful, but then the exercise may not be useful ;))
+07:33:24 <mahogny> the bottom line is that, as stated, the excercise suck, is badly written and completely unrealistic :P
+07:33:38 <reddi> ok ok, but what is wrong in my calling checkReflexiv
+07:33:46 <reddi> why can i ask the function on commandline
+07:33:54 <reddi> but not from the sorttree?
+07:34:02 <mauke> what's it called?
+07:34:12 <mauke> rank-n polymorphism or something
+07:35:11 * mahogny kinda wonders wtf sorttree does. it's written in a weird way
+07:35:54 <mauke> you're using 3, so type inference ... (I don't know how to finish that line)
+07:35:54 <mahogny> what you have written... makes no sense and haskell agrees
+07:36:19 <mauke> anyway, you're using 3 where something of type a is expected, so a must be an Integer
+07:36:19 <RemiTurk> Imagine what happens when you try sortTree (==) (Leaf ())
+07:36:26 <mauke> thus your type declaration is wrong
+07:36:29 <shapr> Haskell often tells me that I'm not making sense.
+07:36:44 <RemiTurk> you'll either tell Haskell it's not only Ord but also Num, or remove the 3
+07:37:12 <anatolyv> Hello. Are silly newbie terminology questions welcome here? :)
+07:37:18 <mahogny> anatolyv, don't ask to ask
+07:37:29 <RemiTurk> of course they are
+07:37:34 <reddi> if i remove the line than i get *** Type           : a -> Bool
+07:37:34 <reddi> *** Does not match : Bool    
+07:37:41 <reddi> if i remove the 3 ;-(
+07:37:52 <RemiTurk> I didn't mean it _that_ literally...
+07:37:56 <RemiTurk> (to reddit)
+07:37:58 <reddi> that is a thing what i understnad ...
+07:38:16 <RemiTurk> if you only want it to typecheck, you might replace the 3 by undefined ;)
+07:38:19 <anatolyv> What does "non-strict semantics" mean, in the definition of Haskell? What does it mean for any language to have non-strict semantics, as opposed to strict semantics?
+07:38:47 <mauke> .oO(that's not a newbie question)
+07:38:56 <RemiTurk> haha
+07:39:01 <reddi> ok and what could i pass to get my function work? 
+07:39:07 <mahogny> I have always assumed that is what is meant by lazy semantics but I can be wrong
+07:39:16 <basti_> hmm
+07:39:23 <RemiTurk> anatolyv, a language is non-strict if you can pass it "bottom/undefined/non-termination" and still get an answer
+07:39:31 <RemiTurk> (it=a function in it)
+07:39:32 <anatolyv> mahogny: by lazy semantics you mean the same as lazy evaluation?
+07:39:37 <mahogny> anatolyv, yes
+07:39:39 <basti_> actually, lazy and strict are extremes
+07:40:02 <basti_> a language might be something in between too
+07:40:10 <mahogny> aha
+07:40:23 <basti_> but, yes, anatolyv, "semantics" is a null-term. if someone says "lazy" he means "lazy"
+07:40:27 <basti_> and it's the opposite of strict
+07:40:32 <Philippa_> when they say the /language/ has non-strict semantics they really imply "throughout the entire language"
+07:40:45 <anatolyv> remiturk: not sure I understand what "bottom/undefined/non-termination" means in general w/o referring to a specific language.
+07:40:57 <basti_> anatolyv: an endless loop
+07:40:59 <basti_> for example.
+07:41:02 <mahogny> basti_, here's an evil question then; if I return; before an infinite loop in C, does that make it non-strict? o_O
+07:41:03 <Philippa_> a non-result
+07:41:06 <RemiTurk> reddi: I don't know what you would want to pass, as I still don't really know what it's supposed to do :(
+07:41:27 <Philippa_> which happens to be treated as a kind of value entirely as a way of describing what happens in case of a non-result
+07:41:38 <mauke> template<typename T> T bottom() { return bottom<T>(); }
+07:41:40 <basti_> mahogny: i see that all in lambda-calculus. "strict" would be evaluating the innermost lambda first, "lazy" is evaluating the outermost lambda first.
+07:42:00 <basti_> now, what is C translated to lambda calculus?
+07:42:02 <mahogny> basti_, yeah. I think strictness only applies to lambda languages
+07:42:21 <Philippa_> C has some non-strict expressions
+07:42:25 <basti_> mahogny: all programming languages i know are isomorphic to lambda languages.
+07:42:25 <Philippa_> for example, ?:
+07:42:30 <basti_> yes and &&
+07:42:41 <anatolyv> basti_: I thought that Haskell didn't have endless loops or say infinite lists as such; only representations thereof, which can be cut when convenient by the virtue of lazy evaluation.
+07:42:55 <anatolyv> basti_: or does that make little sense?
+07:43:02 <basti_> anatolyv: well, certainly you can have endless loops in haskell
+07:43:10 <mahogny> basti_, right. but some languages have semantics that aren't even uniquely defined. I think C is one of those
+07:43:18 <basti_> mahogny: yes.
+07:43:40 <mahogny> that would make a lambda transform quite problematic :)
+07:43:47 <basti_> anatolyv: and, of course, for practical reasons, endless lists can't be "realized" directly
+07:44:08 <basti_> anatolyv: so what we do is, store an expression, and evaluate it only as needed
+07:44:15 <RemiTurk> http://en.wikipedia.org/wiki/Strict_programming_language
+07:44:20 <basti_> > let ones=1:ones in take 10 ones
+07:44:21 <lambdabot> [1,1,1,1,1,1,1,1,1,1]
+07:44:33 <basti_> this list, for example, contains as many ones as you need
+07:44:58 <basti_> thats certainly not infitely many
+07:45:01 <basti_> *ni
+07:45:31 <basti_> you'd need eternally long to need infinitely many 1's.
+07:45:41 <basti_> which is impractical
+07:46:03 <basti_> you won't notice a difference to a list that contains infinitely many 1's though.
+07:46:03 <RemiTurk> LOL: "... non-strictness has several disadvantages ... [among which]... non-strict languages generally must be purely functional to be useful..."
+07:46:12 <basti_> lol
+07:46:14 <mahogny> lol
+07:46:21 <RemiTurk> SPJ's: Laziness keeps us pure ;)
+07:47:02 <anatolyv> basti_: So basically it makes no sense to talk of a non-functional language being either strict or non-strict, correct? Because a non-functional language doesn't have any means of finitely representing a potential "bottom".
+07:47:15 <Philippa> er, no
+07:47:18 <RemiTurk> actually...
+07:47:21 <basti_> well that's debateable
+07:47:22 <mauke> > let infinity = last [0..] in take infinity (repeat 1)
+07:47:27 <lambdabot> Terminated
+07:47:29 <mahogny> maybe we could go back to more basic things :) IORef. as all operations read/write are IO, I assume that means it effectively disables lazyness? then the problem is, if I have a huge data structure (the world state), I would have to split it up into several ioref to keep the memory blogging down. is there a better fix to this problem?
+07:47:55 <RemiTurk> there are a lot of languages which have "code blocks". (although one might say that's just a synonum for "lambda")
+07:47:58 <Philippa> mahogny: it doesn't, the value the IORef refers to doesn't have to be evaluated
+07:48:00 <basti_> anatolyv: for example, in C, you could say (1&&endlessloop())
+07:48:08 <Philippa> it's just the order of IO operations that's strict
+07:48:16 <mahogny> Philippa, aha
+07:48:22 <basti_> anatolyv: that will loop endlessly. If you say (0&&endlessloop()) it won't
+07:48:38 <Saulzar> You can still have some form of lazy evaluation in an imperitive language, eg. copy on write, lazy initialization (eg. Singleton) 
+07:48:43 <basti_> so, C is not-entirely-strict.
+07:49:08 <basti_> saying so makes sense, i think.
+07:49:09 <mahogny> Philippa, still, I know it will be read and written this data. so will it do the entire stupid operation just to change the value of a single byte?
+07:49:14 <Saulzar> I'm not sure if that's anything to do with the language or not
+07:49:22 <RemiTurk> and of course: alarm(...); for(;;); ...; print("I survived non-termination!\n");
+07:49:32 <basti_> Saulzar: well not with "the language", but with the way we interpret it.
+07:49:39 <RemiTurk> (there probably should be some setjmp/longjmp in there)
+07:49:39 <Philippa> mahogny: the "entire stupid operation" is, er, changing the value of a byte
+07:49:40 <basti_> which, for most people is part of "the language"
+07:49:43 <anatolyv> basti_: hmm, but then neither is any language that allows function pointers or their equivalents. I can hold a ptr to a non-terminating function and decide to either call it or not.
+07:49:44 <Pupeno> isn't shortcircuited 'and' and 'or' lazy by definition ?
+07:49:54 <Pupeno> s/isn/aren/
+07:49:55 <basti_> anatolyv: yea.
+07:49:58 <mahogny> Philippa, reading and writing the entire variable that the byte belongs to
+07:50:16 <basti_> anatolyv: the point is, in haskell -everything- is -maximally- lazy, except if you specify the opposite (which you may do)
+07:50:20 <mahogny> (which is a 1000 byte+ structure)
+07:50:22 <Philippa> I suspect you'll find the updates are sufficiently, er, lazy :-)
+07:50:33 <mahogny> hm
+07:50:37 <Philippa> well, in practice what you'll get is a lot of shared data
+07:50:43 <Philippa> actually no, that /does/ get hairy
+07:50:53 <basti_> anatolyv: of course you can do that in C. Haskell is compiled to C, and then compiled to binary.
+07:51:03 <anatolyv> basti_: thanks. I do understand the point of lazy evaluation (I think), I just didn't realize "non-strict semantics" refers to the same concept.
+07:51:04 <Philippa> if you intend to update intermediate values then yes, use more references
+07:51:09 <basti_> and C is almost-turing-complete, so you can write a haskell interpreter in C
+07:51:34 <basti_> anatolyv: we take "lazy" to mean "as lazy as you can possibly be"
+07:51:37 <Philippa> by the "almost" do you mean the usual modulo-storage requirement?
+07:51:41 <basti_> Philippa: ye
+07:51:42 <basti_> s
+07:51:51 <mahogny> Philippa, yeah. that's what I though. my code is getting to look more and more like an imperative language though so I wonder if there is a "nicer" way than to have tons of ioref?
+07:52:05 <Philippa> decide that sharing's not too bad?
+07:52:15 <Philippa> does your problem really 'need' mutability?
+07:52:19 <RemiTurk> anatolyv: lazy and non-strict are only _almost_ the same: laziness is the usual implementation of non-strictness
+07:53:37 <mahogny> Philippa, threads. can I get away without IOref to share a world state?
+07:53:45 * Philippa blinks
+07:54:01 <Philippa> you shouldn't be using IORefs across threads IIRC
+07:54:08 <basti_> no you shouldn't
+07:54:10 <RemiTurk> Philippa, your memory is still okay
+07:54:12 <basti_> there's MVars for that
+07:54:20 <anatolyv> RemiTurk: oh, I think I see, thanks. I still don't quite understand how to define "non-strict" in general terms w/o referring to laziness. You gave a few examples, which translate, to me, to a general feeling that I can "hold" non-termination in my hand and yet don't have to go into it. But I don't see how it can be formalised.
+07:54:23 <basti_> but, since you're at it, have a look into STM
+07:54:35 <Philippa> anatolyv: non-strict = strictness does not hold
+07:54:37 <Philippa> that's all
+07:54:38 <mahogny> basti_, I have semaphores around it. hmm. STM. well, I can have a look at it
+07:54:46 <Philippa> argh. Really, don't do semaphores
+07:54:48 <Philippa> just use an MVar
+07:54:50 <basti_> don't!
+07:54:53 <Philippa> it's the right abstraction for the job
+07:55:14 <mahogny> ok
+07:55:23 <basti_> anatolyv: strict = innermost lambda first, lazy = outermost lambda first. Everything inbetween = non-strict, non-lazy.
+07:55:35 <basti_> anatolyv: modulo kiddie laziness as in C.
+07:55:35 <basti_> ;)
+07:55:38 <anatolyv> philippa: strict is defined on the wikipedia page as f(bottom)=bottom. That's not a general concept, it comes from the domain of functional languages (or lambda calculus etc.) How do you interpret that in C, or an OOP language?
+07:56:00 <Philippa> basti_: you're equating strictness and eagerness
+07:56:09 <Philippa> anatolyv: it comes from denotational semantics
+07:56:11 <Philippa> not the same thing
+07:56:12 <basti_> uhm
+07:56:14 <mahogny> Philippa, wait. if I split up the data into several MVars to avoid passing around too much data, I would still need semaphores to avoid dead locks right? or do you mean I should do it in another way?
+07:56:16 <basti_> youre right Philippa.
+07:56:26 <basti_> mahogny: use STM.
+07:56:33 <mahogny> ok
+07:56:50 <Philippa> in practice, you'd be surprised how little "too much" is
+07:57:18 <Philippa> "updating" one node in an immutable binary tree requires as many new nodes as it takes to reach the right depth, plus the updated one
+07:57:20 <anatolyv> philippa: OK, I know nothing about denotational semantics. Is it useful to read up on it? :)
+07:57:26 <Philippa> it does /not/ require rebuilding the entire tree
+07:57:37 <Philippa> anatolyv: somewhat. It helps a lot in understanding WTF monads're about
+07:57:40 <Trevion> Philippa, unless you have parent pointers.
+07:57:53 <Philippa> (mostly because the FP use comes from the denotational semantics use)
+07:57:55 <Philippa> Trevion: true
+07:58:48 <basti_> semantics help with anything?
+07:58:50 <basti_> ^^
+07:59:08 <Philippa> OTOH, any time you swap pointers for a map lookup you don't have a relevant reference chain, which is cool
+07:59:19 <Philippa> basti_: denotational semantics is easy :-)
+07:59:24 <mahogny> basti_, I use semantics when I design network protocols. it's extremely powerful
+07:59:48 <basti_> for me, semantics always look like "say the same thing again in another language"
+07:59:52 <Philippa> the only hard bit is the part known as domain theory, and usually you can ignore that unless you really really care
+08:00:00 <Trevion> Philippa, that's why IORefs are cool.  (-;
+08:00:08 <basti_> maybe the other language is a little more useful for examining the problem
+08:00:37 <basti_> or sometimes it is "say what you are meaning in a formal language"
+08:00:40 <Philippa> maybe the other language has better 'foundations' and is thus more rigorous?
+08:00:47 <basti_> yes maybe.
+08:00:53 <mahogny> basti_, when I get to chose between some sketches and something I can actually apply math to, I tend to prefer the latter. at least if I want it to work in the end :)
+08:01:15 <basti_> mahogny: so you're actually trying to pose a correct problem.
+08:02:02 <basti_> I'm just joking a bit. I know there is a worth in semantics. It's just that i'm never like... "phew this... this just NEEDS decent semantics"
+08:02:02 <mahogny> basti_, it's easier to check properties such as if you have deadlocks or if your specification is complete if you write it using formal semantics
+08:02:12 <basti_> you know that STM is lock-free?
+08:02:16 <reddi> sry i am back ;-)  what can i write instead of ?????? in http://pastebin.com/482942 that it worksﬂ
+08:02:32 * mahogny is reading about STM now :)
+08:02:40 <basti_> was that rude? .)
+08:02:45 <mahogny> no :)
+08:03:27 <basti_> reddi: you're trying to check a conditions for all values of a type.
+08:03:43 <basti_> that's usually considered infeasible.
+08:03:49 <Philippa> basti_: I've rarely needed to go formal myself. *However*...
+08:03:53 <reddi> no, i only need ONE instance
+08:03:57 <mauke> reddi: (someElementOf tree) where someElementOf (Leaf x) = x; someElementOf (Branch x _) = someElementOf x
+08:04:05 <basti_> reddi: oh ok. so why dont you write that instance there?
+08:04:06 <Philippa> anyway, the use in understanding WTF monads're about is fairly direct
+08:04:23 <Philippa> and manages to treat IO fairly and sanely, too
+08:04:25 <reddi> if i write e.g. 3
+08:04:27 <basti_> Philippa: i understood that without semantics. But you might be true.
+08:04:29 <reddi> then i get an error
+08:04:38 <Philippa> (that is, doesn't freak out on the 'but you can't implement it in haskell!' bit)
+08:04:51 <reddi> http://pastebin.com/482945
+08:05:00 <reddi> and i dont know why?
+08:05:01 <mahogny> Philippa, I've found the best use in informal formal semantics. although the old prof would shoot me if he saw it ;)
+08:05:10 <reddi> i can call the function on command line with the parameter 3
+08:05:12 <basti_> reddi: well you put a value of a certain type there
+08:05:16 <Philippa> getting the bit about 'it lets you embed a different semantics' is good
+08:05:27 <basti_> reddi: you declared your function to be general though
+08:05:45 <reddi> basti_: and what can i do against it?
+08:05:47 <basti_> Philippa: "embed a different semantics"?
+08:06:05 <mauke> reddi: did you try my solution?
+08:06:15 <basti_> reddi: well either, specialize your function type, or, leave it away (the typecheck will decide a fitting type), or find a value of type a
+08:06:29 <Philippa> basti_: List lets you treat part of a program as non-deterministic, for example. And it's /still ordinary haskell/, hence the "embed"
+08:06:34 <reddi> mauke: not yet
+08:06:39 <basti_> Philippa: ah i see.
+08:07:12 * basti_ looks left and then right
+08:07:19 * basti_ ...then the saccade vanished again
+08:07:30 <Philippa> it also offers a way of building monads (other than from transformers) that doesn't drive you insane: start by treating bind and return as data constructors and writing an interpreter, then refactor s.t. bind and return 'do' the interpreting
+08:07:43 <reddi> basti_: which function shall i change? checkReflexiv?
+08:07:52 <basti_> Philippa: yea i saw such a thing, i believe
+08:08:01 <basti_> reddi: no sortTree
+08:08:10 <Philippa> ooh, where? I know I was talking to Cale about writing an article that talks about all this...
+08:08:12 <basti_> comment out the type for a first try
+08:08:20 <reddi> basti_: i cannot change the signature of sorttree
+08:08:28 <basti_> Philippa: i think i saw a lambda calculus interpreter that did some weird thing with monads
+08:08:39 <basti_> reddi: well then you uhm.... got a problem? ^^
+08:08:48 <reddi> basti_: i know ;-)
+08:09:04 <basti_> reddi: maybe you pass it a value of type a from outside?
+08:09:12 * Philippa has a horrible suspicion that the transformation from 'interpreter' to ordinary monad has something to do with CPS transformations, too
+08:09:23 <Philippa> but I should go read up on that
+08:10:42 <basti_> hmm
+08:10:46 <basti_> i can't find it
+08:12:19 <basti_> i'm not so sure that it was akin to what you're meaning
+08:17:27 <marcot> Hello, can't I define a term with let which has type defined by type classes?
+08:17:39 <marcot> I wanted to do something as:
+08:18:02 <marcot> let pega = xmlGetWidget xml
+08:18:02 <marcot> dialogo <- pega castToWindow "dialogo"
+08:18:02 <marcot> aviso <- pega castToLabel "aviso"
+08:18:03 <basti_> what?
+08:18:36 <marcot> where pega ::  :: WidgetClass widget => (GObject -> widget) -> String -> IO widget
+08:18:52 <basti_> doesnt xmlGetWidget inflict that constraint?
+08:19:16 <marcot> xmlGetWidget :: WidgetClass widget => GladeXML -> (GObject -> widget) -> String -> IO widget
+08:19:41 <marcot> My intention was only to make an "alias" to xmlGetWidget arquivo
+08:19:42 <basti_> why do you want a constraint that isn't necissairy?
+08:19:51 <basti_> i would abstain from doing so.
+08:20:03 <marcot> So I don't have to repeat xmlGetWidget arquivo all the time.
+08:20:19 * basti_ .O∞ ( ? )
+08:20:25 <Saulzar> What's wrong with the code you have there?
+08:20:30 <marcot> aren't all the constraints defined by let or where unecissairy?
+08:20:41 <marcot> Saulzar: for me nothing, but GHC is giving:
+08:20:51 <marcot> Couldn't match `Window' against `Label'
+08:20:51 <marcot>       Expected type: GObject -> Window
+08:20:51 <marcot>       Inferred type: GObject -> Label
+08:21:13 <marcot> It's assuming that pega is of the type (GObject -> Window) -> String -> IO Window
+08:21:55 <Saulzar> Hmmm, but if pega is a window - how can you cast it to a label?
+08:22:07 <marcot> pega is not for windows.
+08:22:12 <Saulzar> Ah, sorry
+08:23:24 <marcot> Do you know where the problem is?
+08:23:44 <Saulzar> I see - the problem is that xmlGetWidget is defined for any WidgetClass widget 
+08:24:52 <Saulzar> Hmm, could you put a type signature on pega? 
+08:25:08 <marcot> I've tried that also..
+08:25:26 <marcot> And it worked.
+08:25:34 <marcot> But shouldn't GHC assumes the most general type?
+08:26:06 <Lemmih> @google ghc monomorphism restriction
+08:26:07 <lambdabot> http://www.haskell.org/ghc/docs/latest/html/users_guide/ghc-language-
+08:26:07 <lambdabot> features.html
+08:27:01 <Lemmih> It'll work with -fno-monomorphism-restriction.
+08:28:56 <marcot> Lemmih: thanks..
+08:28:59 <marcot> Saulzar: thanks.
+08:36:51 <Lemmih> xs: How's lscd?
+08:36:53 <mahogny> hrm. so no IO can be executed inside STM? is that still so (got my hands on what I believe is the original paper). that's quite a restriction
+08:40:43 <Lemmih> @type GHC.Conc.unsafeIOToSTM
+08:40:45 <lambdabot> forall a. IO a -> GHC.Conc.STM a
+08:42:11 <Lemmih> Why would you use IO inside STM?
+08:44:10 <mahogny> Lemmih, well, to take a much nicer example than my program, what if you have to access a datastructure like Array (IIRC it needed IO) or equally evil access the FFI?
+08:44:33 <Lemmih> You wanna access a mutable array from STM?
+08:45:30 <mahogny> well, in case of my program, it seems that STM is solving the wrong problem. I have tons of IO operations. it seems MVars are more suitable for me than STM
+08:45:52 <Lemmih> Maybe you have too much IO.
+08:46:18 <mahogny> nah. can't really be less. I already avoid IO as I think it clutters the code
+08:46:19 <Lemmih> Perhaps STArrays or DiffArrays would be more suitable.
+08:46:50 <mahogny> in this case it's in the middle of networking code, not arrays. I'd like to see that done without IO :)
+08:46:59 <mahogny> anyway. MVar, here I go
+08:47:49 <humasect> <3 MVar
+08:47:52 <Lemmih> Yeah, sounds like MVar is the right tool for the job.
+08:48:48 <mahogny> still, I wonder not STM could have been made better. at least in case one would be allowed to make bigger changes to the language
+08:48:55 <CosmicRay> Got a database question.  Bjorn Bringert has requested a feature in HDBC where he can interrogate the types of columns in SQL tables.  That's easy enough to do, but I'm wondering what the appropriate Haskell way to represent these column types (not *values) is?
+08:49:17 <CosmicRay> HSQL uses a monstrous data type with several dozen options.  I don't really like that, and HaskellDB only needs about 6 anyway
+08:50:09 <mahogny> to my knowledge you cannot create new domains in sql. that makes life easier
+08:50:39 <CosmicRay> haskelldb has things like IntegerT, TextT, VarCharT Int, etc.
+08:50:47 <Lemmih> mahogny: STM should be better?
+08:50:58 <CosmicRay> hsql has versions of that, plus coverage for just about any type that any covered database supports
+08:52:12 <mahogny> Lemmih, well, haskell is already full of IO operations and some of the side effects could be ok even in STM. so it seems either STM is too restrictive or the rest of haskell loves IO a bit too much
+08:52:21 <Lemmih> (mahogny: STM hasn't made any changes to the Haskell language, btw)
+08:52:40 <mahogny> no. that's what I mean :) I wonder if it could be made better if they had taken that freedom
+08:53:19 <Lemmih> What IO operations are safe in STM?
+08:53:51 <Philippa> disk reads I'd've thought were
+08:53:52 <mahogny> reading memory sometimes require IO for example. you could of course start using unsafeIO but ... ew
+08:54:14 <Lemmih> Philippa, mahogny: Those aren't safe in STM.
+08:54:19 <Philippa> you can probably provide some form of transactional disk writes, but you'd have to find a way to explicitly tell STM that's okay...
+08:54:32 <CosmicRay> right, dereferencing a pointer in haskell is an I/O option, because you might not get the same thing each time you look at what's stored at address 0x12341234
+08:54:35 <Philippa> Lemmih: come to think of it yeah, I can see the issue
+08:55:41 <mahogny> yes, of course you would be getting a different value. but I don't see the problem anyway. it only gets a new value (potentially) *between* transactions, not under a single one. if a transaction aborts, it anyway would have to rerun completely and get the new adress
+08:56:52 <Lemmih> mahogny: Can you see why it would be unsafe with 'unsafePerformIO'?
+08:57:13 <mahogny> Lemmih, that one is evil yes
+08:57:28 <mahogny> but at some times it works
+08:57:53 <Lemmih> Yep, that's why you have 'unsafePerformIO' and 'unsafeIOToSTM'.
+08:58:04 <mahogny> oooh
+08:58:09 <mahogny> didn't see that one
+08:58:29 <Lemmih> It /will/ be unsafe so you have to provide the correctness proof by yourself.
+08:59:59 <mahogny> still. it would have been good if haskell already discriminated between the lesser evil and the worse evil such that unsafeblahah wouldn't have to be used for such a triviality. it's not a command one likes to use :/
+09:00:26 <Lemmih> What IO actions are safe to run multiple times and out of order?
+09:01:05 <mahogny> some memory reads, some FFI calls etc. heck, no way to tell in general
+09:01:39 <Lemmih> Exactly, there's no way to tell without outsider knowledge.
+09:02:44 <mahogny> yeah. but if one allowed some changes to the haskell types, maybe one could catch at least a few of the lesser evil as to let them pass the type check. but I don't know that well how. I mostly do C :|
+09:03:26 <Lemmih> FPS uses unsafePerformIO in a pretty safe way but there's no way for the Haskell typesystem to prove it.
+09:03:43 <mahogny> FPS?
+09:04:15 <Lemmih> FastPackedString. Nice interface to C-like strings.
+09:04:25 <mahogny> ah
+09:05:29 <mahogny> oh well. nothing to do but to live with it for now
+09:06:43 <roconnor> I wonder if I hsould use that modular arithmetic code posted to the haskell-cafe.
+09:07:12 <Lemmih> Anyhow, if you feel the need for IO in STM then you should probably reconsider if you actually need STM.
+09:10:11 <SamB> or if you are using it right...
+09:10:51 <mahogny> yeah. I won't use STM for this
+09:11:11 <mahogny> bbl
+09:11:42 <Lemmih> Conjure is a pretty good example at how not to use STM.
+09:12:47 <SamB> yeah, I didn't really think it was doing anything for us
+09:13:59 <dcoutts__> CosmicRay: so you want something like an enumeration of the column types that matches the tags for the values
+09:14:02 <SamB> I mean, I don't think it would matter if we changed all the TChans to regular Chans...
+09:14:14 <dcoutts__> CosmicRay: perhaps just use a value that is undefined?
+09:14:26 <dcoutts__> CosmicRay: eg: IntT undefined
+09:14:37 <CosmicRay> for the custom types, you mean?
+09:14:48 * dcoutts__ assumes IntT is a constructor for a SqlValue type or similar
+09:14:56 <CosmicRay> oh, I see what you're saying
+09:15:11 <CosmicRay> dcoutts: no, in HaskellDB, you have data FieldType = IntT | TextT | ...
+09:15:11 <CosmicRay> etc.
+09:15:15 <CosmicRay> it doesn't store a value.
+09:15:19 <dcoutts__> oh, ok
+09:15:28 <dcoutts__> so what's wrong with that?
+09:15:32 <CosmicRay> dcoutts: so your suggestion is to just return a SqlValue, and have the value part be undefined or ignored?
+09:15:38 <dcoutts__> right
+09:15:59 <CosmicRay> I could probaby do that.  SqlValue is more tuned to Haskell types, but that could work.
+09:16:01 <dcoutts__> it'd save having two types that are basically the same and having to keep them in sync
+09:16:20 <dcoutts__> oh you want to know the SQL type not the converted Haskell type?
+09:16:30 <dcoutts__> of a result set column that is
+09:16:31 <CosmicRay> correct
+09:16:39 <SamB> String, anyone?
+09:16:43 <CosmicRay> or a column in an arbitrary table.  same thing either way.
+09:16:46 <dcoutts__> yet another enumeration?
+09:16:56 * SamB pokes fun at SQL
+09:17:17 <dcoutts__> CHAR | VARCHAR | ... | Custom String
+09:17:24 <Trevion> Poking fun at SQL is like shooting fish in a barrel.
+09:17:30 <CosmicRay> dcoutts: that's essentially the approach HSQL takes
+09:17:43 <SamB> hmm, Stars! likes to name games that...
+09:17:59 <dcoutts__> CosmicRay: and so is there anything wrong with that approach?
+09:18:30 <CosmicRay> dcoutts: not necessarily.  there are two questions.  1) how far do you take the regular types?  (I think hsql goes to far),  2) how do you encode precision?
+09:18:42 <CosmicRay> So one could have Char Int, VarChar Int
+09:18:53 <CosmicRay> Numeric Int Int, etc.
+09:18:53 <dcoutts__> right
+09:19:09 <SamB> hmm, what is something like verbatim but with wrapping and not necessarily monspaced?
+09:19:13 <CosmicRay> the downside is the confusion between this and the SqlValue
+09:19:17 <CosmicRay> but I suppose that is unavoidable
+09:19:55 <dcoutts__> or use SqlValue undefined
+09:21:18 <dcoutts__> CosmicRay: on another hdbc issue: I was wondering why the prepared/substituable query feature uses strings with special placeholders rather than something like :: [String] -> String
+09:21:21 <CosmicRay> dcoutts: the downside of SqlValue is that it doesn't provide a built-in method of encoding precision.  though while looking at APIs, things like ODBC make it a separate call anyway
+09:21:51 <CosmicRay> you're referring to the 'execute' call?
+09:22:04 <dcoutts__> probably, I don't recall exactly
+09:22:31 <CosmicRay> I'm not quite sure I understand the question.  You're asking why HDBC uses the ? placeholders instead of providing a "sqlEscape" function like HSQL?
+09:23:09 <dcoutts__> right, I don't like either particularly
+09:23:22 <dcoutts__> as a representation I'd use [String] -> String
+09:23:34 <dcoutts__> so the function gives you the substitution
+09:23:39 <CosmicRay> I'm not sure I follow.  You'd take a list of strings and return what?  a new query?
+09:23:49 <CosmicRay> there are two reasons for using the '?' placeholders
+09:23:51 <dcoutts__> right you substitute for the placeholders
+09:24:20 <CosmicRay> first, many SQL servers let you "prepare" a statement once, and then execute it multiple times, using these placeholders.  Think inserting 50,000 rows or something.  It's a performance optimization.
+09:24:32 <CosmicRay> executeMany, for instance, should be able to take good advantage of this.
+09:24:41 <dcoutts__> sure I understandy why you'd want to have prepared queries
+09:24:42 <CosmicRay> it's a key thing that was lacking in HSQL
+09:24:49 <dcoutts__> it seems rather "stringy" to use ? placeholders
+09:25:09 <CosmicRay> secondly, by using these placeholders, and passing the varying parameters separately, all escaping issues are avoided.
+09:25:17 <CosmicRay> that's actually what most SQL servers use
+09:25:22 <dcoutts__> I was just wondering if there were a more natual Haskell representation than strings with "?%$" chars
+09:25:22 <CosmicRay> PostgreSQL uses $1, $2, $3. etc
+09:25:25 <CosmicRay> but most support ?
+09:25:42 <CosmicRay> Say you have INSERT INTO foo VALUES (?, ?)
+09:25:52 <CosmicRay> and you send that to a SQL server to prepare.
+09:25:59 <CosmicRay> now you have 500 rows you want to insert.
+09:26:14 <CosmicRay> you can say, effectively, execute(prepared, "val1", "val2")
+09:26:20 <CosmicRay> execute(prepared, "val3", "val4")
+09:26:21 <CosmicRay> etc.
+09:26:28 <dcoutts__> you can get the "?" version internally if you do (\q -> q (repeat "?"))
+09:26:28 <CosmicRay> the sql server only has to compile the query once
+09:27:09 <dcoutts__> CosmicRay: I totally understand why you want to have prepared queries
+09:27:26 <CosmicRay> ok.
+09:27:32 <CosmicRay> you just think we should have a better front-end to them?
+09:27:36 <dcoutts__> CosmicRay: I was just wondering if there were a nicer representation than "blah blah ? blah"
+09:27:39 <dcoutts__> right
+09:27:46 <dcoutts__> eg [String] -> String
+09:27:59 <CosmicRay> well, you'd have to have a query string in there someplace too, right?
+09:28:01 <dcoutts__> myQuery ["foo", "bar"]
+09:28:23 <CosmicRay> I mean, say you have "UPDATE foo SET bar = ? WHERE baz = ? and quux = ?"
+09:29:26 <CosmicRay> I think a nicer representation would be nice. in fact, with postgresql I have to parse the SQL so I can reliably convert ? to $1, $2, $3, etc.
+09:29:48 <dcoutts__> well if you're writing literal SQL string then that might be one way of doing it
+09:30:11 <dcoutts__> but I wouldn't do that in an API
+09:30:43 <xerox> Cale: was dons contacted about the bug?
+09:30:53 <dcoutts__> but by all means provide a "blah $1" :: String to [String] -> String wrapper
+09:31:30 <CosmicRay> but what is the point of doing that manually, when the SQL server will do it for you?
+09:31:51 <CosmicRay> you have a function to take a query string with placeholders, a list of values, and return a query string with the values substituted in, right?
+09:31:52 <dcoutts__> CosmicRay: for the sake of a uniform and Haskelly API
+09:32:20 <CosmicRay> But I mean, what would anybody need that sort of query string for?
+09:32:33 <CosmicRay> I'm having trouble figuring out a use case other than sending it directly on to the sql server anyway
+09:32:47 <CosmicRay> keep in mind that the result of this will be database-dependant since different DBs have different escaping rules.
+09:33:14 <CosmicRay> also I'm not entirely certain that this can be done reliably, because literals in SQL have to be represented differently depending on the type of column they're going into, but arguments to execute don't
+09:33:27 <CosmicRay> and we don't know the type of column they're going into at prepare time
+09:33:29 <dcoutts__> hmm, complicated
+09:33:34 <musasabi> having reliable escaping is very important
+09:33:39 <dcoutts__> indeed
+09:33:43 <CosmicRay> for instanc,e you can't say INSERT INTO intcolumn VALUES ('123')
+09:33:56 <CosmicRay> musasabi: you don't need it at all if you have support for replacable variables
+09:34:00 <CosmicRay> that's my opinion anyway ;-)
+09:34:32 <musasabi> CosmicRay: as long as you make can make it safe for the user to put the string from the user into the database with "oops" issues
+09:34:39 <dcoutts__> CosmicRay: well maybe that is the best way, it was just my first reaction that strings with special placeholders is not a very Haskelly style of API
+09:35:10 <dcoutts__> CosmicRay: I don't recally, is that in the backend api or the front end api? 
+09:35:11 <CosmicRay> dcoutts: I have to run right now, but if you have some suggestions, I'd be happy if you'd email them to me or post them on -cafe
+09:35:18 <dcoutts__> recally/recall
+09:35:18 <CosmicRay> dcoutts: or better yet, send patches ;-)
+09:35:25 <dcoutts__> CosmicRay: ok
+09:36:05 <CosmicRay> dcoutts: thanks, btw.  I want HDBC to be a community project, really.
+09:36:10 * CosmicRay poofs 
+09:43:16 <roconnor> What is the comment I add to the top of my file to turn on ghc extenstions?
+09:43:52 <Lemmih> {-# OPTIONS_GHC -fglasgow-exts #-}
+09:54:36 <Lemmih> For conjure interested souls: http://www.scannedinavian.org/~lemmih/conjure <- my conjure hackings.
+10:00:34 <humasect> =o
+10:01:08 <humasect> thank you
+10:03:24 <humasect> missing configure* ?
+10:04:56 <Lemmih> I deleted them. Does darcs bark?
+10:05:17 <humasect> nope
+10:05:46 <Lemmih> Ack. I forgot to mention that in the change log :( I replaced the build system with Cabal.
+10:06:21 <humasect> ahh. there is no .cabal
+10:07:58 <Lemmih> oh...
+10:09:01 <Lemmih> Pushed.
+10:10:22 * basti_ pushes Lemmih 
+10:10:36 * xerox pushes basti_
+10:10:58 * basti_ tips over and pushes Lemmih over domino-like
+10:11:24 * Lemmih tips and hits xerox.
+10:11:46 * xerox does the same, on basti_ again.  And asks, can we get off the toroid please?
+10:12:25 <Lemmih> I would love to get my hands on a recursive domino game.
+10:12:39 <xerox> Lemmih: physically?
+10:13:55 <Lemmih> Yeah. Would probably have to enter some weird alternate reality for it to be possible.
+10:14:10 <humasect> ah, default Setup.hs i'm guessing
+10:14:38 <Lemmih> *sigh* I keep forgetting files.
+10:14:45 <Lemmih> humasect: One moment, please (:
+10:15:43 <xerox> Like an Internet Relay Chat reality ;)
+10:15:46 <humasect> no worries. it seems i need fptools or MissingH also
+10:20:03 <lisppaste2> Lethalman pasted "Simple novice test" at http://paste.lisp.org/display/15146
+10:22:05 <Lemmih> humasect: You only need FilePath and FPS now.
+10:23:31 <humasect> ah. is FilePath part of something larger? i can't seem to find it. i thought MissingH had a System.FilePath
+10:23:55 <Lemmih> @where FilePath
+10:23:56 <lambdabot> I know nothing about filepath.
+10:24:13 <Lemmih> @where+ FilePath http://scannedinavian.org/~lemmih/FilePath
+10:24:14 <lambdabot> Done.
+10:24:32 <humasect> thanks
+10:24:43 <palomer> >;o
+10:26:59 <Lemmih> <:o)
+10:29:30 <reddi> i am looking for the documentation of haskell (which functions are in Data.list e.g.) but i have not bookmarked it and i dont find it somehow ;-(
+10:29:56 <reddi> i dont mean that page
+10:29:57 <reddi> http://www.zvon.org/other/haskell/Outputlist/index.html
+10:30:41 <Lemmih> @docs Data.List
+10:30:42 <lambdabot> http://haskell.org/ghc/docs/latest/html/libraries/base/Data-List.html
+10:31:12 <Lemmih> @docs
+10:31:13 <lambdabot> http://haskell.org/ghc/docs/latest/html/libraries/index.html
+10:31:16 <reddi> Lemmih: thx, that was the page which i was looking for
+10:31:39 * Lemmih hugs lambdabot.
+10:35:37 <humasect> darcs is wonderful
+10:46:21 <Heffalump> if I want a fast implementation of sets with <=32 possible elements, I'll have to write it myself, won't I?
+10:47:03 <basti_> define fast.
+10:47:09 <basti_> the one we have is O(log n)
+10:47:56 <basti_> there is faster algorithms if you only want to ask memberships of disjoint sets
+10:47:57 <monochrom> You can use Data.Bits
+10:47:59 <Heffalump> well, how close will IntSet come to the bitset implementation?
+10:48:18 <Heffalump> monochrom: that's what I meant by writing one myself.
+10:48:31 <reddi> is there a function which transforms (<=) in ordering?
+10:48:41 <reddi> e.g. GT and LT 
+10:49:02 <Lemmih> compare?
+10:49:18 <Lemmih> Oh wait. I misunderstood.
+10:49:25 <reddi> compare doesnt use the operator ;-(
+10:49:31 <reddi> i want to use sortBy
+10:49:42 <reddi> and sortby uses as a first argument GT/LT
+10:49:51 <monochrom> What is there to write?  x `ismemberof` s = testBit s x  ?
+10:50:23 <frederik> hello
+10:50:25 <frederik> > toConstr (True) == toConstr [()]
+10:50:26 <lambdabot>  Not in scope: `toConstr'
+10:50:28 <frederik> True
+10:50:41 <Heffalump> monochrom: well, I'd like an interface-compatible replacement
+10:50:44 <Heffalump> for Data.Set
+10:51:14 <frederik> why does the Constr Eq definition return True for constructors which aren't equal?
+10:51:40 <monochrom> Data.IntSet says "The implementation is based on big-endian patricia trees."
+10:51:45 <basti_> @index toConstr
+10:51:46 <Heffalump> monochrom: yeah
+10:51:46 <lambdabot> Data.Generics.Basics, Data.Generics
+10:52:09 * Heffalump decides to just write the trivial bitset implementation
+10:52:56 <monochrom> Hey, you can write one transformer from Bits to Set and it will be of universal use.
+10:53:42 <Heffalump> err, maybe, but it's not clear how to keep complete interface compatibility without fixing on a particular implementation type
+10:54:09 <Heffalump> cos otherwise the using module has to communicate what type (Word32 etc) to use for the implementation each time it declares a Set
+10:54:26 <Heffalump> whereas if I just pick one, then I can replace import Data.Set as Set with import Data.BitSet as Set
+10:54:45 <Heffalump> (and of course make an implicit promise that my usage will be valid)
+10:54:47 <Lemmih> frederik: 'constrRep True' and 'constrRep [()]' are both '2'.
+10:54:56 <Heffalump> so I guess I really should have abstracted my usage better
+10:56:46 <reddi> i need a function which transforms relations (>=) etc. in GT and LT for using sortBy
+10:56:50 <Lemmih> urk. s/True/(toConstr True)/ aso.
+10:56:56 <reddi> is there a function in haskell which does that for me?
+10:57:49 <Heffalump> if you just want a reversed sort, I suggest
+10:57:59 <Heffalump> > sortBy (flip compare) [2,3,1]
+10:58:01 <lambdabot> [3,2,1]
+10:58:01 <monochrom> I see the problem.
+10:58:24 <Heffalump> if you want something more complicated, write it yourself
+10:58:51 <frederik> Lemmih: but if (show x /= show y) then I expect (x /= y) in general
+10:59:10 <frederik> should I use 'show' to compare constructors, or what?
+10:59:15 <Heffalump> if show x /= show y I hope that x /= y all the time!
+10:59:25 <Heffalump> oh, Eq might be dodgy
+10:59:52 <Lemmih> frederik: You're right. It's a bit weird.
+11:01:36 <Heffalump> I can't use GHC rewrite rules to transform from one datatype to another, can I?
+11:03:25 <araujo> Hello.
+11:03:34 * araujo gets some ice cream
+11:07:13 * xerox wants ice cream
+11:07:59 * araujo throws at xerox an ice cream sandwhich
+11:08:53 * xerox yummys
+11:14:00 <rep> what's your opinion on prolog?
+11:14:54 <Lor> prolog / scheme // mercury / ml
+11:15:15 <rep> what does that mean? :)
+11:15:19 <xerox> hehe
+11:15:23 <Lor> "prolog is to scheme as mercury is to ml"
+11:15:32 <xerox> It's like ..<Interrupted by Lor>
+11:15:32 <Lor> Or "prolog is to mercury as scheme is to ml"
+11:15:47 <xerox> ...cool.
+11:15:59 <rep> i don't know mercury unfortunately
+11:16:00 <Lor> Prolog is _very_ scheme-ish.
+11:16:09 <xerox> Well...
+11:16:10 <Lor> (or lispish, if you will)
+11:16:15 <xerox> You think so?
+11:16:29 <goron> I don't think so. 
+11:16:36 <Lor> It's untyped, and it has the same kind of code/data -relationship.
+11:16:36 <rep> i believe Paradigms of
+11:16:38 <rep> Artificial Intelligence Programming
+11:16:49 <rep> by Norvig implements prolog in lisp
+11:16:53 <Lor> The only difference (and a major one) is the execution model.
+11:17:05 <frederik> it's very but not _very_
+11:17:21 <Lor> Well, all right. :)
+11:17:45 <xerox> It's like moving things between arguments of functions, trating arguments as pointer/out args.
+11:18:02 <xerox> At least to me, after an afternoon of tries :)
+11:18:08 <rep> xerox read CTM
+11:19:53 <takuan> humz
+11:25:49 <Lemmih> Hi CosmicRay.
+11:26:44 <CosmicRay> dcoutts: re
+11:26:51 <CosmicRay> hey lemmih
+11:35:16 <frederik> is there a way to derive a Data instance outside of the module that declares the data type?
+11:35:42 <musasabi> instance Data FooBar where ...
+11:36:09 <musasabi> if the constructors are hidden you have to use TH
+11:36:20 <musasabi> which is unportable (but so is Data)
+11:40:15 <frederik> so that gives you a derived instance? is that a literal "..."?
+11:41:25 <frederik> parse error on input `...'
+11:53:19 <Trevion> frederik, I don't think you can use haskell's deriving form except at the original definition.
+11:54:40 <rep> http://www.joelonsoftware.com/articles/ThePerilsofJavaSchools.html
+12:40:08 <goron> rep: I think you can better post that in ##java.
+12:40:23 <rep> they'll think i'm a troll!
+12:42:49 <monochrom> Haha. If you say things like "Haskell is for nerds" here, we won't think you're trolling, I believe.
+12:43:16 <araujo> Some people might actually feel proud.
+12:43:19 * araujo giggles
+12:44:21 <goron> http://www.joelonsoftware.com/articles/TestYourself.html
+12:44:33 <goron> These questions aren't that hard either. 
+12:44:59 <goron> One question depends on details. 
+12:45:06 <goron> I.e. what's
+12:45:12 <goron> >chr('t')
+12:45:16 <goron> >chr 't'
+12:46:51 <goron> >Data.Char.chr 't'
+12:47:17 <goron> @seen foo
+12:47:18 <lambdabot> I haven't seen foo.
+12:48:34 <goron> Ok, it's called ord...
+12:50:23 <xerox> goron: you must put a whitespace after the '>'
+12:50:55 <goron> > ord 't'
+12:50:56 <lambdabot> 116
+12:52:42 <palomer> @seen araujo
+12:52:43 <lambdabot> araujo is in #haskell, #gentoo-haskell and #haskell.es. Last spoke 9
+12:52:43 <lambdabot> minutes and 23 seconds ago.
+12:52:59 * araujo throws palomer a sweet lambda
+12:54:40 <goron> Oh, no, you don't need to know any detail.
+12:54:54 <palomer> araujo: getting my messages
+12:54:56 <palomer> ?
+12:55:02 <araujo> palomer, no :-(
+12:55:07 <araujo> palomer, you registered?
+12:55:12 <goron> (except what a char * really is)
+13:13:10 <benny> hello, can someone please help me generalize this simple arrow code?
+13:13:25 <benny> http://rafb.net/paste/results/7P3U3S93.html
+13:14:35 <benny> oops sorry i mean this one: http://rafb.net/paste/results/7P3UES93.html
+13:19:48 <ski_> foldl (++) [] = concat
+13:20:01 <ski_> (and inefficiently, too)
+13:20:48 <benny> thanks that's good to know, but i'm interested in how to get rid of the repeated lines
+13:22:58 <Lor> benny, do o1..o9 all have the same type?
+13:23:11 <Lor> So c is of type a z z ?
+13:23:22 <ski_> hm, is there an composeA ?
+13:23:26 <Lor> Ah, clearly.
+13:23:29 <ski_> Lor : yes
+13:23:32 <benny> Lor: yes
+13:23:37 <Lor> ski, >>> ? :)
+13:24:07 <benny> hm.... yeah i guess i can use >>> and fold?
+13:24:10 <ski_> hm .. rather something like a scanl
+13:24:11 <Lor> Not quite.
+13:24:45 <araujo> palomer!!!
+13:25:01 <palomer> y0
+13:25:02 <ski_> Arrow ar => [ar a a] -> ar a [a]
+13:25:13 <palomer> that looks like a freaky type
+13:25:18 <palomer> are arrow parsers fun?
+13:25:23 <Lor> Yes.
+13:25:48 <ski_> hm .. what to call the function ?
+13:26:41 <Lor> Well, I'd say sequenceA, except that I already have a different one:
+13:26:57 <Lor> asequence :: Arrow a => [a b c] -> a b [c]
+13:27:41 <benny> Lor: also i'd like something like the code i posted, but instead of "c" i want "c (1*n)", "c (2*n)", "c (3*n)", ... for each line
+13:28:13 <ski_> foo [] = arr (const []); foo (f:fs) = f >>> (returnA &&& foo fs) >>> arr (uncurry (:))
+13:28:19 <ski_> is that right ?
+13:28:59 <ski_> @type let foo [] = Control.Arrow.arr (const []); foo (f:fs) = f Control.Arrow.>>> (Control.Arrow.returnA Control.Arrow.&&& foo fs) Control.Arrow.>>> Control.Arrow.arr (uncurry (:)) in foo
+13:29:00 <lambdabot> forall (a :: * -> * -> *) b.
+13:29:00 <lambdabot> (Control.Arrow.Arrow a) =>
+13:29:00 <lambdabot> [a b b] -> a b [b]
+13:30:16 <ski_> this reminds of a scanl, in some way, i think
+13:30:20 <stesch> Do I see this right that "read" can only parse integers?
+13:30:26 <ski_> @type scanl
+13:30:27 <lambdabot> forall a b. (a -> b -> a) -> a -> [b] -> [a]
+13:31:07 <ski_> > read "(12.34,False,\"hello\")" :: (Double,Bool,String)
+13:31:09 <lambdabot> (12.34,False,"hello")
+13:31:22 <stesch> Is there some big reference like the Hyperspec for Common Lisp? The Report isn't very complete.
+13:31:45 <araujo> stesch, The standar libraries
+13:31:57 <araujo> http://www.haskell.org/ghc/docs/latest/html/libraries/index.html
+13:32:07 <stesch> ski_: Oh, thanks. That was easy. :-)
+13:33:43 <ski_> @type let swing f c a = (f ($ a)) c in swing scanl
+13:33:44 <lambdabot>   Occurs check: cannot construct the infinite type: t = a -> b ->
+13:33:44 <lambdabot> t
+13:33:44 <lambdabot>   Expected type: ((a -> b -> t) -> b -> t) -> t1 -> t2
+13:33:51 <ski_> heh
+13:34:49 <ski_> @type let swing f c a = (f ($ a)) c in swing scanr
+13:34:50 <lambdabot> forall a b. b -> a -> [a -> b -> b] -> [b]
+13:35:04 <stesch> araujo: OK, now in my bookmarks. Thanks.
+13:35:13 <araujo> welcome
+13:36:06 <ski_> @type let swing f c a = (f ($ a)) c in \fs a -> swing scanr a () (map ($ ()) fs)
+13:36:07 <lambdabot> forall b. [() -> () -> b -> b] -> b -> [b]
+13:36:40 <ski_> @type let swing f c a = (f ($ a)) c in \fs a -> swing scanr a () (map const fs) fs)
+13:36:41 <lambdabot> parse error on input `)'
+13:36:51 <ski_> @type let swing f c a = (f ($ a)) c in \fs a -> swing scanr a () (map const fs)
+13:36:52 <lambdabot> forall b. [b -> b] -> b -> [b]
+13:37:55 <ski_> > let swing f c a = (f ($ a)) c in (\fs a -> swing scanr a () (map const fs)) [\x -> x + 10^n * n | n <- [1..4]] 0
+13:37:57 <lambdabot> [43210,43200,43000,40000,0]
+13:38:58 <ski_> > let swing f c a = (f ($ a)) c in (\fs a -> swing (scanl . flip) a () (map const fs)) [\x -> x + 10^n * n | n <- [1..4]] 0
+13:39:00 <lambdabot> [0,10,210,3210,43210]
+13:39:32 <ski_> so, our arrow function is a counterpart to this one ..
+13:41:56 <benny> hm.... excuse me fellows, but i can't seem to understand anything that guys have said.... are you still talking about my question?
+13:42:28 <SamB> benny: I don't either ;-)
+13:44:01 <palomer> the list monad is extra cool
+13:47:12 <ski_> benny: : was just pondering the special case of the '(->)' Arrow, to see if that would give an idea for a name for this function
+13:47:19 <ski_> i.e. foo above
+13:47:48 <ski_> benny: : anyway, you want something like foo, i think .. and then concatenating the result
+13:48:52 <benny> hm... it looks pretty complicated
+13:49:06 * ski_ rewrites to proc-do-syntax
+13:49:40 <stesch> Can I define a function in interactive GHC? Or do I have to write it in a file and load it?
+13:50:02 <palomer> newtype State s a = State { runState :: (s -> (a,s)) }  <--what does this notation mean?
+13:50:07 <xinming> stesch: use let
+13:50:40 <ski_> foo [] = proc _ -> do {returnA -< []}; foo (f:fs) = proc a0 -> do {a <- f -< a0; as <- foo fs -< a; returnA -< (a:as)}
+13:50:51 <ski_> benny : i think that should work
+13:51:01 <xinming> stesch: let fun_name x = sum [1..x] eg..
+13:51:42 <palomer> wait wait wait, I think I understand the State monad
+13:52:00 <ski_> nice
+13:52:12 <palomer> State (s ->(a,s)) <--the a here is the value which we're interested in, and the state is what is changing, right?
+13:52:15 <stesch> xinming: Thanks. I'm reading YAHT and was just playing with filter.
+13:52:23 <benny> ski_: hm... in the code i pasted a chain of 9 arrows is created... where do i insert the constant 9 with your foo function?
+13:54:19 <ski_> os <- foo (replicate 8 c) -< o1
+13:54:29 <ski_> instead of the lines calling the 'c' arrow
+13:55:24 <palomer>   (State x) >>= f = State $ \s -> let (v,s') = x s in runState (f v) s'  <
+13:55:32 <ski_> 'os' will here not include 'o1'
+13:55:42 <palomer> <--- isn't f supposed to be of type a -> m b
+13:55:54 <ski_> palomer : it is
+13:56:07 <palomer> oh, right, forgot about associativity
+13:56:23 <palomer> hrm
+13:56:34 <palomer> looks like I'm going to have to write out an example with a pen and paper one of these days
+13:56:39 <ski_> (State x) >>= f = State $ \s -> let (v,s') = x s in let State y = f v in y s'
+13:57:46 <palomer> wait, what's runState?
+13:58:39 <benny> ski_: cool thanks i'll give it a shot, but what about this: http://rafb.net/paste/results/mZ1Pxy10.html
+13:58:43 <palomer> maybe if I understood the line newtype State s a = State { runState :: (s -> (a,s)) }  it would help:o
+14:00:41 <ski_> State :: (s -> (a,s)) -> State s a
+14:00:51 <ski_> runState :: State s a -> (s -> (a,s))
+14:00:57 <ski_> runState (State x) = x
+14:04:43 <monochrom> Do you understand "newtype State s a = State (s -> (a,s))"
+14:05:26 <palomer> yes
+14:06:10 <monochrom> Cool.  The meaning of "newtype State s a = State { runState :: (s -> (a,s)) }" is the same as that of "newtype State s a = State (s -> (a,s))", except...
+14:06:41 <monochrom> it also introduces "runState" as the field name for the field of type (s -> (a,s)).
+14:07:27 <palomer> what if two fields have this type?
+14:07:28 <monochrom> Thus, runState is a function that has type and meaning as what ski_ says.
+14:07:42 <monochrom> Ah, but newtype will allow one field only.
+14:07:48 <palomer> oh, very good point
+14:08:04 <palomer> so the syntax is proper to newtype only
+14:08:30 <monochrom> If you use "data" you can have "data Point = Point { x::Int, y::Int }", x and y are distinct fields of this record type.
+14:08:56 <monochrom> So the syntax applies to both newtype and data, but newtype has its restriction too.
+14:09:02 <humasect> @where SQL
+14:09:02 <lambdabot> I know nothing about sql.
+14:10:05 <humasect> @where SDL
+14:10:05 <lambdabot> I know nothing about sdl.
+14:10:12 <monochrom> I hope that helps.
+14:10:52 <palomer> what if you want to have 2 kinds of points?
+14:11:12 <palomer> data Point = intPoint {x::Int, y::Int} | floatPoint {x:Float,y:Float}
+14:11:27 <monochrom> Now I need to read the docs.
+14:11:28 <palomer> and how would I create an intPoint?
+14:12:34 <hulahub> how to convert from Int to Integer ?
+14:13:57 <monochrom> In declaring Point, you can't have two x's of two different types in two branches.
+14:14:32 <monochrom> You are forced to do: data Point = IntPoint {xi, yi :: Int} | FloatPoint {xf, yf:: Float}
+14:15:03 <monochrom> However, you're allowed to do: data Funny = A {x :: Int} | B {x :: Int, y :: String}
+14:15:10 <monochrom> It is rather odd.
+14:15:23 <palomer> that IS odd
+14:16:11 <palomer> so if I wanted to create an sml like record I would write data Foo = Bar {x:A,y:B} ?
+14:16:52 <monochrom> I think the reason is to allow compilers to desugar that into a pure datatype declaration (no labels) plus a few corresponding function declarations.  Thus the compiler introduces function x :: Funny -> Int.  You wouldn't want it to coexist with x :: Funny -> SomethingElse.
+14:18:11 <monochrom> Another odd restriction is that if you have Funny having label x, then all other types must not have label x again.  Again, same reason, wouldn't want x :: SomeOtherRecordType -> Whatever to get into the way.
+14:18:24 <palomer> yeah
+14:18:28 <palomer> gotcha
+14:18:37 * palomer is off
+14:23:23 <araujo> palomer!!
+14:27:06 <humasect> data Point a = {x :: a, y :: a}
+14:32:39 <palomer> eh?
+14:32:59 * araujo throws a lambda-net at palomer 
+14:33:33 * palomer is itching to write a theorem prover
+14:33:38 <palomer> pfenning's book is crap
+14:34:28 * palomer is itching to write anything!
+14:36:13 <palomer> does PArrows allow left recursion?
+14:36:34 * araujo wonders if palomer reads his pirvmsg
+14:37:05 <Philippa> who're you writing pervmsgs to?
+14:37:25 <araujo> Philippa, ?
+14:37:29 * araujo saluda a Nomius_ 
+14:37:43 <Philippa> just taking the piss out of your typo, nothing special :-)
+14:37:54 <araujo> OH! 
+14:37:57 <araujo> :-(
+14:40:08 * araujo wonders if he should eat more ice-cream 
+14:40:14 <Philippa> nothing wrong with writing pervmsgs, y'know...
+14:40:25 <SamB> how would you do monads in an OO system with multimethods?
+14:40:41 <araujo> SamB, language?
+14:40:55 <SamB> Slate, to be specific
+14:41:08 <araujo> Oh, interesting.
+14:42:01 <araujo> I would go creating a monadic class ... make instance of it.... mmmm
+14:42:25 <SamB> what methods would you put on that class?
+14:42:41 <SamB> (nevermind the fact that slate doesn't actually have classes)
+14:43:26 <araujo> The monadic ones ... all of them , you could also write a superclass with only , return and >>= , and then create subclasses of it for rest of the methods.
+14:43:42 <arjanb> must system don't have overloading on return types so implementing 'return' is hard
+14:43:45 <palomer> where's the documentation on PArrows?
+14:43:46 <araujo> Oh well, never used Slate, im talking from a smalltalkish perspective, isn't it the same?
+14:44:08 <arjanb> *most systems
+14:44:16 <SamB> Slate is not quite the same
+14:44:30 <araujo> arjanb, that'd be possible in smalltalk
+14:44:48 <SamB> but if it works in Smalltalk it probably isn't hard to translate into Slate...
+14:44:53 <SamB> araujo: eh?
+14:44:57 <araujo> yeah, i think so....
+14:44:59 <palomer> is if exactly like a function in haskell?
+14:45:15 <SamB> if?
+14:45:16 <SamB> no.
+14:45:24 * araujo lost
+14:45:30 <SamB> it wants then and else later in the line
+14:45:38 <SamB> or, well, the expression
+14:45:44 <palomer> myIf a b c = if a then b else c 
+14:45:56 <SamB> if it were a function, you'd just need parentheses
+14:45:56 <Cale> yeah, those work the same way
+14:46:19 <palomer> \x y z -> x y z
+14:46:33 <Cale> that's the same as id.
+14:46:42 <araujo> Well, you can also see it like a function strict in its first argument.
+14:46:48 <palomer> yeah, if is id
+14:46:49 <SamB> myIf True x _ = x; myIf False _ y = y
+14:46:49 <palomer> :O)
+14:47:43 <palomer> Cale: have you tried PArrows yet?
+14:48:07 <ski_> (SamB : did you see http://slate.tunes.org/repos/main/src/unfinished/monad.slate ?)
+14:48:22 <SamB> ski_: yes.
+14:48:42 <SamB> it doesn't make much sense to me...
+14:48:44 <Cale> palomer: yeah, I have
+14:49:37 <Cale> palomer: it seems to work quite quickly, though it's specialised to character parsers
+15:00:05 <reddi> is there a function which gives me e.g. the first 3 elements of a list or do i have to write a function by myself?
+15:00:11 <greenrd> When reading papers about Haskell I'm frequently confused by operator precedences
+15:00:27 <greenrd> What is the precedence of `foo`?
+15:00:36 <araujo> infix
+15:00:42 <arjanb> >take 3 [1..10]
+15:01:06 <gzl> > take 3 [1..10]
+15:01:07 <lambdabot> [1,2,3]
+15:01:11 <gzl> need the space.
+15:01:55 <Philippa> 'lo
+15:02:45 <greenrd> araujo, no, I mean what is the numerical precedence of `foo`? There is some kind of scale from 0 to 9 right?
+15:02:54 <Igloo> greenrd: infixr 9 by default, IIRC
+15:03:02 <araujo> greenrd, yes ... 
+15:03:03 <monochrom> `foo` has infixl 9 until you declare something else.
+15:03:04 <Igloo> greenrd: Bu you can define it at the time you define the function
+15:03:14 <araujo> well, you will need to look at the source code to see the precedence
+15:03:52 <monochrom> Supposedly the author has to tell the users about it in the external documentation.
+15:04:11 <monochrom> But these days authors can write code but can't write docs.
+15:04:29 <monochrom> They are called hackers, as opposed to engineers.
+15:04:46 <araujo> amen
+15:05:11 * greenrd supposes that he should not mention how many times he has documented his code
+15:06:21 <Igloo> You can use :i in ghci/hugs to find out
+15:06:52 <monochrom> Does Haddock generate the fixity doc for you?
+15:07:23 <greenrd> Igloo, cool - that will be useful next time I read a paper with actual source code supplied ;)
+15:08:07 <monochrom> I guess the hackers have found an automated solution to the doc problem afterall.
+15:08:39 <greenrd> Automated docs are no substitute for hand-written ones.
+15:08:51 <greenrd> For one thing, they actually stay up to date!
+15:09:58 <monochrom> I'm sure there is a workaround.  Say, have Haddock by default look into the CVS tree and read a one-year-old version instead.
+15:10:30 <greenrd> heh
+15:12:35 * Philippa just unwittingly ran into a GADT-related issue...
+15:13:07 <Philippa> although one I should've thought of
+15:14:20 * Philippa kicks herself
+15:14:33 <Philippa> actually use GADTs on purpose, duh
+15:26:29 <Taral> Anyone know of an implementation of NHC.Binary for ghc?
+15:27:20 <Taral> ooh, DrIFT has one.
+15:35:01 <adu> i wish i knew more haskell
+15:35:32 <basti_> adu: practice.
+15:35:58 <Philippa> definitely. The language's impressively simple for what you can get it to do
+15:36:07 <adu> i suppose winter vacation is the best time
+15:36:23 <adu> i have hugs
+15:36:47 <adu> not like i have any excuse...
+15:36:53 <palomer> ooooh, higher order patterns
+15:37:02 <adu> lol
+15:37:13 <ski_> palomer : where ?
+15:37:20 <palomer> oh, was just reading about them
+15:37:30 <adu> hmm
+15:40:37 <adu> so whats a higher order pattern according to what you're reading?
+15:41:10 <adu> i would think a higher order pattern would be something like container, wall
+15:41:18 <adu> brb
+15:42:45 <basti_> adu: "container"?
+15:43:10 <basti_> you mean like lists?
+15:44:22 <benny> any med students or doctors in the room?
+15:44:41 <basti_> o.0
+15:45:16 <Taral> is there an efficient way to reflect a C structure into Haskell?
+15:45:46 <basti_> Taral: we have an FFI and several wrappers
+15:45:58 <Taral> no, not C code, just C structures
+15:46:17 <basti_> how would you access C structs without C code?
+15:46:22 <Taral> something like FastPackedString, but for arbitrary structures.
+15:46:35 <Taral> basti_: Storable type is the usual way
+15:46:49 <basti_> yea
+15:46:59 <Taral> but it makes me twitch :(
+15:47:06 <Taral> because it looks like a lot of copying
+15:47:08 <basti_> so?
+15:47:09 <basti_> ^^
+15:47:32 <basti_> why do you want to do this, btw?
+15:48:24 <Taral> trying to do a network server and it deals with a bunch of structures I'd rather not unpack and box up
+15:48:32 <basti_> you're sure that optimisation will help your already mature program a lot?
+15:48:40 <Taral> oh, I don't have a program yet :)
+15:48:46 <Taral> I'm thinking ahead.
+15:48:58 <basti_> ah
+15:49:13 <Taral> I suppose I'll write it the slow way and see if it really matters or not
+15:49:26 <basti_> yes
+15:49:29 <basti_> best start clean and easy
+15:49:33 <basti_> you can always optimize later
+16:08:08 <humasect> @ghc-src List.take
+16:08:09 <lambdabot> Unknown command, try @listcommands.
+16:08:13 <humasect> @libsrc List.take
+16:08:14 <lambdabot> List.take not available
+16:08:39 <humasect> @libsrc Data.List.take
+16:08:39 <lambdabot> Data.List.take not available
+16:19:57 <SyntaxNinja> woot
+16:20:57 <humasect> take (I# n#) xs = takeUInt n# xs    <-- in this code, what is # ?
+16:21:17 <humasect> same with type definitions. takeUInt :: Int# -> [b] -> [b]
+16:22:58 <arjanb> idents with # are primitives in ghc
+16:39:20 <reddi> what is the reason that http://pastebin.com/483599 is wrong?
+16:40:07 <reddi> http://pastebin.com/483600
+16:40:11 <reddi> that is the same with error message
+16:40:14 <mauke> SLeaf is redundant
+16:40:28 <reddi> i know that i dont use SLeaf now ;-)
+16:40:45 <basti_> reddi: (x x) means "apply x to x"
+16:41:02 <basti_> stop thinking in C
+16:41:09 <SamB> @type \x -> x x
+16:41:10 <lambdabot>   Occurs check: cannot construct the infinite type: t = t -> t1
+16:41:10 <lambdabot>   Expected type: t
+16:41:17 <reddi> hm ... ok but each leaf has 2 values, a and b
+16:41:25 <reddi> each node too
+16:41:28 <basti_> try leaving away the parenthenses
+16:42:07 <basti_> parenthenses are no nonsense in haskell
+16:42:22 <basti_> if you put them around stuff, it means it is preferred
+16:42:31 <basti_> if "stuff" includes spaces that means, application is preferred
+16:42:48 <basti_> or, if it includes the space operator
+16:43:10 <SamB> operator?
+16:43:20 <basti_> like in "x  x"
+16:43:24 <basti_> as opposed to "x * x"
+16:43:25 <SamB> actually, its the adjacency operator
+16:43:33 <SamB> or something like that
+16:43:38 <basti_> yea
+16:43:56 <SamB> @type \x->(x)(x)
+16:43:57 <lambdabot>   Occurs check: cannot construct the infinite type: t = t -> t1
+16:43:57 <lambdabot>   Expected type: t
+16:44:05 <basti_> uh
+16:44:09 <basti_> okay.
+16:44:20 <mauke> \f->f(f) -- optimized!
+16:44:27 <SamB> better!
+16:44:32 <SamB> \f->(f)f
+16:44:45 <basti_> yea the second one doesnt pretend to be similar to c
+16:44:58 <mauke> it's obviously a cast
+16:45:06 <basti_> aw yes.
+16:45:13 <Philippa> \f->(f f) -- I'm not lisp, and neither's my wife!
+16:45:27 <basti_> I don't lisp?
+16:45:58 <basti_> \ifp?
+16:46:11 <Philippa> \lifp surely?
+16:46:31 <basti_> i thought the \ to be a lambda
+16:46:54 <Philippa> yeah, but I'm not used to pronounce those as 'l's
+16:47:01 <basti_> youre not?
+16:47:02 <Philippa> pronouncing, even
+16:47:07 <basti_> in words i am
+16:47:07 <reddi> ok, is there a function which counts the number of a special charakter in a list
+16:47:16 <basti_> reddi: what's special for you?
+16:47:17 <reddi> e.g. count a "banana" -> 3
+16:47:23 <mauke> @type count
+16:47:24 <lambdabot> Not in scope: `count'
+16:47:35 <basti_> > length.filter (=='a) "banana"
+16:47:35 <lambdabot>  lexical error in string/character literal
+16:47:39 <basti_> uh
+16:47:41 <basti_> > length.filter (=='a') "banana"
+16:47:41 <lambdabot>   Expecting a function type, but found `[a]'
+16:47:41 <lambdabot>   Expected type: a1 -> [a]
+16:47:41 <lambdabot>   Inferred type: [a2]
+16:47:49 <basti_> aww
+16:47:54 <basti_> > (length.filter (=='a')) "banana"
+16:47:55 <lambdabot> 3
+16:47:56 <mauke> > length $ filter (== 'a') "banana"
+16:47:57 <basti_> see
+16:47:57 <lambdabot> 3
+16:48:02 <basti_> ah
+16:48:05 <basti_> or that way
+16:48:42 <mauke> > ((length .) . filter) (== 'a') "banana"
+16:48:43 <lambdabot> 3
+16:49:18 <basti_> :D
+16:50:04 <reddi> http://pastebin.com/483615
+16:50:08 <reddi> that is what i want ;-(
+16:50:12 <reddi> but it is not what i get ;-(
+16:50:45 <basti_> i thought we talked about this problem before reddi 
+16:52:42 <mjl69> > map f [1,2,3] where f x = x*x
+16:52:43 <lambdabot> [1,4,9]
+16:52:49 <mjl69> > (>>=) [1,2,3] f where f x = x*x:[]
+16:52:51 <lambdabot> [1,4,9]
+16:53:32 <mjl69> Why does bind have to put values in individual containers and then join them?
+16:53:56 <mauke> @type Monad.liftM
+16:53:57 <lambdabot> forall r (m :: * -> *) a1. (Monad m) => (a1 -> r) -> m a1 -> m r
+16:57:46 <Philippa> mjl69: it doesn't. It does have to do the equivalent thing though
+16:57:59 <mjl69> oh, because, for some reason, the function arg of bind must return a monad.
+16:58:50 <mjl69> I'm getting how it works a little now, just not why.  probably will be clear with further review.
+16:59:21 <Philippa> it's not just 'for some reason'
+16:59:28 <Philippa> the purpose of bind is to 'sequence' monadic operations
+16:59:35 <Philippa> it's function application for monads, effectively
+17:00:30 <Philippa> a word of warning: I don't really go for the 'monads as containers' explanation much myself :-)
+17:01:10 <reddi> what does the errormessage "ERROR "C:\Dokumente und Einstellungen\LR\Desktop\aufgabe8_edit.hs":78 - Illegal 
+17:01:10 <reddi> left hand side in datatype definition    " mean?
+17:01:24 <mjl69> you can map a function on to a monad containing values and get a monad of transformed values.  at least with a list you can.
+17:01:39 <reddi> http://pastebin.com/483615
+17:01:44 <mjl69> Philippa: oh, is it the container model that doesn't make it clear?  
+17:02:17 * araujo likes the container model
+17:02:46 <reddi> can someone explain me what my error message means?
+17:03:24 <mauke> Illegale linke Seite in Datentypdefinition
+17:03:34 <mjl69> If you give me a box of chocolates and I apply the chew function to all of them and return you a box of chewed chocolates, why would I want to individually wrap and unwrap them first?
+17:04:13 <reddi> mauke: LOL
+17:04:21 <reddi> mauke: i mean what does that mean in haskell for me?
+17:04:22 <monochrom> Perhaps it would help to translate "Illegal left hand side in datatype definition" into German?
+17:04:38 <mauke> reddi: what's the code?
+17:04:46 <reddi> 04: 01http://pastebin.com/483615#
+17:04:50 <reddi> 04: 01http://pastebin.com/483615
+17:05:02 <monochrom> In a datatype definition, you have "data ... = ___"
+17:05:03 <reddi> moent
+17:05:04 <reddi> moment
+17:05:07 <reddi> that was wrong
+17:05:11 <monochrom> The ... is the left hand side, isn't it?
+17:05:35 <reddi> http://pastebin.com/483626
+17:05:37 <reddi> that is right ;-)
+17:05:46 <reddi> i posted the wrong error message ;-(
+17:05:53 <reddi> wrong code sry 
+17:05:54 <monochrom> Ah.
+17:06:03 <mauke> Int isn't a valid type variable
+17:06:12 <reddi> Integer?
+17:06:23 <mauke> _variable_
+17:06:26 <carp> there isn't much point in parameterising it by a constant
+17:06:39 <monochrom> Just delete the first "Int".
+17:06:57 <monochrom> Remember that type variables need to start with lower case.
+17:07:11 <reddi> ok, ....
+17:07:15 <monochrom> But your only type variable is 'a' anyway.
+17:07:27 <reddi> but: basti said to me that i cannot use b if i calculate integer values
+17:07:39 <reddi> cause then i get the error: "is not generell enough"
+17:07:39 <monochrom> Don't use b.  Just do nothing.
+17:07:57 <monochrom> data STree a = Nil | SLeaf a Int | Node a Int (STree a Int) (STree a Int) deriving (Eq,Ord,Show)
+17:08:11 <monochrom> That will do.
+17:08:28 <carp> not quite
+17:08:42 <reddi> ERROR "C:\Dokumente und Einstellungen\LR\Desktop\aufgabe8_edit.hs":78 - Illegal 
+17:08:42 <reddi> type "STree a Int" in constructor application    
+17:09:09 <monochrom> Oh of course you should propagate the change to the rest of the code.
+17:09:17 <monochrom> (It goes without saying.)
+17:09:29 <reddi> monochrom but i need the second value ....
+17:09:53 <reddi> and line 78 is the definition
+17:09:55 <reddi> not my code
+17:09:56 <monochrom> oops I see the problem.
+17:10:03 <reddi> data STree a b = Nil |
+17:10:03 <reddi> SLeaf a b |
+17:10:03 <reddi> Node a b (STree a b) (STree a b) deriving (Eq,Ord,Show)
+17:10:08 <reddi> i would like to use THAT if it is possible
+17:10:12 <monochrom> data STree a = Nil | SLeaf a | Node a Int (STree a) (STree a) deriving (Eq,Ord,Show)
+17:10:30 <monochrom> insertSTree :: [a] -> STree a
+17:10:31 <carp> yeah, you need to propogate it to the rest of the definition ;)
+17:11:11 <monochrom> This change, contrary to flawed intuition (when is intuition right anyway?), will not lose your int value.
+17:11:45 <reddi> but a leaf can have an integer value too?
+17:11:55 <reddi> what is the reason that i cannot use simply 
+17:12:08 <reddi> data STree a b = Nil |
+17:12:08 <reddi> SLeaf a b |
+17:12:08 <reddi> Node a b (STree a b) (STree a b) deriving (Eq,Ord,Show)
+17:12:10 <monochrom> I see.  Yes I erred.
+17:12:17 <monochrom> data STree a = Nil | SLeaf a Int | Node a Int (STree a) (STree a) deriving (Eq,Ord,Show)
+17:12:33 <monochrom> Just bloody forget b you don't need it!
+17:13:11 <carp> what did you get that error from?
+17:13:29 <reddi> now i get another error which i dont know what it means
+17:13:36 <reddi> ERROR "C:\Dokumente und Einstellungen\LR\Desktop\aufgabe8_edit.hs":81 - Cannot j 
+17:13:36 <reddi> ustify constraints in explicitly typed binding 
+17:13:36 <reddi> *** Expression    : insertSTree 
+17:13:36 <reddi> *** Type          : [a] -> STree a 
+17:13:36 <reddi> *** Given context : () 
+17:13:36 <reddi> *** Constraints   : Ord a   
+17:13:49 <reddi> is that error message to big for the channel?
+17:14:30 <monochrom> I guess you need: insertSTree :: Ord a => [a] -> STree a
+17:14:43 <monochrom> If you don't know why, I can explain.
+17:15:02 <reddi> ok now it works
+17:15:19 <reddi> i know what the class ordering makes
+17:15:25 <reddi> but i dont know why to put it in here?
+17:15:45 <carp> you need it to do (<=) presumably
+17:16:09 <monochrom> Yeah.  So the type 'a' needs to be from Ord.
+17:16:29 <monochrom> Now, you could let the computer figure it out, or you could figure it out yourself.
+17:16:32 <carp> yeah, it needs to support the operations like <= for example
+17:16:41 <monochrom> Since you opted for the latter, you have to do it right.
+17:24:35 <carp> reddi: you could have used your original definition with a and b by the way
+17:32:41 <reddi> carp: haskell says me that the inferred typ is to generell and basti said that i cannot use Int....
+17:33:05 <reddi> maybe i simply write my stuff and ask then for the data-type (i think that will be tomorrow)
+17:33:36 <carp> what type did you have for the function?
+17:33:56 <carp> if it returns a STree a Int it would work i would think
+17:35:18 <reddi> my function would return a Int, but now i i will not change my (working) code... i will ask that tomorrow again....
+17:38:25 <monochrom> I would rather not be too general. At least not until I understand the essence of the matter.
+17:41:34 <carp> it doesn't make a great deal of difference, i'm just saying it works too
+17:47:27 <monochrom> The use of length in insertTree will force the numeric field to be fixed as Int.
+17:48:26 <carp> yes
+17:48:46 <monochrom> If it is changed to List.genericLength you can have b where b is from Integral but that's the end in terms of generalization.
+17:49:46 <monochrom> "Mirror mirror! What is the most general type of this function?"
+17:49:49 <carp> you can have the data STree a b ... and then use STree a Int for the insert function
+17:50:04 <carp> i'm not suggesting making the type of the function more general
+17:50:04 <Philippa> monochrom: forall a.a. HTH HAND ;-)
+18:01:13 <Philippa> 'lo BlueBlazer
+18:01:23 <BlueBlazer> Hey Philippa
+18:01:29 <Philippa> don't suppose you're likely to try learning the language (assuming you don't know it already)?
+18:02:00 <BlueBlazer> I don't know the the language
+18:02:14 <BlueBlazer> But I started working through "Yet another Haskell tutorial last night"
+18:02:23 <Philippa> ah :-)
+18:02:26 <BlueBlazer> I think that is what it was called
+18:02:37 <Philippa> never really read that myself, though I pointed my dad at it
+18:02:40 <BlueBlazer> after I got
+18:02:43 <BlueBlazer> ghc installed
+18:02:49 <BlueBlazer> and hugs
+18:02:55 <Philippa> I was taught it (give or take) once at uni, then picked it up from the (not so) Gentle Introduction
+18:02:59 <humasect> arjanb: thanks
+18:03:05 <Philippa> ghci's probably the sanest way to go about things
+18:03:11 <BlueBlazer> yeah
+18:03:18 <BlueBlazer> I figured that out last night too
+18:03:22 <Philippa> if nothing else, you'll probably want to define functions at the prompt, which it lets you do
+18:03:25 <Philippa> (pun not intended)
+18:03:31 <BlueBlazer> I couldn't get Hugs to work the way I wanted to all the time
+18:03:45 <Philippa> that said, in practice you want to maintain a source file and keep reloading it anyway
+18:03:59 <BlueBlazer> Yeah did a bit of that as well
+18:04:06 <BlueBlazer> so far so good
+18:04:17 <BlueBlazer> worked on it about an hour
+18:04:24 <BlueBlazer> then stopped
+18:04:26 * Philippa nods
+18:04:45 <BlueBlazer> I hope to get back at it later tonight
+18:04:50 <Philippa> feel free to ask questions, especially if you get stuck on monads or IO - the tutorials aren't very good at explaining them IME
+18:04:57 <Philippa> you working for now?
+18:05:05 <BlueBlazer> yeah
+18:05:17 <BlueBlazer> but basically done
+18:05:23 <Philippa> well, I doubt you'll get the same kind of distraction from the other chan tonight - if nothing else I'm knackered...
+18:05:23 <BlueBlazer> I fixed my memory leak
+18:05:26 <Philippa> cool
+18:05:51 <BlueBlazer> Nothing like a fresh perspective
+18:06:11 <Philippa> I dunno, often 30 year old perspectives work scarily well...
+18:06:14 <BlueBlazer> Don't worry I will ask lots of questions
+18:06:26 <BlueBlazer> When the need occurs
+18:07:31 <sproingie> Yet Another Haskell Tutorial is pretty decent
+18:07:39 <sproingie> the gentle introduction is anything but
+18:07:59 <BlueBlazer> That is the one I was working through
+18:08:02 <BlueBlazer> It was nice
+18:08:11 <Philippa> the gentle introduction's really intended for people who've used an ML, or else at the least a lisp
+18:08:27 <BlueBlazer> The exercises came often and reinforced the the last bits
+18:08:50 <lispy> this still makes me laugh, http://norvig.com/Gettysburg/sld005.htm
+18:09:04 <sproingie> the io monad's not too hard to grok.  it's other monads that throw me
+18:09:20 <lispy> sproingie: like state monad?
+18:09:29 <lispy> sproingie: does the list monad seem weird?
+18:09:37 <BlueBlazer> Haven't gotten to monad's yet
+18:10:32 <Philippa> sproingie: some of them do odd things. Maybe's sort-of an exception monad for example, and list is effectively non-determinism
+18:10:56 <sproingie> state i can sort of understand because it's simple.  any of the control.* monads, forget it
+18:10:59 <Philippa> that is, things that may return any of a number of results - you get to see all of them and pick your own
+18:11:04 <sproingie> maybe is super-easy
+18:11:40 <Philippa> ST's like state, only it carries an entire heap - you allocate references into it and get and set values through them
+18:11:56 <sproingie> i just can't figure out how to mix monads effectively
+18:12:06 <Philippa> you don't. Not as such.
+18:12:27 <Philippa> You can use monad transformers to get a monad with the features offered by two different ones
+18:12:31 <benny> anyone familiar with yampa?
+18:12:38 <sproingie> makes state hard to carry through globally ... at least for me
+18:12:44 <Philippa> you can have computations in one monad return computations in another
+18:13:03 <Philippa> not overly, though I've had a good look at it in the past
+18:13:17 <lispy> benny: not me personally, but i see that several simple arcade games have used it
+18:13:36 <benny> lispy: hm.... well i have a specific question
+18:14:01 <sproingie> frag uses yampa
+18:14:02 <lispy> benny: it never hurts to ask anyway
+18:14:16 <sproingie> frag's code made my brane hurt
+18:14:33 <sproingie> actually it was too incomprehensible to even hurt, it just sorta bounced off
+18:14:37 <lispy> brane?
+18:14:42 <lispy> ;)
+18:14:44 <sproingie> 0W MY BRANE
+18:14:49 <sproingie> it's a kibo thing
+18:14:59 <lispy> there is supposed to be a nice thesis attached to frag
+18:15:11 <benny> i want to have a keyboard as an event source and i'm not sure if i should have a continous signal true/false signal for each key, or if i should fire events during keypress or release
+18:15:12 <sproingie> does that thesis explain arrows?
+18:15:12 <lispy> i never could grok kibo
+18:15:41 <lispy> sproingie: i haven't read the thesis, i just heard it was good
+18:16:01 <Philippa> benny: up to you
+18:16:08 <Philippa> you can always translate in the other direction
+18:16:09 <sproingie> frantk ported to a decent modern toolkit would be nice to have
+18:16:15 <Philippa> in practice the event approach is probably saner though
+18:16:35 <Philippa> (except perhaps if all you ever ask is 'is the move left key down?' and the likes)
+18:17:01 <Philippa> so just do whatever's closest to what the IO code sees for now (IOW, whatever's easiest)
+18:17:13 <benny> Philippa: problem with events is that if 2 keys are pressed at the same time, then i can't fire 2 events simultaniusly. so i need to either have the event value be a list, or have a seperate event source for each key
+18:17:45 <Philippa> what would your notion of 'simultaneous' look like anyway?
+18:17:52 <Philippa> in practice there's always a couple of nanoseconds' difference
+18:18:27 <benny> yeah but yampa works by sampling for input
+18:18:50 <Philippa> (in fact, usually a few frames - Capcom deliberately accept a couple between on their two-button moves, and introduced an interesting bug in the process)
+18:18:58 <Philippa> again, what's *your* notion of simultaneous?
+18:19:08 <Philippa> what is it you're looking out for?
+18:19:18 <carp> sproingie: The other monads are for structuring your programs i think
+18:19:43 <Philippa> you can say that of any monad implementable in haskell, so I guess so :-)
+18:19:49 <Philippa> I tend not to think of Parsec that way, mind
+18:19:58 <benny> Philippa: well, my notion of simultaneus is the notion of the underlying IO library, which is SDL. In SDL, you are supposed to query for events every frame, and it's possible to get multiple events per frame(including multiple simultaneus keypresses)
+18:19:59 <SamB> people can't hit the buttons at the same time anyway
+18:20:01 <sproingie> parsec seems warm and fuzzy enough
+18:20:29 <SamB> parsec is so warm and fuzzy I want to translate it into Slate ;-)
+18:20:34 <Philippa> benny: OK, why not just latch for events and have some kind of 'end frame' event?
+18:20:48 <benny> Philippa: i don't understand
+18:20:51 <Philippa> that's probably what I'd do for a frame-driven sim using yampa
+18:21:03 <carp> well the only ones i've used are, you can use state like things to avoid passing things round explicitly - hiding plumbing and things like Maybe to model failure
+18:21:14 <Philippa> actually no, if you've got virtual keys then just keep a signal of their state, that'll do
+18:21:24 <Philippa> "virtual" in the sense of 'the buttons for my game'
+18:21:46 <SamB> Philippa: you don't get that AFIAK
+18:21:50 <SamB> would be fantastic
+18:21:58 <Philippa> SamB: I'm saying do that on the IO layer
+18:22:10 <Philippa> your yampa sim doesn't give a shit which specific key's fire anyway, right?
+18:22:42 <Philippa> carp: I tend to think of those as bolted-on language features, but this seems to mark me out as odd in some way :-)
+18:23:43 <Philippa> you can do some really twisted things with the fact Parsec's monad also has user state btw
+18:24:06 <Philippa> I really should just turn Flippi into my dissertation project
+18:24:17 <benny> Philippa: maybe i'll just offer both ways and people can use what they want
+18:24:20 <Philippa> (it does twisted things with Parsec's state, funnily enough)
+18:24:31 <Philippa> benny: you're writing a library rather than a game?
+18:24:49 <Philippa> well, a framework/engine, I guess
+18:24:51 <benny> Philippa: i don't know what i'm doing now :) i'm expirimenting and shit
+18:24:59 <Philippa> in that case, do whatever's easiest :-)
+18:25:26 <Philippa> for a game, I'd have the IO layer map to a set of inputs the game actually cares about in whatever format the game cares about and go from there
+18:25:27 <benny> Philippa: right now i'm sort of trying to port the space invaders game to my SDL/opengl yampa setup
+18:25:48 <carp> who wrote the space invaders one?
+18:25:49 <Philippa> mousex, mousey and a fire signal, then?
+18:26:01 <Philippa> Henrik, wasn't it?
+18:26:23 <benny> Philippa: yeah, but i think even there you want the master input to still map closely to the keyboard and mouse so you can do things like menus and stuff. but the game objects interfaces will expect specialized (move, fire) inputs
+18:26:28 <carp> don't think so
+18:26:35 <Philippa> his name's on the paper, anyway
+18:26:56 <Philippa> (along with Antony Courtney and John Peterson)
+18:27:11 <carp> probably one of them
+18:27:18 <Philippa> benny: I'd be tempted to run a two-layered sim there
+18:27:36 <Philippa> one dispatching stuff to GUI-or-actual-game and an actual game one
+18:27:55 <benny> Philippa: yep, but "two layered" isn't very clear
+18:28:18 <benny> but you'd definetely have a big signal for the gameplay and a big signal for the menu and then a master signal that switches between them
+18:28:19 <Philippa> true, having reactimate 'limited' to IO doesn't help
+18:28:45 <benny> Philippa: the code of reactimate is pretty simple... shouldn't be a problem to modify it if you need
+18:29:56 <Philippa> carp: fair enough. Long time since I talked to Henrik
+18:30:50 <Philippa> well, long time since I did anything worth a damn in the department I guess. They finally reused the ADS coursework our year did...
+18:31:36 <Philippa> I even had someone ask me for help. Had to point out that as my code'd been used as an example in previous years' slides it'd be a bit obvious if I explained how I'd done it :-)
+18:36:08 <Saulzar> Hmm, for this AI game I'm using 2 layers of IO, 1 Yampa "loop" for the outer game, 1 for each robot so they can be policed
+19:03:57 <SamB> mmm. dependant types?
+19:04:08 <SamB> oh. wrong channel, oddly enough...
+19:04:25 * SamB was reading some mail on the Slate list
+19:21:35 <benny> how do i add an element to the end of a list?
+19:22:11 <SamB> you add to the beginning of a backwards list, then reverse it at the end
+19:22:30 <benny> hm... is that better then a ++ [b] ?
+19:22:36 <araujo> > [1,2,3,4] ++ [5]
+19:22:38 <lambdabot> [1,2,3,4,5]
+19:22:58 <SamB> benny: if you do it recursively, yes...
+19:23:17 <benny> SamB: interesting.... reversing is fast?
+19:23:28 <SamB> well, reversing once is O(n)
+19:23:43 <SamB> adding at the end n times is O(n^2)
+19:26:33 <Saulzar> Surely a ++ [b] would be O(length a) ?
+19:26:43 <SamB> true!
+19:27:32 <benny> so i should definitely go with the reverse way?
+19:27:47 <Saulzar> and I guess also a ++ b
+19:27:58 <sh10151> it would be even better to use an abstract data type
+19:28:26 <SamB> benny: are you building up a list, or just adding one thing to the end of one?
+19:29:38 <benny> SamB: building up, but the vast majority of times i will only be adding one element: [] ++ [a]
+19:30:03 <benny> but quite often it will be 2 items
+19:30:24 <Saulzar> Hm, almost certainly you should add them to the front then reverse ..
+19:30:56 <SamB> just don't forget the part where you reverse, like jlouis did one time
+19:31:33 <benny> ok :)
+19:31:42 <benny> i can't have a where inside lambda expression?
+19:31:57 <SamB> not directly
+19:32:21 <SamB> you can't have multiple arrows in one either...
+19:32:21 <benny> any reason?
+19:32:38 <SamB> its not much like a case or a binding?
+19:34:22 <benny> hm?
+19:36:04 <jethr0> moin moin
+19:36:37 <jethr0> @seen
+19:36:37 <lambdabot> Lately, I have seen araujo, benny, jethr0, samb, saulzar and sh10151.
+19:37:26 <Saulzar> aftermoin (moin == morning?)
+19:37:27 <SamB> well, the places where you can use where are basically after a case in "case ... of ...", and after an equation that is part of a funtion definition
+19:38:21 <jethr0> Saulzar, "moin moin" is a customary greeting in northern germany...
+19:38:34 <Saulzar> Oh, sorry :)
+19:39:06 <jethr0> Saulzar, literally it means "good morning", but you can say it any hour of the day :)
+19:39:11 <SamB> ah
+19:39:12 <lispy> @wiki moin
+19:39:13 <lambdabot> http://www.haskell.org/hawiki/moin
+19:39:18 <lispy> er....
+19:39:24 <SamB> then I say unto you: good morning!
+19:39:34 <jethr0> "I SAID: GOOD DAY"
+19:39:42 <lispy> that's not the moin page i wanted
+19:39:46 <jethr0> hi samb
+19:39:59 <lispy> http://en.wikipedia.org/wiki/MoinMoin
+19:40:01 <SamB> hello
+19:40:27 <SamB> @wikipedia moin moin
+19:40:29 <lambdabot> http://en.wikipedia.org/wiki/Moin_Moin
+19:41:38 <jethr0> lispy, the first one is the one you "meant"
+19:43:45 <lispy> oh geez
+19:43:53 <lispy> i still grabbed the wrong one :)
+19:43:58 <lispy> jethr0: thanks
+19:47:22 <jethr0> np
+20:03:23 <jethr0> > let fac 0 = 1; fac n = n * fac (n-1) in fac 5
+20:37:36 <palomer> I love you guys
+20:42:12 <araujo> palomer, i don't
+20:42:13 <SamB> hmm. apparantly if you write Slate code that works and send it in, they will make it look nicer ;-)
+20:42:14 <araujo> :-P
+20:49:27 <araujo> SamB, ?
+20:49:56 <SamB> araujo: well, I sent in some code for lazy lists and it didn't look great but it seemed to work.
+20:50:26 <SamB> the I waited a few hours and pulled and now it looks a lot nicer, especially the names of things
+20:53:03 * araujo thinking to dive into House
+21:13:16 <shapr> Good morning #haskell!
+21:15:18 <Saulzar> Evening shapr
+21:16:13 <shapr> How's code?
+21:18:16 <Saulzar> Pretty good, everything nice and uniform now, no special distinction for walls. You?
+21:18:25 <araujo> Hello shapr 
+21:18:43 * araujo editing hawiki
+21:20:36 <Saulzar> Heh, just noticed why my darcs repository was messing up. Find files in kdevelop keeps picking up files out of the _darcs dir, and I edit them, whoops.
+21:54:50 <palomer> did anyone read "fun with phantom types"?
+21:57:04 <palomer> please say yes please say yes please say yes
+21:59:12 <palomer> for every type and type constructor haskell should create a Constructor for the Type type
+21:59:22 <palomer> who's with me?
+22:03:06 <glguy> Is there a function similar to map, but that has the type signature: ([a] -> b) -> [a] -> [b]    ?
+22:03:14 <glguy> in the prelude
+22:04:13 <Saulzar> I guess concatMap is similar in a way
+22:04:31 <Saulzar> Hmm, no
+22:04:46 <glguy> abc f [] = []      and   abc f xs = f xs : abc f $ tail xs
+22:04:56 <glguy> or am i thinking of Lisp?
+22:04:58 <Saulzar> How are the a's passed to the function?
+22:05:04 <Korollary> @hoogle ([a] -> b) -> [a] -> [b]
+22:05:05 <lambdabot> No matches, try a more general search
+22:05:10 <Cale> um, (return .) ?
+22:05:26 <Cale> :t (return .)
+22:05:31 <Cale> @type (return .)
+22:05:32 <lambdabot> forall (m :: * -> *) b a. (Monad m) => (a -> b) -> a -> m b
+22:05:42 <Cale> er, hmm
+22:05:43 <Korollary> almost
+22:05:49 <SamB> @type (return .)
+22:05:50 <lambdabot> forall (m :: * -> *) b a. (Monad m) => (a -> b) -> a -> m b
+22:06:02 <Cale> \f xs -> return (f xs)
+22:06:03 <glguy> i don't care so much about the type of the function, but that it behaves like the one i described
+22:06:05 <Korollary> djinn, maybe?
+22:06:06 <Cale> @type \f xs -> return (f xs)
+22:06:08 <lambdabot> forall (m :: * -> *) a t. (Monad m) => (t -> a) -> t -> m a
+22:06:21 <Saulzar> @hoogle (a -> b) -> Int -> a -> [b]
+22:06:23 <lambdabot> Data.List.iterate :: (a -> a) -> a -> [a]
+22:06:23 <lambdabot> Prelude.iterate :: (a -> a) -> a -> [a]
+22:06:32 <Korollary> glguy: what's the ([a] -> b) bit supposed to do?
+22:06:39 <glguy> abc f [] = []      and   abc f xs = f xs : abc f $ tail xs
+22:06:42 <glguy> is what I'm thinking of
+22:06:48 <Cale> oh
+22:06:54 <glguy> I'm thinking that it was Lisp that I'm thinking of that had a function like that
+22:07:27 <Cale> > scanr (:) [] [1,2,3,4,5]
+22:07:28 <lambdabot> [[1,2,3,4,5],[2,3,4,5],[3,4,5],[4,5],[5],[]]
+22:07:59 <palomer> hrmph
+22:08:09 <palomer> I'm trying to write printf using haskell's type system
+22:08:22 <palomer> so I'd have printf Int i = show i
+22:08:32 <Cale> See Text.Printf :)
+22:08:41 <palomer> that's C's printf!
+22:08:54 <Saulzar> What other kind of printf is there? :)
+22:08:56 <Korollary> what other...
+22:08:59 <palomer> @hoogle printf
+22:09:00 <lambdabot> Text.Printf.printf :: PrintfType r => String -> r
+22:09:00 <lambdabot> Text.Printf.hPrintf :: HPrintfType r => Handle -> String -> r
+22:09:02 <dons> moinmoin
+22:09:03 <glguy> so....   abc f xs = scanr `:` . f xs     
+22:09:04 <palomer> ok, call it format then
+22:09:26 <palomer> @hoogle PrintfType
+22:09:26 <Cale> glguy: I'm thinking something along those lines :)
+22:09:27 <lambdabot> No matches found
+22:09:28 <glguy> > let abc f xs = scanr `:` . f xs in scanr (:) [] [1,2,3,4,5]
+22:09:29 <lambdabot>  parse error on input `:'
+22:09:32 <Cale> (:)
+22:09:38 <glguy> > let abc f xs = scanr (:) . f xs in scanr (:) [] [1,2,3,4,5]
+22:09:40 <lambdabot> [[1,2,3,4,5],[2,3,4,5],[3,4,5],[4,5],[5],[]]
+22:09:42 <glguy> cool
+22:09:50 <dons> there's a couple of good printfs using TH and runtime plugins to implement typesafe printf in haskel
+22:09:52 <Cale> er
+22:09:55 <dons> it's a fun game.
+22:09:56 <Cale> you didn't use abc :)
+22:09:57 <palomer> @index PrintfType
+22:09:57 <lambdabot> Text.Printf
+22:10:01 <glguy> lol!
+22:10:18 <glguy> > let abc f xs = scanr (:) . f in abc id [1,2,3,4,5]
+22:10:19 <lambdabot>  add an instance declaration for (Show ([a] -> [a] -> [[a]]))
+22:10:20 <palomer> what the hell is PrintfType
+22:10:28 <glguy> > id 1
+22:10:29 <lambdabot> 1
+22:10:37 <glguy> Ooops
+22:10:39 <glguy> ..
+22:11:00 <dons> class PrintfType t where
+22:11:00 <Cale> class PrintfType t where
+22:11:00 <Cale>   spr :: String -> [Text.Printf.UPrintf] -> t
+22:11:00 <Cale>         -- Imported from Text.Printf
+22:11:00 <Cale> instance IsChar c => PrintfType [c]     -- Imported from Text.Printf
+22:11:00 <Cale> instance PrintfType (IO a)      -- Imported from Text.Printf
+22:11:00 <dons>     spr :: String -> [UPrintf] -> t
+22:11:07 <dons> :p
+22:11:14 <palomer> @hoogle printf
+22:11:15 <lambdabot> Text.Printf.printf :: PrintfType r => String -> r
+22:11:15 <lambdabot> Text.Printf.hPrintf :: HPrintfType r => Handle -> String -> r
+22:11:18 <palomer> oh, righto
+22:11:29 <dons> -- |The 'PrintfType' class provides the variable argument magic for
+22:11:30 <dons> -- 'printf'.
+22:11:41 <palomer> that is pretty magical
+22:11:53 <palomer> > printf "%d" 400
+22:11:54 <lambdabot>  Not in scope: `printf'
+22:12:01 <palomer> > Text.Printf.printf "%d" 400
+22:12:02 <lambdabot>  Not in scope: `Text.Printf.printf'
+22:12:04 <glguy> >scanr ( (:) . id ) [1,2,3,4]
+22:12:31 <int-e> > (scanr (:) [] [1,2,3], tails [1,2,3])
+22:12:32 <lambdabot> ([[1,2,3],[2,3],[3],[]],[[1,2,3],[2,3],[3],[]])
+22:13:06 <glguy> what am i doing wrong
+22:13:29 <int-e> you miss the initial element for scanlr
+22:13:31 <Cale> perhaps we just want map f . tails
+22:13:34 <int-e> @type scanlr
+22:13:35 <lambdabot> Not in scope: `scanlr'
+22:13:38 <int-e> @type scanr
+22:13:39 <lambdabot> forall b a. (a -> b -> b) -> b -> [a] -> [b]
+22:13:43 <int-e> the 'b' one
+22:13:49 <Cale> @pl map f . tails
+22:13:50 <lambdabot> map f . tails
+22:14:02 <Cale> @pl \f -> map f . tails
+22:14:03 <lambdabot> (. tails) . map
+22:14:10 <Cale> not any better :)
+22:14:11 <dons> oh, I see gmail is now advertised on the google main page
+22:14:58 <Cale> dons: it is?
+22:15:07 <dons> at least on google.com.au
+22:15:33 <palomer> hrmph
+22:15:38 <palomer> > Text.Printf.printf
+22:15:39 <lambdabot>  Not in scope: `Text.Printf.printf'
+22:15:43 <palomer> asdf
+22:15:48 <palomer> > Printf.printf
+22:15:49 <lambdabot>  Not in scope: `Printf.printf'
+22:15:54 <dons> it's not in scope.
+22:16:02 <dons> not sure of the safety. maybe we could add it.
+22:17:08 <palomer> how do I use printf?
+22:17:26 <adu> is it the same as C printf?
+22:17:50 <dons> sposed to be 
+22:17:55 <palomer> printf "%d" 400 gives me an error
+22:18:13 <adu> then "stuff %s more stuff", string
+22:18:16 <adu> or something
+22:18:28 <dons> > printf "%2.2f\n" (1.2::Double) :: String
+22:18:28 <dons> "1.20\n"
+22:18:29 <palomer> ditto
+22:18:29 <lambdabot>  Not in scope: `printf'
+22:18:52 <palomer> yeah, that works
+22:19:00 <palomer> bloody ugly though:O
+22:19:09 <int-e> *> printf "%s %d %f\n" "Foobar" (42::Int) (23::Int)
+22:19:10 <int-e> Foobar 42 *** Exception: Printf.printf: bad argument
+22:19:15 <dons> printf is not supposed to be pretty.
+22:19:17 <Cale> it's not usually a problem in actual code
+22:19:39 <Cale> It's only a problem at the interpreter because there aren't any type constraints
+22:19:44 <palomer> but, like, how does printf know how many arguments to take?
+22:19:58 <Cale> It always takes one. :)
+22:20:05 <palomer> you know what I mean
+22:20:06 <int-e> it doesn't. it eats all parameters it can get.
+22:20:22 <Cale> It's polymorphic in its result type
+22:20:27 <int-e> @type Text.Printf.printf
+22:20:28 <lambdabot> forall r. (Text.Printf.PrintfType r) => String -> r
+22:20:37 <Korollary> it also doesn't know if your format string is meaningful
+22:20:45 <int-e> it checks that at runtine
+22:20:51 <palomer> for example, for one string s printf s i will return a string
+22:20:55 <Cale> it can return either a string, an IO action, or a function from a PrintfArg to another PrintfType
+22:21:09 <palomer> and for another string s' printf s' i will return something other than a string
+22:21:19 <palomer> it can return 3 things?
+22:21:21 <palomer> that's nuts!
+22:21:32 <Cale> well, it's just polymorphism
+22:21:39 <int-e> palomer: not really - the type system takes care of it.
+22:21:40 <palomer> is this part of haskell98?
+22:21:53 <Cale> The library isn't, most of the functionality is
+22:22:09 <Cale> There's a few fundeps in there to make it more convenient.
+22:22:19 <dons> ah, right.
+22:22:27 <Cale> note that 5 is also polymorphic
+22:22:32 <Cale> @type 5
+22:22:33 <lambdabot> forall t. (Num t) => t
+22:22:54 <Cale> So this isn't too unusual :)
+22:23:22 <Cale> 5 can return an Int or Integer, or Double, or Complex Double, no problem :)
+22:23:31 * palomer is boggled
+22:23:45 <palomer> ok, how would printf look like? (roughly)
+22:24:32 <dons> why not read the impl?
+22:24:37 <int-e> http://cvs.haskell.org/cgi-bin/cvsweb.cgi/fptools/libraries/base/Text/Printf.hs?rev=1.1.2.1;content-type=text%2Fplain
+22:24:39 <palomer> good point
+22:25:00 * dons thinks we need @cvs or @darcs for finding fptools refs
+22:25:07 <dons> ah, but maybe we do already..
+22:25:10 <humasect> @find block
+22:25:11 <lambdabot> Not in scope: type variable `block'
+22:25:47 <dons> @libsrc Text.Printf
+22:25:47 <lambdabot> http://darcs.complete.org/fptools/libraries/base/Text/Printf.hs
+22:25:54 <dons> hehe
+22:25:57 <dons> bad name though
+22:27:06 <palomer> foo :: Show a => Int -> a
+22:27:06 <palomer> foo x = if x == 6 then 7 else "foo"
+22:27:11 <palomer> why wouldn't this work?
+22:27:33 <dons> 7 and "foo" don't unify
+22:27:40 <palomer> they're both Show!
+22:27:46 <int-e> and neither has type Show a -> a
+22:28:01 <Cale> =>
+22:28:16 <int-e> right. forall a. Show a => a
+22:28:37 <int-e> meaning: they would have to inhabit *all* types which are instances of Show.
+22:28:44 <palomer> String isn't Show?
+22:28:50 <palomer> err
+22:28:54 <int-e> it's one particular instance of Show
+22:29:03 <palomer> yeah
+22:29:07 <palomer> so what's the problem?
+22:29:08 <Cale> String /= forall a. Show a => a
+22:29:25 <dons> you could write: Show a => Int -> a -> String instead
+22:29:48 <palomer> but, like, it returns an element of an instance of Show
+22:29:51 <palomer> isn't that enough?
+22:30:00 <Cale> nope
+22:30:06 <palomer> is there a reason for this?
+22:30:34 <dons> ask Milner ;)
+22:30:41 <Cale> You have to be able to pick a type 'a' beforehand, and get a valid implementation.
+22:31:10 <Cale> forall a. Show a => Int -> a
+22:31:38 <Cale> That is, if I pick *any* showable type 'a', I can treat that as a function Int -> a
+22:32:12 <palomer> oh, so I would need exist a. Show a => Int->a
+22:32:13 <palomer> right?
+22:32:53 <Cale> exists a. Show a & Int -> a, sort of
+22:33:29 <palomer> why did you switch the => for an &?
+22:33:37 <palomer> existential types rule!
+22:33:42 <int-e> because it's no longer an implication
+22:34:09 <palomer> A & B -> C and A -> B -> C are isomorphic
+22:34:10 <glguy> ah, found what I was looking for.... Lisp has: MAPLIST
+22:34:24 <Cale> oh
+22:34:37 <Cale> exists a. (Show a) & (Int -> a)
+22:34:39 <palomer> in fact, there's a left adjoint....
+22:35:00 <int-e> -> is not the implication - it's a type constructor. => is the implication, sort of.
+22:35:12 <palomer> so foo is in Show a and in Int -> a?
+22:35:36 <Cale> palomer: & would be pairing if you want
+22:35:47 <palomer> foo is a pair?
+22:36:18 <Cale> hmm
+22:36:25 <Cale> actually, I can give a better type
+22:37:16 <palomer> what's wrong with exists a. (Show a) => Int -> a?
+22:37:33 <Cale> because that's not an interesting statement
+22:37:47 <dons> @fptools Text.Printf
+22:37:48 <lambdabot> http://darcs.complete.org/fptools/libraries/base/Text/Printf.hs
+22:37:52 <Cale> Any proof where Show a fails, makes that true
+22:37:54 <Cale> er
+22:37:55 <dons> ah, much better than @libsrc
+22:37:56 <Cale> any a
+22:38:08 <int-e> hmm, the type syntax seems all messed up if you want to generalize it ... instead of x :: forall a. Show a => a  you'd rather write forall a. Show a => x :: a; the existential version would be exists a. (Show a & x :: a)  then.
+22:38:19 <Cale> foo :: Int -> (exists a. (a, <Show a>))
+22:38:43 <Cale> you'd need some way to reify instances
+22:38:46 <int-e> that way you wouldn't end up mixing types and assertions about type variables.
+22:39:19 <Cale> or yeah
+22:39:22 <Cale> something like that
+22:39:23 <palomer> erm?
+22:39:27 <palomer> what does the & stand for?
+22:40:07 <Cale> I'm thinking of the usual logical and, which we ordinarily get using tuples
+22:40:10 <int-e> logical and for assertions.
+22:40:39 <int-e> (I'm turning the type system into a logic there)
+22:40:47 <palomer> where did the Int go?
+22:41:33 <humasect> a can be any type with Show
+22:41:53 <palomer> Int -> exists a.(Show a => a)
+22:41:59 <humasect> oh
+22:42:30 <int-e> palomer: I dropped the Int. replace x :: a with x :: Int -> a  if you like.
+22:43:04 <palomer> foo :: exists a. (Show a & x :: Int -> a) ?
+22:43:33 <palomer> wait wait wait
+22:43:44 <int-e> palomer: err, I was refering to my version but ignore that comment - it's not what you want anyway.
+22:44:24 <palomer> what about exists a. (Show a) => Int -> a?
+22:44:33 <palomer> err wait
+22:44:49 <int-e> you want the a to depend on the actual value of the Int so that wouldn't work.
+22:44:52 <palomer> what about (Show a) => exists a.Int -> a?
+22:45:33 <palomer> hasn't this already been proposed?
+22:47:15 <int-e> Int -> exists a. (Show a => a)   is what you want, if the => there is not an implication but a conjunction.
+22:47:43 <palomer> and why isn't this implemented in haskell?
+22:47:50 <palomer> (isn't this called covariant subtyping?)
+22:51:45 <Cale> palomer: well, there's a cleaner way to express this already
+22:52:57 <Cale> The simple, but not quite the same thing way is just:
+22:53:03 <Cale> foo :: Int -> Either Int String; foo x = if x == 6 then Left 7 else Right "foo"
+22:53:28 <Cale> Something more equivalent to what you're talking about is to simply write
+22:54:02 <Cale> data Showable where S :: a -> Showable
+22:54:08 <Cale> er
+22:54:13 <Cale> data Showable where S :: (Show a) => a -> Showable
+22:54:34 <Cale> foo :: Int -> Showable; foo x = if x == 6 then S 7 else S "foo"
+22:59:03 <palomer> hrm
+22:59:11 <palomer> but S will act like the identity throughout my code
+22:59:15 <palomer> seems kind of silly
+22:59:45 <palomer> @type Left
+22:59:46 <lambdabot> forall b a. a -> Either a b
+23:00:16 <shapr> Oh, it's nearly time for the next TMR.. if there are five articles...
+23:00:32 <shapr> bok gour 
+23:00:38 <palomer> TMR?
+23:00:43 <shapr> @where tmr
+23:00:44 <lambdabot> http://www.haskell.org/tmrwiki/FrontPage
+23:04:18 <humasect> shapr, yay. how many so far ?
+23:04:52 <Cale> palomer: no, it's not
+23:05:05 <Cale> palomer: it's the proof that its parameter is showable
+23:05:05 <gour> shapr: bok
+23:05:16 <gour> how are you?
+23:05:18 <palomer> http://www.informatik.uni-bonn.de/~ralf/talks/FOP.pdf <---someone should submit this
+23:05:34 <gour> shapr: i see it's cold over there..
+23:05:43 <palomer> Cale: does the compiler really need proof that a value is showable?
+23:05:59 <Cale> palomer: yes, it needs a way to show it :)
+23:06:11 <palomer> Cale: it has a list of showable types!
+23:06:19 <palomer> and a list of functions associated with each type
+23:06:33 <Cale> well, not exactly
+23:06:38 <palomer> eh?
+23:06:43 <Cale> separate compilation
+23:07:42 <palomer> so you add to the table
+23:08:13 <Cale> types don't exist in compiled objects though
+23:08:46 <palomer> maybe we should add them
+23:09:04 <palomer> (I mean, what do we have to lose?)
+23:09:08 <palomer> apart from hard disk space
+23:09:32 <Cale> Well, perhaps
+23:09:41 <Cale> but the dictionary passing style works well
+23:10:01 <Cale> it would make the linker have some hard work to do
+23:10:01 <palomer> that's what it's called?
+23:10:17 <Cale> Well, it's how classes are currently implemented
+23:10:35 * palomer doesn't mind when the compiler does more work for me
+23:11:24 <Cale> Functions take an extra parameter for each constraint which is a dictionary of functions provided by the instance at which the function is applied.
+23:11:37 <palomer> Cale: what if the function could return any showable? what if it's part of a module signature?
+23:11:50 <palomer> oh, nevermind
+23:11:51 <palomer> :O!
+23:12:16 <palomer> boxing values seems silly, tis all
+23:12:24 <ski> (palomer : Mercury implements this existential output class constraints)
+23:12:30 <Cale> you can actually make that a newtype, I think
+23:12:45 <palomer> I mean syntactically boxing
+23:12:58 <palomer> Cale: notice that if it is a newtype, then it is the identity function!
+23:13:08 <palomer> which is why it seems silly to me
+23:13:17 <Cale> It's a constructor tag
+23:13:28 <Cale> This happens all over the place already
+23:13:30 <ski> an iso
+23:14:03 <palomer> ski: and what would be the type of \x -> if x == 6 then 7 else "foo" ?
+23:14:38 <Cale> frankly, I want code like that to be a type error
+23:14:39 <ski> inferred principal type ?
+23:14:59 <palomer> ski: yeah
+23:15:03 <Cale> unless I go to extra trouble of wrapping things to show the compiler that I've reasoned about it
+23:15:22 <ski> that has no inferred principal type
+23:15:38 <ski> (i think)
+23:15:48 <palomer> Cale: so you can make your types more obtuse and your code longer?
+23:16:01 <palomer> ski: eh? why not?
+23:16:10 <Cale> palomer: that's an obtuse function and deserves an obtuse type and some obtuse code :)
+23:16:23 <ski> forall a. Num a => a -> exists b. b
+23:16:28 <Cale> It shouldn't be easy to write things like that
+23:16:28 <ski> is that a good type ?
+23:16:58 <ski> maybe we should just infer type 'exists a. a' for whole expression, when we're at it ?
+23:17:03 <shapr> gour: I'm fine, and yes it's cold.
+23:17:27 <palomer> isn't exists a.a inhabited by all terms?
+23:17:36 <ski> sure
+23:17:36 <Cale> palomer: yes
+23:17:50 <ski> it's a valid type
+23:17:50 <palomer> well, by all typeable terms
+23:17:58 <ski> (yes)
+23:17:59 <palomer> ski: that type is too general
+23:18:08 <ski> it's not general at all
+23:18:11 <ski> that's the problem
+23:18:18 <palomer> but, if it makes the code type check, why not?
+23:18:42 <ski> there are other possible types, which allow more
+23:19:04 <ski> principal types should allow all things that all other possible types allow
+23:19:10 <ski> roughly speaking
+23:19:33 <palomer> I want to say "when I pass an int, I get back something which is showable"
+23:19:50 <palomer> Cale: this is a useful form of subtyping
+23:19:54 <gour> shapr: what had brought you to such a cold place?
+23:19:55 <palomer> Cale: it's done all the time in java
+23:20:01 <ski> how should the system know that you're interested in 'Show', here ?
+23:20:25 <Cale> palomer: right, but I want that to be very explicit when it happens, or the compiler will not be as good at catching bugs
+23:20:28 <palomer> ski: with an appropriately placed (Show a)
+23:20:43 <ski> yes, that's with an annotation
+23:21:05 <palomer> ski: and I would do something like:
+23:21:08 <palomer> show (foo 5)
+23:21:20 <palomer> so it would know that whatever foo 5 is, it's showable
+23:21:26 <ski> i think one ought to place annotations, to introduce first-class existentials
+23:21:32 <ski> hmm
+23:21:42 <Cale> but if all you know is that the thing is show-able, why not apply show at the outset?
+23:21:46 <ski> where'd you put that, in the expression above ?
+23:22:03 <palomer> Cale: what if it's a more complicated typeclass?
+23:22:04 <ski> Cale : could be another class with more interesting methods
+23:22:06 <Cale> (sure, there are other, more complicated cases)
+23:22:07 <int-e> palomer: but hmm, next you'll want to be able to separate the definition of foo and its actual use ...
+23:22:12 <palomer> ski: somewhere else in the code
+23:22:21 <ski> palomer : where ?
+23:22:33 <palomer> ski: after the definition of foo
+23:22:35 <int-e> palomer: ... in several modules. and then you lose the ability to compile them separately.
+23:23:17 <palomer> int-e: well, it has a finite number of possible types which cover all of its types
+23:23:21 <palomer> so you could export each one:o
+23:23:41 <ski> \x -> let y :: exists a. Show a *> a; y = if x == 6 then 7 else "foo" in y
+23:23:44 <palomer> bar x = show foo x
+23:23:47 * int-e agrees with Cale here - after all that sort of code is rare and we want to use the type checker to catch our mistakes.
+23:23:58 <int-e> palomer: no it doesn't
+23:24:24 <Cale> It's actually pretty hard to come up with a case where you really need existential types
+23:24:57 <palomer> ski: where's the problem?
+23:25:10 <ski> (that could of course be due to not having played so much with them, yet :)
+23:25:14 <ski> palomer : sorry ?
+23:25:17 <palomer> Cale: a decent module system?
+23:25:18 <Cale> The only really good example I've seen is in certain raytracer designs, where you have a scene various renderable parts all implementing some class of functions.
+23:25:29 <palomer> ski: what was that term supposed to show?
+23:25:36 <Cale> with*
+23:25:54 <ski> palomer : a maybe sane way of having existential types ..
+23:25:58 <Cale> Then again, you can just store the functions
+23:26:01 <Saulzar> I just used a function type for the primitives...
+23:26:08 <Cale> Saulzar: right
+23:26:30 <ski> palomer : i.e. explicit type signature for it
+23:26:48 <Saulzar> Though I guess if you need it to be more opaque, to be able to deconstruct composites or something it could be useful
+23:26:53 * ski has no idea how far one could make such a system work
+23:27:24 <int-e> palomer: err, wrong. but the 'interesting' type classes (and that's what matters) are not known a priory - they're only known at link time.
+23:27:41 <palomer> int-e: who's wrong?
+23:27:47 <ADEpt> morning
+23:27:53 <Cale> There seems to be a translation which always removes existential types, and the results are usually still quite elegant. Whether or not there are cases where they're really less elegant to an extent that existential types are worth it is a good question.
+23:27:55 <ski> (int-e : hm .. what did you mean with def. of foo and actual use .. and separate compilation ? .. didn't follow)
+23:28:05 <Cale> But I rather like the GADT route to things.
+23:28:13 <int-e> ski: right
+23:28:24 <Saulzar> Maybe things like transforms are more elegant with existentials, I had some slightly odd code to pre-post process the inputs/outputs for that
+23:28:26 <Cale> Explicit tagging seems to be a good option for providing them.
+23:28:31 <ski> int-e : i wondered what you meant .. don't answer 'right', then :)
+23:28:34 <palomer> Cale: how do GADTs help us here?
+23:28:37 <int-e> ski: foo will have to know which dictionaries to pass back - I'd think.
+23:28:58 <ski> which foo are we talking about ?
+23:29:03 <palomer> I would make extensive use of existentials if I could
+23:29:11 <palomer> foo x = if x == 6 then 7 else "foo"
+23:29:22 <ski> foo :: forall a. Num a => a -> exists b. Show b *> b
+23:29:22 <ski> ?
+23:29:23 <int-e> ski: i.e. which type classes the programmer is going to make use of. (the foo is the one palomer just quoted)
+23:29:31 <Cale> palomer: well, they generalise existential data types as previously implemented
+23:29:37 <int-e> ski: without type annotation
+23:29:44 <Cale> but the previous implementation would do too
+23:30:46 <Cale> palomer: the trouble is, you can't infer them without tags, so you're going to end up adding annotations somewhere
+23:30:50 <palomer> with existential types, I would make Term a typeclass
+23:30:52 <ski> int-e : we need to get that type, in one way or another ..
+23:30:59 <palomer> and bool and int would be instances
+23:31:15 <palomer> Cale: sure, that's fine
+23:31:20 <palomer> I'm already annotating with GADTs
+23:31:21 <Cale> oh, for evaluators, GADTs are perfect
+23:31:36 <Cale> You can just hijack Haskell's type system :)_
+23:31:41 <Cale> er, :)
+23:31:51 <palomer> it would be even more elegant with existential types
+23:31:56 <Cale> Why?
+23:32:04 <palomer> eval succ 5
+23:32:39 <Cale> I take it  eval :: Term a -> a
+23:33:04 <Cale> and succ :: Term (Int -> Int)  ?
+23:33:08 <palomer> hrmphrm
+23:33:08 <ski> hm, it could possibly be the case that when calling a function with existentials in it's type, the calling code can inherit this existential, so no new annotation is needed
+23:33:16 <int-e> ski: I know. Let me restate what I was trying to say: Assume that we want that foo to work without an explicit type signature, i.e. we want to be able to use foo <int> for all type classes that contain both String and Int. Then we can not derive a proper type for foo (and thus not compile it) before we know the whole program. This was in reply to "<palomer> int-e: well, it has a finite number of possible types which cover all of its types"
+23:33:23 <palomer> I would make the number 5 into a Term without tagging it explicitly
+23:33:35 <palomer> so eval (App succ 5)
+23:34:23 <int-e> ski: At least not without changing the whole implementation of type classes that is based on passing dictionaries around. A dynamic type system is possible but I'd argue we don't want one.
+23:34:39 <ski> int-e : ah, ok, now i understand what that argument was about
+23:34:53 <palomer> eval TermClass -> TermClass
+23:34:58 <palomer> then again, we lose some safety
+23:35:16 <ski> int-e : anyway, i'm not suggesting not putting a signature on 'foo'
+23:35:23 <palomer> I guess GADTs are better in this case
+23:36:06 <ski> (int-e : but as said, possibly one doesn't always need annotations when making something with existentials in type)
+23:36:34 <ski> palomer : what is intended type of your 'eval' (and 'succ') ?
+23:36:58 <ski> (i.e. why did you want to use existentials, there ?)
+23:41:26 <palomer> ski: eval may return an int
+23:41:27 <palomer> or a bool
+23:41:48 <palomer> or something else that's part of the Term typeclass
+23:43:56 <palomer> well, it would have to be a generalised typeclass
+23:43:59 <palomer> is there such a thing?
+23:45:42 <ski> generalized ?
+23:46:14 <ski> what is type of argument of 'eval' ?
+23:47:06 <palomer> Term a -> Term a
+23:47:27 <palomer> that's the type of eval
+23:47:30 <ski> so 'Term' is then a type constructor, not a type class ?
+23:47:31 <palomer> Term would be a typeclass
+23:47:47 <Cale> um
+23:47:50 <ski> maybe you want 'Term a => a -> a' ?
+23:47:57 <palomer> yeah
+23:48:24 <palomer> so you have this generalised typeclass
+23:48:33 <ski> generalized, how ?
+23:49:06 <palomer> actually, skip the generalised part
+23:49:10 <palomer> but it would have member plus
+23:49:32 <palomer> and plus would have type Term Int -> Term Int -> Term Int
+23:49:49 <palomer> or, rather
+23:50:13 <palomer> (Term a & a::Int) =
+23:50:17 <palomer> => a -> a -> a
+23:50:46 <Cale> hmm
+23:50:47 <ski> what does that mean ?
+23:50:58 <ski> 'a :: Int' ?
+23:51:06 <palomer> a is an Int
+23:51:07 <Cale> sure you don't want something like Term t => t Int -> t Int -> t Int ?
+23:51:11 <ski> is 'a' a tyvar ?
+23:51:21 <palomer> err, yeah
+23:51:22 <palomer> what cale said
+23:51:38 <palomer> this way, you would have the compiler do all the work
+23:51:39 <ski> Cale : hm, why that ?
+23:51:55 <palomer> you could do cool stuff like eval (lam "\x -> x+5") 5
+23:51:55 <Cale> ski: I don't know, I'm just trying to interpret what palomer is saying :)
+23:52:17 <ski> Cale : then we're in same boat :)
+23:52:29 <palomer> gimme a break guys! it's 3am
+23:52:33 <Cale> hehe
+23:52:53 <palomer> and eval (lam "\x->x+5") 5 would return 10 !
+23:53:15 <Cale> sounds unsafe to me
+23:53:23 <palomer> how so?
+23:53:23 <ski> what if the string was illtyped ?
+23:53:29 <palomer> oh, right
+23:53:30 <palomer> I meant
+23:53:50 <palomer> eval (lam "x" (plus "x" 5))
+23:53:53 <palomer> with proper annotations
+23:54:04 <palomer> eval (lam "x" (plus "x" 5)) 5
+23:54:19 <ski> hm, how will you know the expr is closed ?
+23:54:36 <palomer> oh, good point
+23:54:45 * palomer kicks lambda calculus in the nuts
+23:55:03 <palomer> wait, eval will just throw an exception as always
+23:55:11 <ski> eval (\\x -> plus x 5) 5
+23:55:50 <palomer> hmm?
+23:56:08 <Cale> um, can't you already write such an eval?
+23:56:32 <palomer> Cale: yes, but you need to box 5!
+23:56:37 <Cale> eval could do that
+23:56:42 <palomer> and box "x"
+23:56:52 <palomer> (the second "x")
+23:56:55 <palomer> ok, this is a silly example
+23:56:57 <palomer> >:O
+23:57:14 <ski> eval (\\x -> e) = \v -> forall x. eval x = v => eval e
+23:57:20 <Cale> Well, you can't extend Haskell arbitrarily like that :)
+23:57:38 <Cale> Perhaps doable with TH
+23:57:46 <Cale> (well, certainly doable)
+23:57:51 <palomer> TH?
+23:57:57 <ski> evil
+23:57:59 <Cale> Template Haskell
+23:58:15 <palomer> TH is evil?
+23:58:37 <ski> well
+23:58:53 <Cale> I wouldn't say it's evil so much as overweight and undertyped.
+23:58:59 * palomer thinks we should have inheritance for datatypes
+23:59:09 <palomer> who's with me?
+23:59:15 <Cale> Parametric polymorphism!
+23:59:21 <palomer> eh?
+23:59:25 <ski> it doesn't ensure that one can only construct metaprograms which only can construct properly typed (and scoped) object programs
+23:59:37 <ski> coinheritance !
+23:59:47 <palomer> coinheritance?
+23:59:57 <palomer> I just read part of a paper advocating inheritance for datatypes

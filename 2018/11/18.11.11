@@ -1,0 +1,925 @@
+00:10:23 <tnks> How do people try out candidates in their Cabal files?
+00:11:44 --- mode: glguy set +v shiro[cloud]
+00:31:50 <sclv> i just vendor it locally
+00:34:11 --- mode: glguy set +v fen
+00:38:42 <fen> seems like there could be a good fusion rule for when a loop such as an unfold where pattern matching is used to stop the recursion to eliminate a slow use of Maybe;
+00:38:46 <fen> :t unfold
+00:38:47 <lambdabot> error:
+00:38:47 <lambdabot>     • Variable not in scope: unfold
+00:38:47 <lambdabot>     • Perhaps you meant one of these:
+00:38:54 <fen> :t Data.List.unfold
+00:38:55 <lambdabot> error:
+00:38:55 <lambdabot>     Not in scope: ‘Data.List.unfold’
+00:38:55 <lambdabot>     Perhaps you meant one of these:
+00:39:05 <fen> :t Data.Foldable.unfold
+00:39:06 <lambdabot> error:
+00:39:06 <lambdabot>     Not in scope: ‘Data.Foldable.unfold’
+00:39:06 <lambdabot>     Perhaps you meant one of these:
+00:39:11 <MarcelineVQ> unfoldr
+00:39:17 <fen> :t Data.Foldable.unfoldr
+00:39:18 <lambdabot> error:
+00:39:18 <lambdabot>     Not in scope: ‘Data.Foldable.unfoldr’
+00:39:18 <lambdabot>     Perhaps you meant one of these:
+00:39:32 <sshine> :i unfoldr
+00:39:48 <cocreature> it doesn’t make sense for unfoldr to be in Data.Foldable, you can’t unfold arbitrary foldables
+00:40:09 <fen> :t Data.List.unfoldr
+00:40:10 <lambdabot> (b -> Maybe (a, b)) -> b -> [a]
+00:40:56 <fen> :t uncons
+00:40:57 <lambdabot> [a] -> Maybe (a, [a])
+00:41:28 <fen> > Data.List.unfoldr uncons [1,2,3]
+00:41:30 <lambdabot>  [1,2,3]
+00:44:54 <fen> oh, unfoldr has a note about fusion; http://hackage.haskell.org/package/base-4.12.0.0/docs/src/Data.OldList.html#unfoldr
+00:45:24 <fen> not sure if that applies to this general fusion rule though
+00:45:35 <fen> might have to find another example...
+00:48:10 <fen> ok, so `data Zipper f a = Zipper [f a -> f a] (f a)' has `backwards (Zipper fs xs) = case fs of (f:fs') -> Just (Zipper fs' (f xs)); otherwise -> Nothing
+00:48:16 <fen> '
+00:49:30 <fen> which can be used with; `loop :: (a -> Maybe a) -> a -> a; loop f a = maybe a (loop f) (f a)'
+00:50:15 <fen> and again, the Maybe can be avoided by recusing explicitly and pattern matching on the halting case;
+00:51:04 <fen> rewind :: Zipper f a -> Zipper f a; rewind = loop backwards
+00:51:09 <fen> (slow)
+00:52:05 <fen> rewind (Zipper [] xs) = (Zipper [] xs); rewind (Zipper (f:fs) xs) = rewind $ Zipper fs (f xs)
+00:52:10 <fen> (faster)
+00:53:27 <fen> and there are other types of loop, such as over the type (s -> (a,Maybe s)). each of these loops seems to have a similar sort of fusion
+00:54:49 <fen> but how can "the halting case uses pattern matching so it can be translated to an explicit recursion" be written as a fusion rule?
+00:56:14 <fen> basically the idea is that removing the Maybe from the loop gives an "unsafe" loop, which its ok to use, as the user can prevent it reaching the point where pattern matching would throw an error
+00:57:10 <fen> unsafeLoop :: (s -> (a,s)) -> a -> a. this would always throw an error though...
+00:57:44 <MarcelineVQ> which error?
+00:57:52 <fen> when it hits the end
+00:58:22 <fen> e.g. using (\xs -> (head xs,tail xs))
+00:58:35 <fen> as opposed to uncons
+00:59:17 <fen> but when it is rewritten using the argument as an direct recursion, pattern matching can be used to avoid the error
+00:59:30 <fen> which seems like a tricky fusion rule to write
+01:02:08 <fen> `unsafeLoop (\xs -> (head xs,tail xs))' rewites to `let f xs = case xs of (x:xs') -> x:f xs' ; otherwise -> []'
+01:02:37 <fen> hmm wait, that should be unsafeUnfold...
+01:03:52 <cocreature> it sounds like what you’re looking for is what GHC can already do for unfoldr, i.e., try to eliminate the maybes
+01:04:12 <fen> unsafeUnfold :: (s -> (a,s)) -> s -> [a]; unsafeUnfold f s = (\(a,s') -> a: unsafeUnfold f s') (f s)
+01:05:19 <fen> cocreature: yes, for several variants of loops, such as the "rewind" example above
+01:05:50 <cocreature> GHC doesn’t have any special hacks for unfoldr. if your loop is somewhat similar, the same optimizations apply
+01:06:43 <fen> the loops with types including maybe to halt ("safe" loops) can be written as their "unsafe" version, and pattern matching can be used in the fused expression
+01:07:39 <fen> the hope is that code written using such "safe" loops could use a fusion rule to be translated to their faster implementation
+01:08:11 <fen> but the difficulty is in expressing the "pattern matching used in halting" condition
+01:09:08 <fen> its not clear how to derive the unsafe unfolding function in a way that it can be safely used
+01:10:00 <fen> e.g. translating uncons to unsafeUncons and pattern matching as in the case expression above (at time 09:01)
+01:13:08 <fen> this kind of fusion would allow people to write code using safe loops and have it be translated to the faster implementation 
+01:16:17 <MarcelineVQ> have you tried inlining pragmas for your functions? also are you compiling code you test?​ there are some optimizations that happen in ghci but they're fairly basic afaik
+01:17:23 <fen> https://bpaste.net/show/d3759b71e384
+01:17:27 <fen> https://bpaste.net/show/3343790bcfae
+01:17:54 <fen> thats the code faster after doing this kind of rewrite
+01:18:07 <fen> maybe an Inline pragma is all thats needed?
+01:18:17 <fen> it was compiled with -O2
+01:22:00 <MarcelineVQ> Dunno but it may help, there's things called RULES that are responsible for list fusion, and INLINE can be important to get functions into a form RULES can act on, along with functions like build and argument  http://hackage.haskell.org/package/base-4.12.0.0/docs/src/GHC.Base.html#build
+01:23:05 <MarcelineVQ> not also the note you linked earlier about unfoldr
+01:23:25 <MarcelineVQ> " The benefit of inlining unfoldr is likely to be huge in many common cases, -- even apart from list fusion. In particular, inlining unfoldr often -- allows GHC to erase all the Maybes. "
+01:23:28 <MarcelineVQ> *note also
+01:24:07 <fen> nice
+01:25:00 <fen> yeah, the RULES thing looks like whats needed, but its difficult to express this "pattern matching" rule...
+01:26:28 <fen> it would be something like; loop safeThing = unsafeLoop unsafeThing. but how would it be able to derive the unsafeThing, and use it correctly wrt pattern matching
+01:44:17 <Arahael> How do I tell Wreq not to timeout so darn quickly?
+01:44:32 <Arahael> I want to do long polling, and I have a suspicion that I can't easily do this with Wreq.
+01:46:11 <cocreature> Arahael: the manager has various settings for timeouts
+01:47:04 <Arahael> cocreature: They appear to be ignored, though.
+01:47:25 <Arahael> cocreature: https://github.com/bos/wreq/issues/70
+01:49:20 <cocreature> Arahael: that also seems to suggest a solution, namely change the settings of the manager used for the session instead of the settings in getWith/…
+01:50:34 <Arahael> cocreature: Oh, I missed that.
+01:51:49 <Arahael> You mean, with the Sess.withSessionControl thing?
+01:52:19 <cocreature> yep
+01:52:37 <Arahael> Yeah, I tried that.  Doesnt' seem to do it.
+01:52:57 <Arahael> Actually I used the wrong getWith, let me try the session one.
+01:55:08 <Arahael> Yeah, that tiems out pretty quickly.  
+02:00:46 <Arahael> I must be doing something wrong, I'll have another look after a night's sleep.
+02:13:32 <echoreply> Is ghci debugger a good tool to step through a function execution and examine values which are being passed in and returned? I tried to set a :break, then run the code and :step/:list, but I can't see concrete values anywhere -- just type variables etc.
+02:37:43 <cocreature> echoreply: tbh, most of the time printf-style debugging using Debug.Trace works better for me than ghci’s debugger
+03:39:13 <echoreply> For function `filtering :: Applicative f => ...`: can `filtering` implementation Debug.Trace.trace concrete applicative instance `f` which is being used in a particular invocation?
+03:43:22 <dibblego> are you doing Data61/fp-course ?
+03:44:15 <echoreply> yep
+03:45:06 <dibblego> do you want to do steps to solve it, or after having solved it?
+03:47:38 <echoreply> It's not really about the solution, I'm more interested in what applicative instance is used when `filtering` is called like this: https://github.com/data61/fp-course/blob/master/src/Course/Applicative.hs#L370
+03:48:31 <dibblego> it is the ((->) t) instance that is used there
+03:48:47 <dibblego> https://github.com/data61/fp-course/blob/master/src/Course/Applicative.hs#L121
+03:49:52 <echoreply> That was my assumption as well, is there a way to confirm it via some debugging facility?
+03:50:54 <dibblego> you could write a type-ascription to confirm it
+03:51:40 <dibblego> or :type filtering (>) (4 :. 5 :. 6 :. 7 :. 8 :. 9 :. 10 :. 11 :. 12 :. Nil)
+03:51:46 <dibblego> then you will (f) change into (a ->)
+03:54:52 <echoreply> I get:
+03:54:55 <echoreply> :type filtering (>) (4 :. 5 :. 6 :. 7 :. 8 :. 9 :. 10 :. 11 :. 12 :. Nil)
+03:54:57 <echoreply> filtering (>) (4 :. 5 :. 6 :. 7 :. 8 :. 9 :. 10 :. 11 :. 12 :. Nil)
+03:54:59 <echoreply>   :: (Num a, Ord a, Show a) => a -> List a
+03:55:55 <echoreply> clear
+03:56:20 <dibblego> so you know that filtering returns some (f (List a))
+03:56:35 <dibblego> and then you see that (f) turns into (a ->)
+04:03:11 <echoreply> clear, it was tricky to parse immediately - my mind expects some capitalized word to replace f :)
+04:06:56 <__monty__> echoreply: You could call a -> b, Function a b : )
+04:12:21 <Tritlo> I'm trying to figure out the structure of an API by looking at how a specific value is constructed
+04:12:44 <Tritlo> How can I use Data.Data recursively, i.e. call "toConstr" on both the value and the arguments to that constructor?
+04:18:00 <Tritlo> Basically, I want to see the the AST of the value
+04:19:59 <cocreature> Tritlo: that sounds like "show" should be sufficient?
+04:20:29 <Tritlo> cocreature: No, since it has a custom show function, while I want to see the actual constructors
+04:20:43 <cocreature> custom show instances are the worst :(
+04:21:56 <cocreature> Tritlo: if you have access to the constructors, writing your own show-like function might be the easiest solution
+04:22:22 <Tritlo> cocreature: Oof, alright then
+04:22:53 <[exa]> wasn't there some debug library that could print the values using constructor's names automagically?
+04:23:14 * [exa] intensely wishes there would be some
+04:23:30 <cocreature> if you have a Generic instance, you can probably write something based on that
+04:25:56 <cocreature> but really people should just stop using Show for pretty printing
+04:31:00 <Tritlo> Hmm, maybe I can use the gshow function from scrap your boilerplate
+04:35:49 <mniip> Data.Map.Map-like Show instances are cool
+04:36:17 <mniip> show x = "fromEncoding " ++ show (toEncoding x)
+04:43:48 * hackage web3 0.8.2.0 - Ethereum API for Haskell  http://hackage.haskell.org/package/web3-0.8.2.0 (akru)
+05:01:50 <MarcelineVQ> me 1h15mins ago: about to write "oh man, iirc filtering was the hardest problem in that course for me, you devil dibblego" decide I should do it again quickly to see if it's still as hard as I remember.     me now: got it ;_;
+05:08:18 <faris> MarcelineVQ, What course is that?
+05:09:46 <MarcelineVQ> faris: https://github.com/data61/fp-course
+05:11:35 <__monty__> Is it fun?
+05:11:39 <MarcelineVQ> Yep
+05:15:46 * hackage proteome 0.1.0.0 - neovim project manager  http://hackage.haskell.org/package/proteome-0.1.0.0 (tek)
+06:22:18 --- mode: glguy set +v baghyasree
+07:45:48 <dontdieych> fellas, haskell is bad
+07:46:12 <dontdieych> Im not trolling about haskell.
+07:46:21 <dontdieych> haskell is bad for me
+07:47:40 <MarcelineVQ> you get used to it
+07:48:18 <dontdieych> that is why haskell is bad for me
+07:48:43 <MarcelineVQ> you get used to that too
+07:48:44 <[exa]> dontdieych: is there any backstory behind that statement?
+07:51:37 <Ariakenom> Without backstory or something at all interesting for your readers it really is trolling
+07:52:55 <dontdieych> OK. sry all. actually,  Im a somekind of man who interested at computer things.
+07:53:13 <MarcelineVQ> Reads to me like someone who's moved forward and when they look back the sand of the wasteland stings their eyes, that's all it is they tell themselves, those aren't tears
+07:53:48 <echoreply> How would one go about transforming `(a -> f Bool)` to `f (a -> Bool)`?
+07:53:57 <dontdieych> not developer or pro computer guys.
+07:53:59 <MarcelineVQ> Best not to water down the word trolling more than it has been, it used to mean something to people, something special
+07:54:05 <byorgey> echoreply: you can't, not in general
+07:55:00 <dontdieych> I've enjoyed read some tutorial and  book about some computer languages
+07:55:09 <byorgey> echoreply: for some specific choices of f and a you might be able to.  But imagine e.g.   Int -> IO Bool  vs   IO (Int -> Bool).   In the first case you could have a different IO effect for each Int.  In the second case you have to decide on the IO effects first, and return a pure function
+07:56:08 <byorgey> e.g. \x -> case x of { 3 -> print "foo" >> return False; 5 -> print "blah" >> return True; _ -> return True }   -- there is no way to turn this into an equivalent  IO (Int -> Bool)
+07:56:11 <dontdieych> but after I read haskell things, all other languages article and books are boring
+07:56:16 <c_wraith> I think you can only go that direction for things equivalent to Reader
+07:56:47 <byorgey> c_wraith: that sounds plausible.
+07:57:11 <c_wraith> I mean, for Reader, it's roughly flip.  So Reader certainly suffices
+07:57:25 <echoreply> f is Applicative in this concrete case, maybe that helps?
+07:57:29 <dontdieych> haskell is bad for 'tutorial hopper' like me
+07:57:40 <byorgey> echoreply: nope, see my examples above.
+07:58:58 <MarcelineVQ> dontdieych: computer stuff is this weird rabbit hole that tests your ability to stay interested in learning, not only because the hole is bottomless but because it widens as you delve. some day you could sink into complete degeneracy, and be writing things like  ∀ n. Ordinal n ⟹ succ n (pred n) ≡ pred n (succ n)  on purpose, and the people nearby will understand you, and even know why you'd want to write that.
+07:59:09 <MarcelineVQ> It's fun though, computer stuff, tutorials.
+08:05:04 <dontdieych> MarcelineVQ, Thanks for quite .... very good answer. I read quite many comptuter language's 'introduction', 'tutorial' sort of things.  But after read about haskell things. Its became most fun things. :D
+08:06:08 <dontdieych> So haskell bad for me
+08:06:19 --- mode: glguy set +v bantu_
+08:06:27 <dontdieych> other many articles are now boring
+08:06:34 <MarcelineVQ> I'm just goofing off, if you have questions or want pointers to good learning material people here are more than happy to help. The accepted coin here in exchange for assistance is well stated questions
+08:08:47 <dontdieych> I just doing so many trolling here. sry about that and thanks for respond
+08:12:16 <winny> is this style guide a good one? https://github.com/tibbe/haskell-style-guide/blob/master/haskell-style.md
+08:14:34 <[exa]> winny: my tldr version: 1] names of what I actually meant don't get lost in other names 2] hindent
+08:15:00 <c_wraith> I mostly stick with it, but with some tiny mods.
+08:16:42 <c_wraith> that's a pretty permissive style guide, too.  Lots of "use your judgment"
+08:16:58 <deltasquared> meh, I use my judgement until someone disagrees with me. :P
+08:17:02 <c_wraith> Which is good for dealing with real-world situations involving names you didn't choose.
+08:17:20 <c_wraith> Some libraries have functions with names 40 characters long. :)
+08:17:51 <deltasquared> I think a better rule would be "don't inflate diffstats by changing someone else's indent/newline style"
+08:18:08 <deltasquared> i.e. you may disagree with it, but don't change it just because
+08:18:10 <c_wraith> But that wouldn't be true to the history of ghc!
+08:18:30 <deltasquared> c_wraith: I guess I am generalising here to rules that would be applicable in any language ;)
+08:19:34 <c_wraith> Oh, I was actually referring to the joke that SPJ and Simon Marlow disagreed (on layout vs {;}, iirc), and both sought out reasons to make changes to code the other had done to "fix" the style in it.
+08:20:10 <deltasquared> good grief, it seems there are programmers out there that are a lot more touchy about this stuff than I am
+08:20:33 <deltasquared> I am of the opinion that I find reading code harder than writing it anyway, so as long as stuff's legible I ain't gonna complain
+08:20:36 <c_wraith> Well, given how many years they worked together as the primary ghc authors, it's likely that it was 99% joke
+08:20:53 <winny> style is chiefly the most heated topic in programming, especially in languages that don't have an official style
+08:21:03 <deltasquared> c_wraith: perhaps, but I hear of instances elsewhere on the internets where it probably wasn't.
+08:21:07 <[exa]> about that style guide -- constructor strictness is about code style?
+08:21:21 <c_wraith> tibbe has some weird ideas about strictness
+08:21:35 <c_wraith> That don't really reflect how most other people use the language
+08:21:43 <[exa]> well it makes some amount of sense
+08:21:45 <c_wraith> That part is one I throw out entirely
+08:21:50 <[exa]> but not in a style guide.
+08:21:50 <[exa]> yes
+08:22:17 <c_wraith> Basically, I advocate for using correct strictness, not following any cargo cult rules.
+08:22:38 <deltasquared> all style guides have an implicit pinch of salt disclaimer about them; if the authors pretend otherwise they probably don't know what they're on about.
+08:23:04 <c_wraith> One of these days I need to sit down and write out precisely what "correct" means.  Because I'm pretty sure there is a correct strictness for basically everything that doesn't depend on context.
+08:23:25 <deltasquared> are we talking about strictness of evaluation here btw
+08:23:36 <c_wraith> yeah.
+08:23:41 <deltasquared> I have to admit so far I've mostly been yolo about it in my haskell experiments
+08:23:52 <deltasquared> though I haven't written anything that would need me to pay attention to it
+08:23:53 <Solonarv> for simple struct-ish types it's probably reasonable to default to strict constructor fields, no?
+08:24:16 <[exa]> yes, unless someone wants to put undefined there for a while
+08:24:19 <kittykitty> any tips on reducing the amount of memory that is used when working with lists? Haskell copies the list since its immutable right?
+08:24:46 <mniip> kittykitty, fusion
+08:24:46 * hackage pinch 0.3.4.0 - An alternative implementation of Thrift for Haskell.  http://hackage.haskell.org/package/pinch-0.3.4.0 (abhinav)
+08:24:49 <[exa]> kittykitty: in what context? general advice is to use vectors if your program doesn't require the list-ish behavior
+08:24:57 <c_wraith> Also, never make types strict uselessly.  It's amazing how many people I see making String arguments strict.
+08:25:00 <Solonarv> depends on what exactly you're doing with the list; in some cases it may not even exist at all at runtime
+08:25:09 <deltasquared> meh, copying the list... I would have said not quite
+08:25:50 <Solonarv> e.g. foldr (+) 0 [1..100] may eliminate the intermediate list entirely
+08:26:00 <[exa]> kittykitty: anyway, the "copies the list" is not quite true, if you change e.g. only the first element the rest stays intact
+08:26:31 <Solonarv> yup - generally, speaking, tails can be shared
+08:26:33 <deltasquared> lazy evaluation is great, it can turn into essentially a very efficient generator with no actual "list" being stored in memory
+08:26:39 <blankhart> what is the intuition for why "ExceptT e IO a still imposes a significant runtime performance hit" at https://www.parsonsmatt.org/2018/11/03/trouble_with_typed_errors.html
+08:27:14 <deltasquared> blankhart: reading haskell weekly? I saw that on there, didn't look in the end as wasn't sure what it was on about
+08:27:34 <c_wraith> blankhart: every (>>=) operation performs a pattern match, which means materializing and then destructuring a value
+08:27:37 <kittykitty> I'm doing a cons on some data that im applying the burrows wheeler transform to if thats any help, just adding stuff to the front of an array but my 5mb test data is expected to be 25mb total for the matrix and not the 9ish gb that it reaches and fills swap lol
+08:27:39 <Solonarv> if I had to guess, it's that every (>>=) involves a 'case', but that's really a completely uninformed guess
+08:27:47 <blankhart> ok
+08:28:12 <blankhart> deltasquared, yes
+08:28:57 <c_wraith> kittykitty: if I remember BWT correctly, it's commonly expressed in terms of a 2d representation, at least for the purpose of teaching it.
+08:29:22 <c_wraith> kittykitty: if you're representing that with [[a]], you almost certainly have excessive laziness somewhere.
+08:29:38 <[exa]> kittykitty: oh, use vectors or mutable vectors, and certainly do not actually sort the strings :]
+08:30:30 <kittykitty> c_wraith, yeah im using [String], guess that isn't great haha
+08:30:38 <[exa]> kittykitty: the whole thing is actually a great topic for radix sort
+08:30:57 <kittykitty> [exa], guess I better think harder about not moving the data about
+08:31:50 <kittykitty> oh cool [exa], thanks. I'll definitely take a look at that
+08:31:57 <[exa]> kittykitty: yes, even in other languages you would probably implement this as index-juggling only
+08:32:21 <[exa]> kittykitty: also, radix-sort is fast on stuff with limited domain (which the characters probably are)
+08:32:55 <[exa]> kittykitty: also also, String is UTF, each letter there is actually a 32-bit value. You might want ByteString if you're going to do actual compression
+08:34:02 <kittykitty> is there a preferred representation for 2d arrays if [[a]] is excessively lazy?
+08:35:35 <[exa]> kittykitty: there's Vector for 1D arrays (you can divmod the indices to 2D), not sure if there's 2D specialization of that around
+08:35:49 <[exa]> kittykitty: also, the point of the index-only implementation is that you won't need 2D array at all
+08:37:12 <kittykitty> thanks [exa] I'll definitely take a look at your suggestions
+08:39:13 <[exa]> kittykitty: the "optimizations" section on wikipage of Burrows-Wheeler has some good ideas
+08:43:12 <kittykitty> [exa], thanks
+09:04:01 --- mode: glguy set +v fen
+09:04:48 <fen> s -> (a,s), s -> (a,Maybe s), s -> Maybe (a,s)
+09:05:00 <fen> is there type which contains all of these?
+09:06:58 <fen> also, do the last 2 form a bijection, setting s = f a, with patterns End and Last respectively, (and a generalised Cons pattern) 
+09:07:27 <fen> i.e. are there no `s' not of the form `f a' respecting these patterns that can satisfy those types
+09:08:48 <Akii> anyone knows why misusing the show type-class is bad? I remember being told that it's the dual to read but can't find any resources (https://twitter.com/yevrahjleinad/status/1061656527260520448)
+09:09:06 <fen> :t print 
+09:09:07 <lambdabot> Show a => a -> IO ()
+09:09:53 <cocreature> Akii: it’s not in the docs but it’s fairly widely accepted that you should not abuse show
+09:10:02 <c_wraith> Akii: Show doesn't have any hard rules, but it does have a soft rule - the output should be valid Haskell code
+09:11:07 <c_wraith> Akii: if you want some other form of output, you're probably better off using something other than Show
+09:11:41 <Akii> this is what I "criticise" in this blog post: the html example
+09:12:14 <Akii> apparently the author either doesn't know about this or decided that it's an ok example
+09:12:30 <Akii> that's why I'm asking; couldn't really come up with solid evidence why this was bad
+09:12:42 <fen> what makes you think it is?
+09:12:53 <c_wraith> Ah, I mistook the situation as you were the one who wrote the post.
+09:14:16 <c_wraith> Anyway, there's no hard rules.  But the design of showsPrec is pretty suggestive.   It's a great design for producing output that follows Haskell's parsing rules.
+09:14:26 <c_wraith> It's a kind of awful design for producing formatted docs
+09:14:39 <Akii> right, not the author; Just wanted to have a more substantial argument than "I think it's bad"
+09:14:41 <c_wraith> There are pretty-printing libraries that handle that far better
+09:15:01 <fen> it seems reasonable to expect that `s' can be cast to `f a' if it is expected to produce a value of type `a' ?
+09:16:00 <fen> and then that the Maybe can be handled using patterns to wrap functions to retrieve this value and also to match on the halting case
+09:16:44 <fen> the question is if doing so can really be thought of as handling every possible type `s' ?
+09:17:02 <c_wraith> my question is deeper - what's your actual goal?
+09:17:59 <Akii> thanks c_wraith!
+09:18:04 <cocreature> Akii: we actually had some asking about how they can inspect the Haskell AST of a value earlier today where the problem was that due to a custom Show instance, they couldn’t use Show for that. So that at least provides an argument for the default behavior of Show to be valuable
+09:18:34 <__monty__> fen: They're not isomorphic, unless you can't tell the difference between (a, Nothing)'s in the second case.
+09:18:48 <__monty__> Uhm, the first case.
+09:18:58 <c_wraith> cocreature: isn't Data or Generic a better class for that?
+09:20:30 <fen> to make either an Inline pragma, or a rewrite rule to translate code written using the slower "safe" variants of state to the "unsafe" stream version (s -> (a,s)) by demanding that patterns for retrieval and halting are specified. pattern matching in this way is *faster* than using Maybe, as it combines variable assignment with the choice, rather than Maybe, which is more like a boolian if then else, adding an extra computation 
+09:20:43 <__monty__> cocreature: But, Data.Vector for example uses `fromList [v1, v2, v3...]`. So "valid haskell" isn't enough to make it useful for inspecting the AST.
+09:20:46 <cocreature> c_wraith: Generic only gets you one level deep, then you are back to having to rely on the Show instance (or some other class). Data is what they ended up using but I still feel that being able to just call "show" for that is quite useful
+09:21:06 <__monty__> cocreature: And imo, that's a more useful representation because the type's abstract.
+09:21:15 <max3> bartos zmilewski calls k in m >>= k a continuation. is that accurate?
+09:22:39 <cocreature> __monty__: sure, I’m not saying it’s always the right choice. but just because for Vector it isn’t (and that’s kind of a bad example to demonstrate your point since the underlying arrays are primitives not user-defined ASTS) doesn’t mean that abandoning it altogether is a good idea
+09:22:53 <__monty__> max3: I don't see why not.
+09:23:07 <max3> well i don't know the formal definition of continuation so i wasn't sure
+09:23:12 <fen> __monty__ : not sure that makes sense. 
+09:23:25 <max3> __monty__, certainly it looks like something that "continues" the computation
+09:24:16 <berndl> max3: Maybe a better word is "callback".
+09:24:42 <max3> berndl, why as opposed to continuation?
+09:25:17 <__monty__> max3: Intuitive hand wavy definition is a continuation is a computation with a hole in it. Once you fill the hole you can continue the computation. A function looks like it matches that intuition.
+09:26:05 <fen> c_wraith: the question about how complete using `f a' in place of `s' arises because it seems that this pattern matching approach covers all possible cases
+09:26:34 <monochrom> http://www.vex.net/~trebla/haskell/cont.xhtml
+09:26:45 <__monty__> max3: Note that I'm not saying continuations are equivalent to functions, not knowledgeable enough to do so.
+09:26:49 <jmcarthur> To me, Show is suitable for logging and debugging, and I never use Read.
+09:27:16 <jmcarthur> s/never use Read/only use Read for quick and ugly GHCi hacks/
+09:28:43 <__monty__> jmcarthur: You don't really need to hijack show for logging though. Why go against convention if it's not necessary?
+09:30:12 <fen> setting s = f a, and demanding that f a -> (a,f a) exists (create a pattern for this called (Cons x xs)), as well as either being able to match (Last a), or End, seems to cover the versions where instead the value is extracted "safely" using either (f a -> (a,Maybe a)) or (f a -> Maybe (a,f a)) respectively 
+09:30:16 * hackage apply-refact 0.6.0.0 - Perform refactorings specified by the refact library.  http://hackage.haskell.org/package/apply-refact-0.6.0.0 (mpickering)
+09:33:24 <fen> whereas if `s' is left as it is, and the 3 versions of state above are used, these matching and halting patterns cant be expressed. (they are classes over f)
+09:33:46 <jmcarthur> __monty__: I don't mean I use Show for the entire message. I just mean I think it is reasonable when logging a Haskell value for error reporting or later debugging.
+09:34:04 <fen> is that right?
+09:35:08 <fen> hmm, maybe the End case works with `s' but the Last pattern only works for `f a'
+09:35:12 <__monty__> jmcarthur: Then the "valid haskell" rule is still useful, no?
+09:37:14 <jmcarthur> __monty__: Yes. I was just trying to give some contexts where that actually makes sense.
+09:37:51 <__monty__> Ah, ok, misunderstood. nvm, carry on ; )
+09:40:24 <monochrom> String's and [a]'s Show instances set an example of aiming at programmer-friendly (not user-friendly) format.
+09:42:03 <monochrom> It is just that for numbers the two formats converge.  Programmers are very unimaginative, they think that every data type is a number type, so they have 50% chance of mistaking Show for user-end output.
+09:42:38 <fen> so then `End s => s -> (a,s)' replaces `s -> Maybe(a,s)' and `Last f => f a -> (a,f a)' replaces `f a -> (a,Maybe (f a))'
+09:43:13 <fen> (this is the desired rewrite rule)
+09:44:19 <fen> (or at least, the motivation for a rewrite rule over loops unfolding these safe state variants)
+09:51:08 <echoreply> MarcelineVQ: few hours ago you made a remark about fp-course `filtering`; I stayed on it for some time and finally managed to solve it (happy :); Would you care to review my solution?
+09:51:38 --- mode: glguy set +v gobby1
+09:51:58 <gobby1> Is there a library that recursively returns all files in a given directory?
+09:52:12 <c_wraith> a bunch of them
+09:52:12 <gobby1> I know conduit can do it but is there another library?
+09:52:33 <gobby1> c_wraith: A few of them are deprecated. Is there a "go to" library?
+09:53:10 <c_wraith> If you're not concerned with the sorts of things conduit handles, there's always https://hackage.haskell.org/package/directory-1.3.3.1/docs/System-Directory.html#v:listDirectory
+09:55:10 <fen> echoreply: please share incase anyone else might review 
+09:56:01 <fen> gobby1: using listDirectory and doesDirectoryExist should work
+09:56:09 <gobby1> c_wraith: The issue is I need absolute paths also.
+09:56:10 <fen> to write that recursive function
+09:56:35 <fen> you can use getCurrentDirectory...
+09:56:50 <gobby1> when I try to use `makeAboslute` it does not create the proper path
+09:56:59 * geekosaur wonders if gobby1 has given any thought whatsoever to the fact hat it can change between retrieval and use. or how symlinks or mount points affect it
+09:57:08 <gobby1> when I use my functions in GHCi
+09:57:12 <geekosaur> (or reparse points on windows, which can be worse)
+09:57:32 <fen> also, defining (+/+) a b = a ++ "//" ++ b is halpful  
+09:57:57 <c_wraith> fen: isn't that just the </> operator?
+09:58:12 <fen> > "hello" </> "path"
+09:58:14 <lambdabot>  error:
+09:58:14 <lambdabot>      • Variable not in scope: (</>) :: [Char] -> [Char] -> t
+09:58:14 <lambdabot>      • Perhaps you meant one of these:
+09:58:22 <fen> % "hello" </> "path"
+09:58:23 <yahb> fen: ; <interactive>:275:9: error:; * Variable not in scope: (</>) :: [Char] -> [Char] -> t; * Perhaps you meant one of these: `Text.PrettyPrint.HughesPJ.<>' (imported from Text.PrettyPrint.HughesPJ), `<>' (imported from Prelude), `<*>' (imported from Prelude)
+09:58:46 <gobby1> * gobby
+09:58:49 <geekosaur> %index (</>)
+09:58:52 <geekosaur> er
+09:58:54 <c_wraith> Nope, I'm crossing languages.  cute
+09:58:55 <geekosaur> @index (</>)
+09:58:55 <lambdabot> System.FilePath.Posix, System.FilePath, System.FilePath.Windows, Text.XHtml.Table, Text.XHtml
+09:59:08 <c_wraith> Ah, so it is *some* packages.
+09:59:35 <c_wraith> apparently the filepath package
+09:59:37 <fen> :t System.FilePath.((</>))
+09:59:39 <lambdabot> error:
+09:59:39 <lambdabot>     Not in scope: data constructor ‘System.FilePath’
+09:59:39 <lambdabot>     No module named ‘System’ is imported.
+09:59:43 <fen> % :t System.FilePath.((</>))
+09:59:43 <yahb> fen: ; <interactive>:1:1: error:; Not in scope: data constructor `System.FilePath'; No module named `System' is imported.
+09:59:49 <fen> hrmpf
+10:00:10 <geekosaur> :t (System.FilePath.</>)
+10:00:11 <lambdabot> FilePath -> FilePath -> FilePath
+10:00:36 <fen> > (System.FilePath.</>) "hello" "path"
+10:00:39 <lambdabot>  error:
+10:00:39 <lambdabot>      Not in scope: ‘System.FilePath.</>’
+10:00:39 <lambdabot>      No module named ‘System.FilePath’ is imported.
+10:00:54 <fen> oh lambdabot
+10:01:22 <geekosaur> @let import System.FilePath as FP
+10:01:23 <lambdabot>  Defined.
+10:01:43 <geekosaur> > "hello" FP.</> "path"
+10:01:45 <lambdabot>  "hello/path"
+10:02:35 <echoreply> fen: thanks, here it is https://pastebin.com/rV3F4PnS
+10:04:07 <fen> nice
+10:04:21 <c_wraith> echoreply: that's how it's done, alright.  Note that it's often useful to include the relevant data definition, though it was clear enough in this case.
+10:05:34 <fen> might try and get some help with these rewrite rules soon
+10:29:51 * hackage gi-gtk 3.0.26 - Gtk bindings  http://hackage.haskell.org/package/gi-gtk-3.0.26 (inaki)
+10:58:40 <MarcelineVQ> awesome echoreply
+11:14:27 <Welkin> has anyone set up a pub/sub system in haskell using server-sent events?
+11:15:04 <MarcelineVQ> echoreply: there's an instructive version of this called filterM in Control.Monad, it's quite similar to what you ended up with except that it uses foldr (foldRight) instead of explicit recursion and liftA2 (lift2) instead of   ... <$> ... <*> ... 
+11:15:17 <Welkin> it seems that it is impossible to have all messages in one channel, and then filter the messages in the channel before sending them out to the different subscribers
+11:15:18 <MarcelineVQ> echoreply: If you're interested I've made a paste so you don't accidently spoil anything for the Monad module looking it up:  https://gist.github.com/MarcelineVQ/7c18d52124f8c0141b3bd9dd51ecb0db
+11:15:43 <Welkin> instead, it seems that it requires multiple channels to accomplish this kind of filtering
+11:16:02 <Welkin> but then that means I need to create possibly hundreds of channels on startup that may never get used
+11:16:13 <Welkin> and keep it all in memory?
+11:20:22 <buttons840> I'm trying to create some Haskell bindings to a c graphics library called raylib, but I'm having some trouble with the FFI. Specifically, I'm trying to deal with nested structs, which require some workarounds in Haskell. Here's what I have (minimized): https://gist.github.com/DevJac/874ec6535653c5d4ef5283ade7edbd75 -- I've been stuck on this for about 10 hours, and (famous last words) I think this is 
+11:20:24 <Welkin> I could do this with redis to make it easier perhaps
+11:20:28 <buttons840> one of the last hurdles I need to overcome to know how to create full bindings.
+11:23:10 <cocreature> buttons840: so what’s wrong with the output you get?
+11:23:33 <cocreature> your description doesn’t explain the problem
+11:24:53 <buttons840> cocreature: i create a Camera3D (Vector3 1 2 3) 4 5 (I've excluded some fields for brevity), and I poke that into a pointer created with alloca, then I peek that same pointer and get Camera3d (Vector3 2.4235e-23 4.34e10 5.34643e-23) 4 5 out
+11:25:21 <cocreature> I see
+11:25:57 <buttons840> the problem is that Camera3D is a struct containing a nested struct, Camera3D contains Vector3's -- i attempted to create a "wrapper" WrCamera3D and some C functions to convert back and forth between Camera3D and WrCamera3D
+11:26:45 <buttons840> WrCamera3D did enable me to create a peek instance for Camera3D which can properly read Camera3D values returned from C -- I believe my problem is with poke'ing
+11:27:02 --- mode: glguy set +v Cima
+11:29:30 <cocreature> buttons840: I’ll try to take a look in a few minutes
+11:29:43 <buttons840> cocreature: more specifically, I believe my problem is when poke calls "
+11:30:47 <buttons840> cocreature: more specifically, I believe my problem is when poke calls "unwrapToCamera3D"; print statements at the top of "unwrapToCamera3D" (a C function) show that the values passed in are already messed up before anything (as best I can tell) happens in that C function
+11:30:58 <buttons840> cocreature: ty, take your time
+11:47:07 <cocreature> buttons840: are you specifically interested in getting things to work using withWrapper or are you fine with something that avoids that?
+11:47:25 <buttons840> cocreature: i am fine with something that avoids that
+11:47:55 <buttons840> cocreature: in case you didn't notice, the same code is in a repo of mine you can checkout and build
+11:48:31 <buttons840> cocreature: taking a bigger step back, I don't know if my way of handling nested structs is good or not, I really just want a nice way of handling nested structs, and if that requires a completely different approach that is OK with me
+11:48:36 <cocreature> buttons840: yeah, I already reproduced it locally. now trying to fix it
+11:58:27 <cocreature> buttons840: try that https://gist.github.com/cocreature/283a6db25f2f8361a2ce73b37277fee7
+11:58:39 <buttons840> cocreature: looking...
+11:59:11 <fragamus> What is    —show    and     —/show
+12:00:02 <buttons840> cocreature: that works for me, I'll have to take a closer look, I'm not familiar with some of the functions you used
+12:00:30 <buttons840> cocreature: got breif description of what you did? 
+12:01:05 <cocreature> buttons840: first I threw away the withWrapper stuff since I was too lazy to figure out what that did :)
+12:01:18 <cocreature> buttons840: then I used offsetof to get the offset for the nested structs
+12:01:27 <cocreature> adding that offset to the pointer gives you a pointer where you can peek/poke
+12:01:29 <buttons840> cocreature: it's good to get rid of untrested abstractions when findings bugs :)
+12:01:31 <cocreature> that’s really all there is to it
+12:02:02 <buttons840> cocreature: i'm happy to see I don't need the WrCamera3D :)
+12:02:57 <plertrood> Say I had a function that had a number of different options. I could represent it as doSomething :: Bool -> Bool -> Bool -> Bool -> Result.. but it feels a bit messy having a lot of boolean parameters to pass each time. Is there a more idiomatic way to do this?
+12:03:11 <cocreature> plertrood: create sumtypes that represent the different options
+12:03:45 <berndl> I think a record type would be better.
+12:03:55 <Welkin> how is it using acid-state vs redis for storing in-memory data (and persisting to disk periodically)?
+12:03:57 <plertrood> How would I be able to represent all the different combinations?
+12:04:19 <plertrood> Yes, I think a record type would make more sense.
+12:04:52 <plertrood> I suppose in C I could do some kind of bit flags and or them.. but that doesn't feel very haskell..
+12:05:41 <Welkin> plertrood: not a record type, a sum type
+12:05:47 * hackage getopt-generics 0.13.0.3 - Create command line interfaces with ease  http://hackage.haskell.org/package/getopt-generics-0.13.0.3 (SoenkeHahn)
+12:06:23 <Welkin> I create sum types all the time that get serialized to json. I represent the sum type as a js object with { type: "HaskellType", ctor: "HaskellConstructor", ... }
+12:06:54 <Welkin> so you would have a different record/struct for each constructor in C
+12:07:31 <plertrood> Hmm.. but with a sum type I only have a choice of either one or the other.
+12:07:38 <plertrood> Sometimes I may want both.
+12:07:49 <Welkin> then that is not a sum type
+12:08:05 <Welkin> if you want both, create a third constructor that holds two others
+12:08:23 <Welkin> data Sum = A Int | B String | C Sum Sum
+12:08:39 <Welkin> it's not perfect though
+12:08:55 <Welkin> but you won't get much better with a record
+12:09:49 <plertrood> There would be a bit of a combinatorial explosion with sum types.
+12:10:17 <plertrood> I'l wack up a record type I think. Thanks. I was just wondering if there was another way..
+12:10:23 <cocreature> plertrood: well your Boolean can also only be True or False
+12:10:32 <cocreature> so I don’t see how replacing the boolean by a sumtype changes anything
+12:10:42 <berndl> plertrood: just use a record: data MyOptions = MyOptions { opt1 :: Bool, opt2 :: Bool, ..., optn :: Bool }
+12:11:14 <berndl> then you can write doSomething :: MyOptions -> Result
+12:11:20 <Welkin> you can do that and use "smart constructors"
+12:12:08 <Welkin> it's better to use record syntax to create the data anyway though
+12:12:10 <plertrood> Ah thats a nice idea.
+12:12:26 <plertrood> So you mean create functions for the most commonly used combination of options?
+12:12:31 <Welkin> yes
+12:12:42 <Welkin> that is common in haskell configuration records
+12:12:50 <Welkin> `defaultConnectionConfig`
+12:13:09 <plertrood> Yes I like that.
+12:13:10 <Welkin> then you can change it using record update syntax
+12:13:31 <Welkin> `defaultConnectionConfig { port = 3000 }`
+12:13:44 <plertrood> Oh I see. 
+12:13:50 <plertrood> Yes, I like that a lot.
+12:14:15 <Welkin> so it could be all false by default, then turn on the ones you need
+12:14:21 <Welkin> or the other way around
+12:14:54 <echoreply> MarcelineVQ: pretty cool implementation (filterM), thanks!
+12:14:55 <Welkin> I would prefer using custom types though, instead of booleans whenever possible
+12:19:07 <Welkin> there seem to be a lot of complaints about acid-state
+12:50:09 --- mode: glguy set +v fragamus_
+12:50:37 <fragamus_> hi can anyone tell me what    --show      and     --/show    are for
+12:52:43 --- mode: glguy set +v _rht
+12:57:05 <Shockk> with llvm-hs-pure's IRBuilder interface, is there any way for me to look up one of the arguments to the current function by name? or do I need to keep track of the list given to my function body builder and store those in a Map or something for fast lookup?
+12:59:09 <cocreature> Shockk: the latter
+12:59:09 <Shockk> ah :(
+12:59:09 <Shockk> okay
+12:59:50 <int-e> fragamus_: in what context?
+13:01:46 <Shockk> actually, I guess that makes sense, because I suppose the names passed to `function` are just name suggestions
+13:05:33 <Welkin> is there an existing message queue system for haskell, or do I need to build my own?
+13:05:52 <Welkin> my first intuition is to use a Map of Chan
+13:07:23 <Welkin> I'd need some sort of clean up though for when the channel is not used for a long period of time
+13:14:27 <Solonarv> bounded channels, perhaps?
+13:14:52 <Welkin> what is that?
+13:16:15 <Welkin> any suggestions for a pub/sub system?
+13:16:27 <Welkin> I was going to use redis since it's already there
+13:28:57 <Solonarv> TBChan / TBQueue is what I was thinking of
+13:29:11 <Solonarv> I can't remember which package they're in
+13:31:29 <Welkin> I have learned about MVar and Chan only so far reading the parconc book
+13:31:58 <Welkin> nad it looks like the wai plugin for EventSource only supports Chan
+13:32:11 <Welkin> I suppose I could write my own since EventSource is very simple
+13:32:26 <geekosaur> a Chan isn't going to cost much if it's empty
+13:32:31 <Welkin> I got it working already using Chan
+13:32:43 <Welkin> geekosaur: what if I have 10,000 of them?
+13:34:26 <Welkin> so my idea is to use `Map GameId Chan`, so each game room has it's own channel
+13:35:10 <Welkin> I haven't done any calculations or etsting yet to see how well this will work (along with the rest of the system) on a tiny VPS with 1 GB RAM
+13:36:23 <Shockk> would it be a bad idea to use something like Chan (GameId, YourOtherData)?
+13:36:54 <Shockk> doing it that way would use a single Chan instead of having one for each GameId and would therefore mean you wouldn't have to worry about the lifetime of the Chans
+13:36:59 <Welkin> the only problem there is how the wai eventsource plugin works
+13:37:10 <Welkin> so perhaps I should just write my own eventsource plugin
+13:37:33 <Welkin> https://hackage.haskell.org/package/wai-extra-3.0.15.2/docs/Network-Wai-EventSource.html
+13:37:38 <Welkin> eventSourceAppChan :: Chan ServerEvent -> Application
+13:37:58 <Welkin> it just takes the messages and pushes them out as-is
+13:38:43 <Welkin> but the implementation is 9 lines of code, so
+13:39:57 <Welkin> I'll consider using a single Chan
+13:40:29 <Welkin> Solonarv: TBQueue looks like it's from STM
+13:40:35 <Welkin> I haven't gotten that far yet in parconc
+13:40:41 <Welkin> perhaps I should read that chapter
+13:40:57 * hackage triplesec 0.2.2.0 - TripleSec is a simple, triple-paranoid, symmetric encryption library  http://hackage.haskell.org/package/triplesec-0.2.2.0 (smprts)
+13:43:45 <Welkin> what's the difference between a Chan and a TChan (or TQueue)?
+13:44:48 <hpc> T* use transactions instead of locks, and their operations are in STM instead of IO
+13:47:51 <d34df00d> Hi!
+13:48:25 <lavalike> d34df00d: yo!
+13:48:27 <d34df00d> Suppose I want to spawn some IO action in the background and not really care about it anymore, just making sure it will not abort when my program finishes.
+13:48:28 <Solonarv> hello!
+13:48:49 <d34df00d> Is `void $ async $ someIOAction ...` doing the right thing?
+13:49:04 <Solonarv> that will still be killed when the main thread dies, IiUC
+13:49:35 <lavalike> yep
+13:49:46 <d34df00d> Is there a primitive that'll wait for it? I'm really lazy to make a map of asyncs and wait for them later on.
+13:49:58 <d34df00d> s/map/lsit/
+13:50:03 <d34df00d> Damn, list!
+13:50:24 <lavalike> :t Control.Concurrent.Async.wait
+13:50:27 <lambdabot> Control.Concurrent.Async.Async a -> IO a
+13:50:46 <d34df00d> Well, it requires me to keep the Asyncs somewhere and wait for them.
+13:50:50 <d34df00d> Probably not worth the hassle.
+13:50:51 <geekosaur> therer is nothing that keeps track of all Asyncs for you, no
+13:51:10 <lavalike> well there's this too
+13:51:13 <lavalike> :t Control.Concurrent.Async.withAsync
+13:51:13 <geekosaur> there are some pool packages that might, btu then you need to manage the pool
+13:51:15 <lambdabot> IO a -> (Control.Concurrent.Async.Async a -> IO b) -> IO b
+13:51:35 <geekosaur> nothing rewrites the ghc runtime to track all threads
+13:51:46 <lavalike> «This is a useful variant of async that ensures an Async is never left running unintentionally.»
+13:52:00 <d34df00d> Ah, that's not worth the hassle then.
+13:52:01 <d34df00d> Thanks!
+13:52:21 <lavalike> I don't understand but I guess that's fine
+13:52:33 <Solonarv> you can always write a wrapper around 'async' that shoves the async into an IORef or something
+13:52:54 <d34df00d> I feel like I"m doing something terrible when I'm touching IORefs.
+13:53:45 <hpc> d34df00d: it's a good feeling to have, there's not a whole lot that's valuable about them
+13:53:52 <hpc> in regular code you generally don't need mutation
+13:54:04 <hpc> and if you do, it's for a domain-specific purpose that something like MVar suits better
+13:54:32 <Welkin> I've only seen IORefs used in really low-level code for things like web server implementations
+13:55:08 <Solonarv> well, or an MVar/TVar/anything
+13:56:40 <Solonarv> on IORefs: apecs uses them too
+13:57:05 <Welkin> I realized that if I used redis for pub/sub it would be a nightmare, because it only stores ByteStrings
+13:59:46 <Welkin> using dupChan doesn't require additional memory other than a pointer right?
+14:04:25 <monochrom> I think so.
+14:05:34 <Welkin> would it be better to have one Chan with an id tag that is used for filtering in the consumer? Or a Map Id Chan?
+14:06:05 <Welkin> I'll try with one Chan first
+14:30:04 <Welkin> does warp throw an exception when a client disconnects from an infinite streaming response (like "text/event-stream")?
+14:31:21 <merijn> Probably because the infinite stream doesn't expect the socket to close?
+14:32:23 --- mode: glguy set +v Sepli
+14:32:29 <Welkin> I'm trying to see if I can detect when a user goes offline for any reason
+14:32:45 <Welkin> there are multiple ways to do this using pings/heartbeats (some seem rather strange)
+14:33:45 <Shockk> currently thinking about how to parse lhs <operator> rhs, in my programming language
+14:33:46 <Welkin> in some cases a heartbeat is sent from the server through server-sent events, which makes no sense to me other than to keep the connection open, unless you rely on an exception being thrown for a broken pipe
+14:34:07 <merijn> Shockk: You mean things like associativity and precedence?
+14:34:22 <Shockk> assuming I want to have dynamic operator precedence, i.e. not defined in the language but defined in code, how should I parse this initially, before I've finished parsing the entire AST?
+14:34:55 <merijn> Shockk: GHC just parses them as a list of operators and arguments and rejiggers the list when it's done parsing and knows all precedences
+14:35:03 <Shockk> i.e. should I just do it like a linked list of the operations, and then rebuild a- ah right
+14:35:11 <Shockk> okay that's what I was about to ask if I should do
+14:35:40 <merijn> Shockk: It's not ideal, but if people working on GHC haven't found a better solution yet, I'm betting it's as good as starting point as any :p
+14:35:44 <Shockk> so once I know the precedences I should just rebuild the AST based on those right?
+14:36:08 <merijn> I'd limit it to "just those parts that have nested operator expressions", but yeah
+14:36:29 <Shockk> right, sorry I was using AST to refer to the sub-AST in question
+14:36:55 <Shockk> great I'll do that then, thanks
+14:44:53 <buttons840> in data T = T {asdf :: Int}  what is "asdf" called?   a field accessor or something?
+14:45:18 <buttons840> just looking for the best terminology to use
+14:45:28 <hpc> in record syntax it's a field, as a function it's an accessor
+14:45:39 <hpc> but the terminology there is pretty loose
+14:45:49 <hpc> either one will get the point across
+14:45:53 <buttons840> hpc: sounds like "field accessor" works then
+14:45:59 <buttons840> ty
+14:58:42 --- mode: glguy set +v nate__
+14:58:58 <hexagoxel> for the row-polymorphism proposal, what is the difference between (foo :: Int, bar :: String | r) and (foo :: Int | (bar :: String | r)) ?
+14:59:25 <Solonarv> IIUC those are supposed to be the same thing
+15:01:03 <hexagoxel> is there some (precedence/fixity?) reason for having two symbols, i.e. | and , ?
+15:01:07 <nate__> Howdy.  Is there an elegant way to nest calls to evalRWST inside evalStateT?  Or do I have to marshall the state into and out of the evalRWST call each time?
+15:02:40 <Solonarv> nate__: I'm not aware of one, but you could always write it yourself
+15:04:38 <nate__> Fair.  I thought I just missed something.
+15:11:52 <Welkin> will the row polymorphism be an extension to ghc?
+15:12:25 <Welkin> if so, how does that affect the current record syntax?
+15:24:16 * hackage network-uri-static 0.1.2.0 - A small utility to declare type-safe static URIs  http://hackage.haskell.org/package/network-uri-static-0.1.2.0 (snak)
+15:24:42 <Solonarv> It's a GHC proposal, so I'd assume it is planned as a language extension
+15:24:55 <Solonarv> I suggest you read the proposal for details
+15:27:43 <Welkin> I only found the github thread
+15:27:47 <Welkin> is there a link?
+15:28:00 <Solonarv> the PR has a link to the proposal doc
+15:28:06 <Solonarv> (scroll to the top)
+15:39:02 <hexagoxel> (i have a feeling we'd benefit from an issue tracker per proposal. github's linear comments are annoying for any prolonged discussions)
+15:40:00 <hexagoxel> or any kind of system where specific items can be raised, discussed, worked in and subsequently collapsed in the default view
+17:06:25 * hackage freer-simple-time 0.1.0.0 - freer-simple interface to IO based time functions  http://hackage.haskell.org/package/freer-simple-time-0.1.0.0 (benweitzman)
+17:19:16 * hackage freer-simple-catching 0.1.0.0 - Checked runtime exceptions with freer-simple  http://hackage.haskell.org/package/freer-simple-catching-0.1.0.0 (benweitzman)
+17:22:49 * hackage freer-simple-profiling 0.1.0.0, freer-simple-http 0.1.0.0, freer-simple-random 0.1.0.0 (benweitzman)
+17:40:36 <koz_> Is there a way to create massiv arrays with a function of type '(Monad m) => ix -> m e' instead of 'ix -> e'? I can't seem to find anything like that.
+17:41:05 <koz_> I know I can emit a list and then convert it, but surely that can't be the _only_ way, right?
+17:47:30 <pavonia> koz_: What array type are you using?
+17:47:45 <pavonia> I think Vector has something like that
+17:48:14 <koz_> pavonia: By 'array type' I assume you mean 'representation'? In this case, D.
+17:48:21 <koz_> (since I'm using massiv, as I mentioned)
+17:49:39 <pavonia> I meant which package/module
+17:49:49 <koz_> pavonia: Massiv?
+17:50:05 <koz_> http://hackage.haskell.org/package/massiv-0.2.2.0 <-- this one here
+17:50:15 <pavonia> Oh :D
+17:51:13 <pavonia> I thought you were talking about massive arrays as in very large in size
+17:51:26 <koz_> pavonia: Nope, although the confusion is understandable.
+17:51:35 <koz_> (the name is a Russian pun, much like Repa)
+17:52:50 <koz_> (although my arrays are potentially of tens of millions of elements, which may or may not count as 'massive')
+17:54:52 <koz_> I guess it'll have to be 'list and build', although that's very far from ideal.
+17:58:40 <koz_> OK, let's see if the author can chime in.
+18:22:21 <jle`> koz_: since massiv is built on fusion and rewrite rules, it's possible that providing a 'monadic' builder might break some of the actual benefit
+18:30:25 <danso> i've had what might be a silly idea for a syntax extension and i'm wondering whether there's a reason it hasn't been done
+18:30:47 <danso> when we use typeclasses, we very often use a particular pattern, like
+18:31:02 <danso> (+) :: Num a => Num -> Num -> Num
+18:31:06 <danso> er
+18:31:11 <danso> (+) :: Num a => a -> a -> a
+18:31:34 <danso> what i'm wondering is whether a language extension could be written to allow use like 
+18:31:40 <danso> (+) :: Num -> Num -> Num
+18:32:05 <ion> In what way would fmap :: Functor f => (a -> b) -> f a -> f b use it?
+18:32:42 <danso> how about: (a -> b) -> Functor a -> Functor b
+18:33:00 <danso> the rule would be that "Functor" here is a type variable that stands for anything of class Functor
+18:33:12 <Axman6> danso: what would be the point of that? also that appears to ignore the arguments to the classes, which seems to allow you to use (+) as Double -> Int -> Rational
+18:33:14 <ion> How do you differentiate between that and a data type?
+18:33:17 <danso> so you couldn't use two different Functors and call them both Functors 
+18:33:34 <ion> Rather, a type constructor
+18:33:39 <ion> (a -> b) -> Functor a -> Functor b
+18:33:40 <danso> ion, i see the problem
+18:33:43 <ion> (a -> b) -> Maybe a -> Maybe b
+18:33:51 <danso> hopefully you haven't defined a constructor called Functor
+18:33:59 <danso> if you have, it would need to be an error
+18:34:04 <Axman6> what do you mean two different functors? what you're suggesting seems to suggest you want to be able to use differen Num or Functor isntances
+18:34:34 <geekosaur> I thik that's just inviting more confusion. newcomers already have problems with it, that kind of signature makes things look like what they expect when it's not actually anything like what they expect
+18:34:39 <danso> in response to what Axman6 said, "Num" would need to be the same everywhere it is used
+18:34:41 <ion> How does the human differentiate between a type variable with a constraint and a type, without storing all the definitions and the imports of the module in her mind?
+18:34:55 <ion> when reading "foo :: Bar a -> Bar b"
+18:34:55 <shachaf> I agreekosaur.
+18:35:05 <danso> but it could be cute to use a syntax like (+) :: Num -> Num' -> Num'' 
+18:35:06 <Axman6> danso: but that's already what the current syntax says, and says it more clearly
+18:35:37 <jle`> danso: (+) :: Num num => num -> num -> num
+18:35:45 <danso> geekosaur, i just find the => syntax difficult to understand at a glance 
+18:36:02 <jle`> by "at a glance", do you mean when first learning it, or after becoming familiar with it?
+18:36:03 <danso> (+) :: Num a => a -> a -> a 
+18:36:12 <danso> looks a lot to me like it takes three arguments
+18:36:16 <ion> It kind of does
+18:36:29 <shachaf> If Num -> Num -> Num meant anything, I think it'd be more like (exists x. Num x *> x) -> (exists x. Num x *> x) -> (exists x. Num x *> x)
+18:36:35 <danso> perhaps what i don't like is the use of => in particular
+18:36:36 <jle`> danso: would it help if you parenthesized it, (+) :: Num a => (a -> a -> a) ?
+18:36:50 <geekosaur> that's actually deliberate, because inmany cases therr is an extra argument providing a type witness
+18:37:01 <jle`> danso: are you talking about confusion from the perspective of someone first learning haskell, or from someone who is already familiar with it?
+18:37:19 <danso> geekosaur, you have lost me now :^)
+18:37:22 <geekosaur> (in ghc, a record of typeclass functions)
+18:37:22 <shachaf> Having this invisible type variable seems very confusing to me.
+18:37:42 <danso> jle`, i'm pretty familiar with haskell, but i still stumble over => quite often
+18:37:45 <geekosaur> you must provide proof that you are using the function at a type a wich implements Num
+18:37:57 <jle`> danso: so, you are talking about confusion from the perspective of someone familiar with haskell, right?
+18:38:01 <geekosaur> in ghc, thsi si doen by passing Num's type dictionary as a parameter
+18:38:07 <Axman6> danso: Num a _is_ an argument to (+) though
+18:38:10 <danso> i do tend to parenthesize like you suggest, but it is still an issue
+18:38:30 <jle`> even without talking about implementation, you can think of ... => ... as 'implicit' arguments
+18:38:33 <geekosaur> that is, the dictionary containing te Num instance methods for the selected a
+18:38:47 <danso> geekosaur, i don't think that's inherent in haskell though, isn't that a ghc implementation detail? 
+18:38:47 <jle`> the left hand side is implicit arguments, and the right hand side is explicit arguments
+18:39:02 <danso> and with optimizations enabled, the dictionary will (hopefully) not be passed
+18:39:03 <ion> danso: The function receiving a witness of Num a is inherent.
+18:39:39 <geekosaur> something similar has to hapen in the case of polymorphic recursion on the typeclass (for example, whn a Shwo instance delegates to a different Show instance, as in the Show instance for a product type / record)
+18:39:43 <ion> "in the form of a dictionary" is an implementation detail
+18:40:04 <jle`> so there is a logic-based perspective that the lhs of => does represent arguments
+18:40:10 <geekosaur> it doesn;t necessarily have to be the typeclass dictionary, which is why I used the more general "type witness" originally
+18:40:24 <geekosaur> jus some kind of evidence that a specific "a" is intended
+18:40:28 <shachaf> "Num a" is an argument which is a fact about a. If you had (+) :: a -> a -> a, you couldn't implement it; so the caller passes extra information -- the fact that a is an instance of Num -- which lets (+) do its job
+18:40:29 <danso> ion, you mentioned that my suggestion doesn't differentiate between a constraint and a type, and i was hoping that the user wouldn't "need to know"
+18:40:34 <jle`> in any case hiding a type variable seems like it would cause a lot more confusion than any convenience would help
+18:40:42 <ion> % :set -XTypeApplications
+18:40:42 <yahb> ion: 
+18:40:52 <ion> % (+) @Integer 42 1
+18:40:52 <yahb> ion: 43
+18:41:13 <shachaf> i,i if only you had ClassApplications
+18:41:14 <jle`> danso: typeclasses and types have completely different API in Haskell, they're pretty much completely different concepts, so it doesn't do anyone any service to hide the difference, I think
+18:42:13 <jle`> but really the important thing here that is lost is the concept of the type variable
+18:42:41 <jle`> hiding invisible typevariables would cause so much more confusion than what convenience you'd gain, except in the most simple cases, i'd think
+18:42:50 <ion> (My example might confuse things a bit. (+) :: forall a. Num a => a -> a -> a takes a type "a", a witness of "Num a" and two "a"s; TypeApplications lets you specify the "a", the witness of "Num a" is still implicit.)
+18:43:24 <shachaf> If Num meant anything as a type, it should have a standalone meaning.
+18:44:08 <jle`> conflating the difference between instances of a typeclass and typeclasses themselves is actually a common confusion from people new to haskell, and this would make this much worse, I'd think
+18:44:09 <shachaf> The two reasonable meanings are :: (forall a. Num a => a) and :: (forall a. Num a *> a), neither of which would do what you want here.
+18:44:19 <shachaf> Er, the second one is (exists a. Num a *> a)
+18:44:32 <blankhart> why does this give me 'multiple declarations of _Foo': https://gist.github.com/blankhart/136651faf06f83aff4fd4e852dfb5e4b
+18:45:10 <Axman6> what does :browse Main say?
+18:45:31 <ion> blankhart: See if renaming the type Foo or the data constructor Foo helps.
+18:45:36 <danso> i have gained a few new interesting perspectives already as a result of this discussion
+18:45:56 <danso> particularly the stuff before "=>" as an argument to the function being called 
+18:46:10 <shachaf> Compare to e.g. pre-generics Java, where you might try to write a function like "Object id(Object x)", but that type doesn't really work.
+18:46:11 <danso> i will try to think of it in those terms the next time i use such functions
+18:46:31 <jle`> if your issue is that => might look too much like ->, then does just changing the symbol help the confusion?
+18:46:43 <jle`> [(Num a)]. a -> a -> a
+18:46:43 <danso> maybe it will change my mind
+18:46:53 <danso> jle`, something like that might be easier for me
+18:47:08 <danso> i might try to consistently place the constraint on a line of its own
+18:47:12 <ion> blankhart: Indeed, looking at the documentation, you'll find that both the type and the data constructors get a prism. https://hackage.haskell.org/package/lens-4.17/docs/Control-Lens-TH.html#v:makeClassyPrisms
+18:47:13 <danso> i think that's allowed be the syntax 
+18:47:14 <jle`> yeah, so your original gripe might have just been that => is lexicographically similar to ->
+18:47:24 <jle`> danso: yeah, that's actually common formatting practice
+18:47:26 <danso> by the syntax, i mean
+18:47:39 <danso> that doesn't help in cases where each argument is on its own line though
+18:47:54 <jle`> but yeah, moving Num a => a -> a -> a, to  Num -> Num -> Num, is sort of a very roundabout way of fixing your original problem, then
+18:48:05 <jle`> danso: it's common practice to have each argument be its own line
+18:48:13 <Axman6> if you look at the Core produced by GHC, you'll see that the type classes actually do get passed to function calls (though usually they get inlined so you won't see if most of the time)
+18:48:19 <blankhart> ah, okay, ion i see now thanks
+18:48:46 <danso> yes jle`, so if i have a function (+) :: Num a => \n a -> \n a -> \n a 
+18:48:57 <danso> it will still *look* like four arguments, at least at first
+18:49:11 <danso> i find this mentally unsettling somehow
+18:49:21 <danso> er, three arguments
+18:49:23 <Axman6> time to get used to what it actually means then ;)
+18:49:25 <jle`> danso: if your original problem was => looking like ->, then you might look into changing what => looks like, and not completely reworking the very nature of how type variables and typeclasses work in haskell, heh
+18:49:34 <Axman6> _all functions have exacvtly one argument_
+18:49:40 <Axman6> exactly*
+18:49:55 <danso> right Axman6, obviously i'm simplifying 
+18:50:36 <Axman6> this is one of the rules we drill into people in the Data61 course, once you fully embrace it, a lot of other things start to fall into place
+18:50:47 <danso> jle`, some alternate syntax like your suggestion might be a better idea :^)
+18:51:06 <Axman6> (we don't usually talk about the class constraint being an implicit argument, but it is, at least in GHC)
+18:51:23 <jle`> yeah, that gets to the heart of the issue you were having, and not having to completely rework the idea of type variables and typeclasses ;)
+18:53:03 <jle`> i'm not sure why => was originally chosen over other possible lexemes, but in modern days we like to think about it as roughly invoking the idea of implicit aguments 
+18:53:35 <jle`> whether that is after-the-fact or not, i'm not sure
+18:54:09 <danso> i was wondering in the shower along the similar lines about "return" 
+18:54:11 <ion> I guess the fundamental issue here is the type of a value mentioning implicitly passed information that you don't (necessarily) mention at the call site. I'm not sure there is a way around that, other than making everything in the language passed explicitly. Whether that makes the language better, YMMV.
+18:54:30 <danso> perhaps somebody here knows how that name was chosen
+18:55:22 <Axman6> because it is often used in a similar way to return in other languages (but I think the name is widely regarded as a mistake because of this similarity but its very different behaviour)
+18:55:34 <danso> as far as i know, there's no subtle mathematical reason for the name return
+18:55:53 <jle`> yeah, 'return' was a deliberate choice to mimic imperative subroutine syntax from other languages
+18:56:09 <jle`> that we know was chosen with intent
+18:56:15 <nitrix> liftM would've been better :3
+18:56:21 <danso> i hypothesized that maybe it was an unused-but-reserved-word in first versions of the language, and when somebody wanted to add monads, they said "meh, it will do"
+18:56:45 <nitrix> Or, pure.
+18:56:49 <jle`> note that haskell originally did not have a monad abstraction built in
+18:56:57 <danso> exactly, jle` 
+18:57:16 <nitrix> I think I prefer `pure` over `return`, but even `pure` is questionable..
+18:57:17 <jle`> so 'return' wasn't a part of the first versions of the language
+18:57:41 <danso> i don't know whether any words were "reserved for possible future use" 
+18:57:52 <danso> rust has a monster list of such words
+18:57:54 <pikajude> dude, i haven't written haskell in so long
+18:57:56 <jle`> i don't believe there were any
+18:58:02 <pikajude> the mixins feature of cabal is amazing
+18:58:05 <jle`> you can look at the original spec, it's actually pretty readable :)
+18:58:06 <geekosaur> return isn't even reserved as such
+18:58:09 <ion> "η"
+18:58:32 <thebnq> speaking of keywords, has there ever been a movement to shorten/remove `otherwise`
+18:58:39 <jle`> otherwise is not a keyword
+18:58:48 <thebnq> it isn't? :o
+18:58:48 <danso> otherwise is an identifier 
+18:58:55 <danso> it's defined as otherwise = True
+18:58:56 <Mrbuck> Guys I have one doubt, are there any software one can write an sell on internet without being employed in any corporate ? I want to know any of you got cool startup/self employ ideas? please tell me I badly need it .....very sorry for the offtopic 
+18:58:58 <jle`> it's just a normal value, like pi
+18:59:00 <jle`> > pi
+18:59:03 <lambdabot>  3.141592653589793
+18:59:07 <geekosaur> it is literally defined as "otherwise = True" in Prelude
+18:59:11 <nitrix> Personally, I don't grasp the whole backward-compatible thing about languages. If they want to stick with old versions of the language, they use old compiler versions and that's it. The language should be able to continue evolving.
+18:59:12 <jle`> well, pi is typeclass-overloaded, so not 'exactly' the same thing
+18:59:53 <danso> i do agruee with you thebnq that "else" would have worked just as well there
+18:59:58 <geekosaur> and nothng stops you from writing | True = ... instead of | otherwise = ...
+19:00:06 <thebnq> hm nice. But still not nice
+19:00:17 <jle`> too bad else is actually a reserved keyword
+19:00:31 <danso> mhm ;^) 
+19:00:40 <thebnq> I've actually tried that before but decided it would be a bit obscure
+19:00:54 <jle`> thebnq: what's wrong with otherwise?
+19:01:02 <geekosaur> or being lispy and "t = True" ... | t = ...
+19:01:08 <jle`> danso: and yeah, in case you weren't aware, return is also not a keyword, it's just a normal function name
+19:01:25 <danso> are class methods "normal functions"? 
+19:01:34 <nitrix> return :: Monad m => a -> m a
+19:01:35 <ion> danso: They don't have to be functions
+19:01:36 <jle`> i'm talking about names
+19:01:38 <nitrix> danso: I'd say yes.
+19:01:42 <jle`> as in lexemes, syntax-wise
+19:01:59 <thebnq> jle`: just quite long, slightly inconsistent with other words often used
+19:02:01 <jle`> syntatcially return is the same as recip, abs, map, etc.
+19:02:04 <ion> danso: pi is a class method.
+19:02:27 <danso> it's unfortunate i think that class methods go into the global namespace 
+19:02:28 <jle`> danso: syntactically return is not special-cased, it's the same as any other identifier
+19:02:34 <danso> a syntax like Monad.return could be cute
+19:02:37 <jle`> danso: class methods do not go into the global namespace
+19:02:56 <jle`> any more than other functions or values, at least
+19:02:58 <danso> don't they? it seems like they do
+19:03:04 <danso> right, like other functions 
+19:03:15 <jle`> ah, you don't mean 'global', you mean 'same as other values'
+19:03:17 <danso> which means you can't have two classes that define methods using the same identifier
+19:03:29 <ion> You can import one or both of them qualified.
+19:03:42 <danso> ion, that's true if they're in other modules 
+19:03:46 <jle`> right, it's not global
+19:03:47 <danso> which is often the case, obviously
+19:04:01 <danso> maybe i don't know the meaning of "global" 
+19:04:07 <danso> i meant available everywhere in the current module
+19:04:14 <danso> "top-level scope"? 
+19:04:43 <danso> it would be nice to have multiple classes that could use words like "return" 
+19:04:52 <danso> but that's basically off-limits currently
+19:05:46 <ion> > filter (otherwise `const`) "hello"
+19:05:48 <lambdabot>  "hello"
+19:05:56 <geekosaur> it has to be. you aren;t going to do type inference if you start playing with that
+19:06:18 <jle`> thebnq: do you mean "it's quite long, so it is inconsistent" or "it's quite long, and also inconsistent" ?
+19:06:39 <jle`> if the former, i don't think that long identifiers are necessarily inconsistent with other identifiers
+19:06:43 <jle`> i use long identifiers all the time
+19:06:51 <jle`> and it's common in many popular code bases
+19:07:03 <jle`> if the latter, in what way is it inconsistent?
+19:07:05 <danso> what do you mean, geekosaur 
+19:07:25 <geekosaur> really short idetifiers bascally mark valeus that are polymorphic, so you can't generally say anything meaningful about their names
+19:07:54 <geekosaur> danso, you'd hjave to annotate a bunch of things with their types so the compiler knows which "return" you meant
+19:08:45 <geekosaur> the compiler can work it out now, bcause it knows that 'class Monad m where ... return :: a -> m a' limits the possible types
+19:08:53 <danso> right, i see what you're saying 
+19:09:14 <danso> you might have missed my syntax suggestion, where the class name is used similarly to a module name
+19:09:28 <danso> Monad.return :: Monad m => a -> m a 
+19:09:28 <geekosaur> now you have limits on module names
+19:10:06 <geekosaur> you're multlying weird exclusions and limitations and its nto clear you gained anything but confusion for the person reading the code
+19:10:46 <danso> that's true, now you can't have both a module and a class called "Monad"
+19:11:19 <danso> perhaps some other syntax to convey "class method" instead of "module" 
+19:11:34 <shachaf> Oh man, what if "Num a => a -> a -> a" meant "forall k. Num k => forall a. k a => a -> a -> a"?
+19:11:44 <danso> various languages use something like Monad::return
+19:11:50 <danso> but obviously that's not possible here
+19:14:47 * hackage waargonaut 0.2.0.2 - JSON wrangling  http://hackage.haskell.org/package/waargonaut-0.2.0.2 (schalmers)
+19:15:06 <Lears> All you're really doing is giving a different name to the methods in the differnt classes. So rather than needing some extension for Monad.return and SomeClass.return, just call indicate the class in the identifier in the first place? E.g. class SomeClass a where { someClass'return :: ...; someClass'anotherMethod :: ... }
+19:15:26 <Lears> s/call//
+19:17:22 <danso> yes, that would be fine in haskell as it is now
+19:17:35 <danso> i'm imagining a fantasy haskell that fits my every whim :^) 
+19:21:18 <Maxdamantus> (%instance :: Monad IO).return
+19:30:52 * hackage antiope-athena 6.1.3 -   http://hackage.haskell.org/package/antiope-athena-6.1.3 (newhoggy)
+19:32:50 * hackage antiope-sqs 6.1.3, antiope-sns 6.1.3, antiope-s3 6.1.3, antiope-messages 6.1.3, antiope-dynamodb 6.1.3, antiope-core 6.1.3, antiope-contract 6.1.3 (newhoggy)
+19:39:52 --- mode: glguy set +v s__
+20:03:42 <nolrai> So is there some trick to get putStr to work on windows?
+20:06:17 <geekosaur> if you're trying to do something like outputting a prompt and reading input, hFlush before the read
+20:09:17 <nolrai> Do you need to hflush before end of the application?
+20:10:29 <tnks> why do I see my candidates in https://hackage.haskell.org/package/candidates (it's a long list, so a while to find)?  But I don't see anything in https://hackage.haskell.org/package/$MY_PACKAGE/candidates/?
+20:10:55 <tnks> I see stuff for other people's packages.  Is that only for candidates that actually published to the main index?
+20:12:08 <nolrai> Hmm. It seems that stdout is a bad file descriptor!?
+20:12:16 * hackage impl 0.1.0.0 - Framework for defaulting superclasses  http://hackage.haskell.org/package/impl-0.1.0.0 (dailectic)
+20:13:01 <Axman6> nolrai: if you set the buffering mode to NoBuffering then it won't wait until new lines to print characters
+20:13:15 <Axman6> @hoogle NoBuffering
+20:13:16 <lambdabot> System.IO NoBuffering :: BufferMode
+20:13:16 <lambdabot> GHC.IO.Handle NoBuffering :: BufferMode
+20:13:16 <lambdabot> System.Path.IO NoBuffering :: BufferMode
+20:13:48 <Axman6> @hoogle hSetBuffering
+20:13:48 <lambdabot> System.IO hSetBuffering :: Handle -> BufferMode -> IO ()
+20:13:48 <lambdabot> GHC.IO.Handle hSetBuffering :: Handle -> BufferMode -> IO ()
+20:13:48 <lambdabot> System.Path.IO hSetBuffering :: Handle -> BufferMode -> IO ()
+20:14:01 <nolrai> Well but if that was the issue, putStrLn should have worked, no?
+20:15:43 <nolrai> Also passing stdout as an handle seems to be causing a "bad file descriptor error"
+20:19:03 <geekosaur> that doesn't sound right. but you're nto poviding enough information,s o I guess it's twenty questions time to find out what you're really asking?
+20:36:13 <nolrai> sorry was messing around and going back to an earlier version (I had changed nightly builds, so I thought maybe that was it?)
+20:43:26 <nolrai_> I'm back.
+20:44:12 <nolrai_> I still get the "bad file descriptor".
+20:53:39 <ion> Does your process have a standard output?
+20:55:23 <geekosaur> ...andif not, why ae you expecting output to stdout to work?
+20:56:41 <monochrom> "Reconstruct 50 lines of code... in 20 questions or less!"
+20:57:21 <ion> Stochastic debugging
+20:57:40 <monochrom> > 2^20
+20:57:42 <lambdabot>  1048576
+20:57:51 <ion> Sample the information space until you determine the problem with high enough certainty
+20:58:51 <ion> Maybe I should say Monte Carlo debugging
+21:01:45 <MarcelineVQ> momentum based query interpretation
+21:03:43 <nolrai_> Does my proccess have a stdout. Hmm. How would I tell and would I give it one?
+21:04:22 <nolrai_> I'm just running "stack test" or running the .exe it produces.
+21:04:31 <ion> In cmd.exe?
+21:04:39 <ion> or PowerShell?
+21:05:09 <nolrai_> git-bash and PowerShell, seem to get the same behavior in both.
+21:05:40 <geekosaur> unless you have linked it as a windows gui app, it should have one
+21:06:11 <ion> Please pastebin your code and the full output from the command line invocation somewhere and post the link, thanks.
+21:09:41 <ion> Also, have you tried compiling and running a minimal example such as 'module Main where main = putStrLn "hello"' in the same environment?
+21:09:42 <nolrai_> Ah, my main app is a gui app, I bet it is getting linked as one.
+21:10:47 <nolrai_> Thats what the Main.hs in test-suit is.
+21:11:06 <ion> Do you have -optl-mwindows as one of the ghc options?
+21:11:27 <geekosaur> ok, you'll need to log stuff to a separate file, either with a loging library or opening a Handle on a file and passing that around for use with hPutStrLn
+21:14:38 <geekosaur> it's worse than that; iirc if t's nto linekd as a windows gui program and then opens a window, its stdout and stderr get invalidated at that point
+21:14:51 <geekosaur> whereas if linked as gui, they're opened on NUL:
+21:21:12 <nolrai_> Okay..I can't find the string "mwindows" anywhere in my project. 
+21:22:25 <nolrai_> Is it posible I am not using the "mingw" linker?
+21:23:41 <nolrai_> Might just be easier to write to a file.
+21:24:53 <geekosaur> so if you don't have -mwindows, then what I said earlier applies [12 05:14:16] <geekosaur> it's worse than that; iirc if t's nto linked as a windows gui program and then opens a window, its stdout and stderr get invalidated at that point
+21:25:01 <geekosaur> so you ge invalid handle errors
+21:25:34 <geekosaur> with -mwindows, output silently vanishes but no bad handle exceptions
+21:25:49 <nolrai_> Ah.
+21:25:57 <nolrai_> But I don't open a window.
+21:26:29 <geekosaur> [12 05:09:21] <nolrai_> Ah, my main app is a gui app, I bet it is getting linked as one.
+21:26:49 <geekosaur> so what are you doing that's gui?
+21:27:13 <nolrai_> Trying to show vector feilds with color.
+21:29:55 <nolrai_> So window drawing. But the program I am trying to get to out put to the console is just my test suit, which I want to be a console app.
+21:30:39 <geekosaur> interaction with the windows event manager means no stdin/out/err, because it has to do one or the other, not both. if any of the functions you call does so, that'd kill output
+21:33:24 <nolrai_> I mean I can't get main=putStrLn "Testing 1..2..3" to out put.
+21:34:37 <nolrai_> And I am not passing any options to the linker afict.
+21:36:22 <nolrai_> Is there a way to see what my linker is getting passed? Does stack pass -mwindows by default?
+21:37:58 <ion> Try --verbose
+21:48:19 <dminuoso> :t uncurry (liftA2 (,))
+21:48:20 <lambdabot> Applicative f => (f a, f b) -> f (a, b)
+21:50:53 <nolrai_> Hmm. If I run 'stack test > out.txt' out.txt contains my test output.
+21:51:22 <nolrai_> So I guess that is what I will do.
+21:52:26 <ion> :t curry (fmap (uncurry id) . uncurry (liftA2 (,)))
+21:52:27 <lambdabot> Applicative f => f (b1 -> b2) -> f b1 -> f b2
+21:52:47 <dminuoso> ion: Interesting.
+21:55:36 <ion> :t \f -> curry (fmap (uncurry id) . uncurry (liftA2 (,))) . fmap f
+21:55:37 <lambdabot> Applicative f => (a -> b1 -> b2) -> f a -> f b1 -> f b2
+21:56:59 <dminuoso> Applicative is really hard to bolt into my head. It just wont stick. This is my 4th attempt now, let's see if I can make it work.
+21:58:30 <ion> Then please ignore everything I wrote. :-D Well, the one thing that may be useful is that liftA2, liftA2 (,) and (<*>) are all equivalent.
+21:58:57 <ion> As shown in an almost maximally obfuscated form above.
+22:00:02 <dminuoso> ion: No please continue, they are not really obfuscated.
+22:00:51 <dminuoso> Maybe I should try and study the monoid definition using Day convolution
+22:01:39 <ion> Implementing them in terms of each other may actually be a nice exercise, and you will find that doing it will result in much more readable expressions if you don't contort the code into pointfree expressions.
+22:01:49 <dminuoso> ion: Right now Im reapproaching the construction by: class Functor f => Monoidal f where unit :: f (); (**) :: f a -> f b -> f (a,b)
+22:03:12 <shachaf> i,i class Functor f => Applcative f where { applicative :: Ap f a -> f a }
+22:10:50 <dminuoso> I guess my main problem is recognizing the core difference between `join :: (F :.: F) a -> F a` and `(**) :: (f a, f b) -> f (a, b)`
+22:12:08 <dminuoso> Perhaps I should just try and implement (**) in terms of (**)
+22:12:08 <dminuoso> Err (**) in terms of join
+22:20:30 <ion> You can do f a -> f b -> f (f (a, b)) with fmap alone.
+22:27:59 <dminuoso> So I guess one might also think of <*> as just `(<*>) :: f (a -> b) -> f a -> f (a -> b, a)`
+22:28:22 <dminuoso> That additional application internally is just for convenience
+22:29:12 <mniip> I mean sure, that's how (<*>) is defined in terms of (**)
+22:29:31 <mniip> f <*> k = fmap id $ f ** k
+22:30:18 <dminuoso> mniip: semantically yeah, though `id` wont have the correct shape
+22:30:37 <mniip> fmap (uncurry id)
+22:30:39 <dminuoso> you'd need some let apply (f, v) = f v in fmap apply (f ** k)
+22:30:51 <mniip> sorry I quite literally woke up 15 minutes ago
+22:30:55 <dminuoso> :t uncurry id
+22:30:57 <lambdabot> (b -> c, b) -> c
+22:31:02 <dminuoso> The cool things I learn. =)
+23:00:47 <Mrbuck> Hi
+23:12:24 <Mrbuck> ANy one online? I want to have a haskell startup after learning haskell please tell me what kind of starups can I really start
+23:29:04 <shachaf> I think I once read a Haskell proposal about a syntax that was maybe "do { f (<- a) (<- b) }" for "do { x <- a; y <- b; f x y }" -- does someone remember something like that?
+23:29:15 <mniip> ew
+23:29:34 <mniip> that sounds similar to idiom brackets
+23:29:44 <Zemyla> More like idiot brackets.
+23:30:22 <shachaf> Yes, but it supports general monad things, (<- (<- a)) or whatever.
+23:30:57 <mniip> hmm
+23:32:16 <mniip> @let (<$=>) = (=<<); (<*=>) = (join .) . (<*>)
+23:32:18 <lambdabot>  Defined.
+23:32:29 <mniip> :t \f a b -> f <$> a <*=> b
+23:32:30 <lambdabot> Monad f => (a -> b) -> f (a1 -> f a) -> f a1 -> f b
+23:32:42 <mniip> ahh, the fixities
+23:32:54 <shachaf> Yes, sure, but you can have the thing nested inside an expression or something.
+23:33:06 <mniip> @let infixl 4 <$=>, <*=>
+23:33:07 <lambdabot>  Defined.
+23:33:09 <mniip> :t \f a b -> f <$> a <*=> b
+23:33:11 <lambdabot> Monad m => (a -> a1 -> m a2) -> m a -> m a1 -> m a2
+23:33:34 <mniip> shachaf, just replace all applications with <$> or <*> appropriately
+23:33:59 <mniip> maybe even <&>
+23:34:24 <mniip> shachaf, also one problem with your approach is how do you delimit the scope of the (<- a)
+23:34:35 <mniip> f (g (<- a))
+23:34:42 <mniip> is that   f <$> (g <$> a)
+23:34:43 <shachaf> I'll take that as, no, you don't remember this feature.
+23:34:47 <mniip> or f (g <$> a)
+23:35:03 <shachaf> do { f (g (<- a)) } is do { x <- a; f (g x) }
+23:35:16 <mniip> so it's delimited by a do block
+23:35:31 <shachaf> You just take all the <-s and execute them left-to-right inside-to-outside, or whatever.
+23:35:38 <shachaf> Like you'd evaluate a language with effects.
+23:36:07 <shachaf> Yes, sure.
+23:36:10 <mniip> yeah, I understand how it evaluates once you disambiguate the parse
+23:38:06 <shachaf> I'm pretty sure I saw this proposed somewhere? I don't remember now.
+23:38:36 <mniip> yeah right, I have no idea regarding your actual question
+23:39:53 <shachaf> Well, if you know of a similar feature in another language I'd also be interested.
+23:40:15 <shachaf> For example Rust's ? is sort of similar.
+23:40:39 <Mrbuck> mniip:  
+23:42:03 <mniip> Mrbuck, hello?
+23:43:16 <dminuoso> mniip: It is particularly interesting, because it shows that Applicative Functors are not really about *applying* functions as it seems.
+23:43:22 <dminuoso> Seeing the Zip
+23:43:49 <dminuoso> Nevermind the second message there.
+23:44:09 <mniip> function application is a binary operation
+23:44:34 <mniip> that allows, together with functoriality, to lift arbitrary n-ary operations (n >= 1)
+23:44:52 <Mrbuck> mniip:  please give me some good idea
+23:44:53 <mniip> (pure gives you the n = 0)
+23:45:23 --- mode: glguy set +v rckd
+23:50:17 * hackage multirec 0.7.9 - Generic programming for families of recursive datatypes  http://hackage.haskell.org/package/multirec-0.7.9 (AndresLoeh)
+23:51:47 <ztf> if I already have `compare` implemented for `MyDatatype`, is writing `(==) x y = compare x y == EQ` the nicest / cleanest way to then instantiate `Eq`? 
+23:53:33 --- mode: glguy set +v geodesic[m]
+23:54:06 <nshepperd> Mrbuck: asking for startup ideas isn't really on topic here
+23:56:01 * hackage zipper 0.4.3 - Generic zipper for families of recursive datatypes  http://hackage.haskell.org/package/zipper-0.4.3 (AndresLoeh)

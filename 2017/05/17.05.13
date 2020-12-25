@@ -1,0 +1,2301 @@
+00:00:28 <mniip> so it turns out that LR is *all* about comparing item sets for equality and turning the grammar tree into a graph
+00:01:21 <mniip> because once you try to construct an LR parser without comparing nonterminals for equality (think, e.g, an applicative parser with unlabelled recursion)
+00:01:29 <mniip> surprise surprise, you get an LL parser
+00:17:45 <Lokathor> so here's a thing
+00:18:02 <Lokathor> is there a way to specify that a given function can only be called from main, and then have GHC track that?
+00:18:28 <Lokathor> like, any action built with it is also poisoned, and at the very top it will warn you when you're sending such a thing off via forkIO?
+00:18:55 <Lokathor> "from the main thread", i should say
+00:26:10 <MarcelineVQ> trying to keep calls on one thread for a c lib?
+00:26:19 <Lokathor> exactly that use case
+00:27:00 <MarcelineVQ> I don't have anything useful to add to that, just clarifying since it seems like it'd be a popular topic
+00:27:16 <Lokathor> rust has Send and Sync
+00:27:29 <Lokathor> but still not quite, as far as i know, a way to ensure that code is only called from the main thread
+00:28:41 <cocreature> hm that’s an interesting question. sadly I don’t know of a way to do that
+00:28:46 <MarcelineVQ> it doesn't need the main thread right, just a consistent thread? like if you did all your work from a single forkOS you'd be in shape yeah?
+00:29:20 <Lokathor> MarcelineVQ, in the case of the GLFW library for C, the C docs claim that particular functions must only be called from the main thread.
+00:30:14 <MarcelineVQ> but that's just to be consistent isn't it? "However, forkOS creates a bound thread, which is necessary if you need to call foreign (non-Haskell) libraries that make use of thread-local state, such as OpenGL (see Control.Concurrent)."
+00:30:41 <mrkgnao> Lokathor: could you not use some kind of ST-like trick here, where the functions need to be polymorphic in what thread they're called from, and then main does something like a runST?
+00:31:04 <mrkgnao> That was vague, I suppose, because there's no way to guarantee that bit.
+00:31:04 <Lokathor> mrkgnao, someone much smarter than me could do that perhaps >_<
+00:31:28 <Lokathor> MarcelineVQ, what you're suggesting is probably true
+00:31:49 <Lokathor> without knowing the precise details of GLFW I can't really say if they've hardcoded anything somehow
+00:32:44 <Lokathor> http://www.glfw.org/docs/3.1/intro.html there's a "thread safety" section there
+00:33:28 <cocreature> mrkgnao: I think the problem with that is that you can’t prevent other threads from using runST
+00:33:46 <cocreature> or your runST replacement
+00:34:24 <mrkgnao> cocreature: could I not somehow use a thread "tag" of some sort as the s type?
+00:35:06 <Lokathor> cocreature, prevention in an absolute sense isn't necessarily necessary. GHC telling you that you probably screwed up in big letters when you compile is probably enough in this case
+00:35:15 <mrkgnao> that would involve some form of talking to the RTS and pushing that into a type .. uh.
+00:35:28 <cocreature> mrkgnao: the problem is that if you are going to run it in main, there needs to be some conversion to an "IO a". and once you have that I don’t see how you can stop me from using that inside of forkIo
+00:35:41 <mrkgnao> https://ghc.haskell.org/trac/ghc/wiki/UnpackedSumTypes -- omg, my eyes
+00:37:08 <mrkgnao> cocreature: the conversion could turn the static check into a dynamic one, which would not be triggered if it were called from the main thread, but would panic otherwise (i.e. if you did something like main = forkIO FakeMain.main)
+00:37:25 <mrkgnao> but you're probably right about this, I think
+00:37:32 <cocreature> yeah a runtime check might be possible
+00:37:46 <cocreature> although I’m not sure how you check if you’re running on the main thread but I assume it’s possible :)
+00:38:57 <Lokathor> I really think that warnings are enough for this situation :P
+00:39:22 <Lokathor> cocreature, also, for example, the "unwrap the action into IO" function can itself be tagged as a poisoned function
+00:39:22 <Myrl-saki> :t (>>-)
+00:39:24 <lambdabot> error:
+00:39:24 <lambdabot>     • Variable not in scope: >>-
+00:39:24 <lambdabot>     • Perhaps you meant one of these:
+00:39:28 <Myrl-saki> Eh.
+00:39:29 <cocreature> Lokathor: but you want compile time warnings, right? that’s the thing that’s tricky about it
+00:39:32 <mrkgnao> there should be some accursedUnutterableUnsafeGetThreadId function somewhere in the bowels of GHC.*, I guess?
+00:39:58 <cocreature> mrkgnao: it’s just called myThreadId :)
+00:40:02 <Myrl-saki> Oh whoops. It was defind in the source itself.
+00:40:05 <Lokathor> mrkgnao, you can always get your own threadId
+00:40:10 <cocreature> right you can just run it once at the beginning to get the one of main and then compare it
+00:40:16 <cocreature> that’s a lot easier than I thought
+00:41:08 <Lokathor> ah, hmm, type MainOnlyOrCrash a = MonadReader ThreadID a   ?
+00:41:18 * mrkgnao would've liked that made statically checkable, but meh
+00:41:29 <mrkgnao> cocreature: oh.
+00:41:40 <cocreature> mrkgnao: if you can come up with a solution for checking it statically, let me know :)
+00:41:51 <Myrl-saki> @pl (\return_ -> \a -> return_ (k a))
+00:41:51 <lambdabot> (. k)
+00:42:38 <cocreature> it’s slightly annoying to have to pass the ChreadId of the main thread through your program. maybe there is a way to get it directly
+00:43:03 <mrkgnao> is there an amITheMainThread function, then?
+00:43:13 <cocreature> that’s what I’m trying to figure out :)
+00:43:30 <mrkgnao> the point is, with enough reflection-ish stuff, it's highly probable that this can be done
+00:43:52 <mrkgnao> you could generate some typeclass instance and the Reifies constraint could probab
+00:44:01 <mrkgnao> *probably do the threading around for you
+00:44:06 <cocreature> then I still need to carry that typeclass constraint around everywhere
+00:44:34 <mrkgnao> Yeah, it's just replacing a MonadReader by a Reifies. No point to that, right.
+00:45:11 <mrkgnao> But the ST replacement could have a constraint in the constructor, GADT-style...
+00:45:15 <Lokathor> @pl (\act -> bracket GLFW.init (const GLFW.terminate) $ \initWorked -> when initWorked act)
+00:45:15 <lambdabot> bracket GLFW.init (const GLFW.terminate) . flip when
+00:45:34 <mrkgnao> so pattern-matching gives you that constraint, but no explicit carrying around would be necessary
+00:45:49 <mrkgnao> does that sound right?
+00:46:29 <Lokathor> i'm not sure that making the use of bracket into a CAF really matters in this case
+00:49:18 <MarcelineVQ> Lokathor: are you making your own bindings? are GLFW-b and bindings-GLFW no good for windows?
+00:49:53 <Lokathor> MarcelineVQ, I'd like to add a "safety layer" over top GLFW-b is all. They work on windows with GHC 8.0.2 or later
+00:50:12 <Lokathor> (but not in previous GHCs, because of a bug with Msys2 or something like that)
+00:50:14 <MarcelineVQ> ah, nothing wrong with more safety
+00:50:45 <Lokathor> related to the "am i the main thread?" there's also "did you try to call me in a reentrant way?"
+00:50:54 <Lokathor> which i think haskell /really/ has no answer to
+00:51:38 <Lokathor> at least, not a practical one
+00:51:58 <Lokathor> "MonadReader ThreadID a" is silly, but not the worst thing in the universe
+00:55:10 <jle`> (?myId :: ThreadId) => ...
+00:55:34 <Lokathor> jle`, never seen a ? in a constraint before
+00:55:48 <jle`> it's an implicit parameter
+00:56:06 <jle`> it means that whoever is using the value must have a variable named myId in scope at the usage site
+00:56:10 <jle`> of type ThreadId
+00:56:28 <Lokathor> hmm
+00:56:43 <Lokathor> sounds like it'd make things easy to factor out of the middle of big blocks into their own sections
+00:56:56 <Lokathor> neat
+00:57:11 <jle`> it's "yet another solution" to the configuration problem
+00:57:25 <jle`> which MonadReader, Reader, and reflections are also sometimes used to solve
+00:57:45 <jle`> @let impar :: (?x :: Int) => String; impar = show ?x
+00:57:46 <lambdabot>  Defined.
+00:57:50 <jle`> > impar
+00:57:52 <lambdabot>  mueval-core: internal error: PAP object entered!
+00:57:52 <lambdabot>      (GHC version 8.0.2 for x86_64_unknown_linux)
+00:57:52 <lambdabot>      Please report this as a GHC bug:  http://www.haskell.org/ghc/reportabug
+00:57:58 <jle`> oh
+00:58:03 <jle`> i did not expect that
+00:58:30 <Lokathor> hoiseted by your own pitard
+00:58:38 <jle`> @let impar2 :: (?defineMe :: Int) => String; impar2 = show ?defineMe
+00:58:39 <lambdabot>  Defined.
+00:58:44 <jle`> > impar2
+00:58:47 <lambdabot>  mueval-core: internal error: PAP object entered!
+00:58:47 <lambdabot>      (GHC version 8.0.2 for x86_64_unknown_linux)
+00:58:47 <lambdabot>      Please report this as a GHC bug:  http://www.haskell.org/ghc/reportabug
+00:58:56 <jle`> > let defineMe = 10 in impar2
+00:58:58 <lambdabot>  mueval-core: internal error: PAP object entered!
+00:58:58 <lambdabot>      (GHC version 8.0.2 for x86_64_unknown_linux)
+00:58:58 <lambdabot>      Please report this as a GHC bug:  http://www.haskell.org/ghc/reportabug
+00:59:00 <jle`> i wish this worked
+00:59:58 <Lokathor> like most things in programming
+01:00:05 <Lokathor> it might work in 10 years instead
+01:00:49 <jle`> > let ?defineMe = 10 in impar2
+01:00:51 <lambdabot>  "10"
+01:00:53 <jle`> ah
+01:01:13 <Lokathor> ah ha
+01:01:33 <ChaiTRex> ah hahaha
+01:02:28 <jle`> > "ah " : fix ("ha" ++)
+01:02:30 <lambdabot>  error:
+01:02:30 <lambdabot>      • Couldn't match type ‘Char’ with ‘[Char]’
+01:02:30 <lambdabot>        Expected type: [[Char]]
+01:02:37 <jle`> > "ah " ++ fix ("ha" ++)
+01:02:39 <lambdabot>  "ah hahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahahaha...
+01:03:58 <Lokathor> :t fix
+01:03:59 <lambdabot> (a -> a) -> a
+01:04:12 <Lokathor> i still never understand where the first 'a' comes from with fix
+01:04:37 <jle`> it comes from itself ~
+01:04:54 <jle`> it's basically the result of an extra call to fix
+01:04:55 <Lokathor> i'm going back to the FFI
+01:04:57 <Lokathor> where things make sense
+01:04:59 <jle`> fix f = f (fix f)
+01:05:06 <jle`> so f is given (fix f)
+01:05:24 <Lokathor> jle`, how do you feel about do-blocks?
+01:05:35 <jle`> so fix ("ha" ++) = "ha" ++ fix ("ha" ++)
+01:05:46 <jle`>  = "ha" ++ "ha" ++ fix ("ha" ++)
+01:05:48 <jle`> etc.
+01:05:50 <Lokathor> oh lazyness, it's so fun
+01:05:51 <jle`> do blocks are a neat thing
+01:06:10 <jle`> but yeah, in haskell, the story of fix is simple; the function is just given the result of (fix f); fix f = f (fix f)
+01:06:26 <Lokathor> > fix error
+01:06:28 <lambdabot>  "*Exception: *Exception: *Exception: *Exception: *Exception: *Exception: *Ex...
+01:06:45 <Lokathor> the robot knows that'd be too easy if it let us get away with that
+01:06:51 <jle`> it tried
+01:06:54 <sternmull> i play around with "stack script" and wonder why it takes around 200ms to execute a file that does nothing more than 'main = putStrLn "Howdy!"'. Even calling ghc and then executing the program is much faster (takes 70ms). Any tips to speed it up?
+01:07:09 <jle`> it probably has to set up the stack environment
+01:07:23 <jle`> which itself is a haskell program
+01:07:25 <Lokathor> sternmull, stack itself checks the state of the world, which can be a huge time sink when you're down to those small fractions
+01:07:28 <jle`> that has overhead to start up
+01:07:59 <jle`> so you're getting the 70ms overhead from your putStrLn "howdy" program
+01:08:02 <Lokathor> on a raspberry pi you can actually feel the difference between stack exec foo and foo, because disk IO is that bad on a pi
+01:08:05 <jle`> as well as another 70ms overhead from stack itself
+01:08:13 <jle`> since stack is a haskell program
+01:08:56 <sternmull> is there a way to reduce this overhead? I am interested in replacing python scripts with haskell. But with 200ms overhead per script execution this could get problematic.
+01:09:14 <Lokathor> sternmull, call your program directly instead of executing it via stack
+01:09:27 <jle`> well, if you batch-run several scripts, you can just write the batch script in haskell instead
+01:11:34 <sternmull> Lokathor: I want that "script" to be managed with other sources and handled like an ordinary script. If i rely on compiling it before it is run then it loses its script-like property which the python scripts have.
+01:11:47 <mniip> hmm
+01:11:51 <mniip> how would I arrange this
+01:12:23 <mniip> I have a list of values, which I want to evaluate in parallel, and see which one computes first, and then terminate the computation of all others
+01:12:31 <Lokathor> sternmull, you can also use "runhaskell"... but if you're using stack you probably have to invoke that via stack
+01:12:36 <sternmull> Lokathor: That would be nice. But the calling processes are no haskell programs. They are buildsystems and other scripts that are implemented in different languages.
+01:12:47 <mniip> the latter is critical because otherwise I'll run out of memory
+01:13:17 <Lokathor> mniip, https://hackage.haskell.org/package/async-2.1.1.1/docs/Control-Concurrent-Async.html#v:race ?
+01:13:41 <Lokathor> or something built upon it?
+01:14:03 <mniip> hmmm
+01:14:05 <mniip> interesting
+01:15:00 <MarcelineVQ> interesting that there isn't a Racing type like there is a Concurrently
+01:15:05 <sternmull> Lokathor: "stack runhaskell" is even slower than calling the haskell script.
+01:15:56 <Lokathor> sternmull, what do you mean "calling the haskell script"? that *is* how you run a haskell file as a script. Otherwise you're compiling it and running a binary (which you said you didn't want to do)
+01:17:00 <MarcelineVQ> stack has a 'script interpreter' mode Lokathor
+01:17:01 <sternmull> Lokathor: No. I can put "#! /usr/bin/env stack" in the first line of a haskell-source file and then run it like a shell script.
+01:17:06 <MarcelineVQ> https://docs.haskellstack.org/en/stable/GUIDE/#script-interpreter
+01:17:25 <MarcelineVQ> it's true that it does compile the script though
+01:17:50 <MarcelineVQ> or at least it seemed to when I used it, so that it didn't need to build it twice
+01:19:25 <Lokathor> well now i'm the hoisted one
+01:19:58 <Lokathor> sternmull, can you talk more about what this script is doing that it needs to stay as a "script" and not be something that you just recompile from time to time?
+01:21:28 <mniip> Lokathor, I wonder if it's safe to call race from a race
+01:21:46 <mniip> like foldr ((either id id .) . race)
+01:21:54 <sternmull> Lokathor: There are multiple things where the script-like behavior is desirable. One of them is a script that contains "project definitions" and is run during the build process to generate the project files. Others generate source files during the build.
+01:22:20 <Lokathor> mniip, it should be fully safe. you'd create some sort of cons-cell-like Either result at the end
+01:22:57 <Lokathor> though you'd have to make it as a balanced tree i expect, or the uneven forking would make the "a" thread at the top always beat the "b" and all its children being made
+01:23:54 <sternmull> It would make things really difficult if i had to ensure a "compile scripts" action to be run before any of the scripts is executed. With stuff like python i could avoid that complexity because startup time was no problem.
+01:24:11 <Lokathor> it's built using withAsync, which is safe to nest as much as you like. Note that *too much* withAsync might kill your call stack, since it's using bracket, so it's not tail call eliminated
+01:24:51 <Cale> Lokathor: but there isn't a call stack...
+01:24:56 <mniip> Lokathor, don't worry, the computations themselves are much longer than forks
+01:25:24 <mniip> and if they are short then it doesn't matter which finishes first
+01:25:28 <mniip> such is the context of the task
+01:26:16 <Lokathor> then you can go down the list i guess, and then unpack the Either layering of the result to find the index of what action finished first and its value
+01:26:47 <mniip> see 'either id id .'
+01:26:56 <mniip> I don't care about the index
+01:27:49 <Lokathor> :t foldr ((either id id .) . Control.Concurrent.race)
+01:27:50 <lambdabot> error:
+01:27:50 <lambdabot>     Not in scope: ‘Control.Concurrent.race’
+01:27:50 <lambdabot>     No module named ‘Control.Concurrent’ is imported.
+01:28:03 <Lokathor> :t foldr ((either id id .) . Control.Concurrent.Async.race)
+01:28:04 <lambdabot> error:
+01:28:05 <lambdabot>     • Couldn't match type ‘IO (Either a b)’ with ‘Either (IO b) (IO b)’
+01:28:05 <lambdabot>       Expected type: IO a -> IO b -> Either (IO b) (IO b)
+01:28:26 <xormor> is Haskell the programming language for me? I know the basics of C, C++, x86 assembly and amd64 assembly.
+01:28:26 <mniip> hmm
+01:28:30 <mniip> sprinkle with some fmaps
+01:29:03 <mniip> xormor, depends. Depends not on what you know but on what you want to do
+01:29:11 <Lokathor> xormor, haskell is for you if you want a general purpose memory managed langauge with lots of static / compile-time support
+01:29:11 <mniip> and whether you are eager to learn a lot
+01:31:19 <Lokathor> Cale, what I mean is that.. well i'm not a GHC expert, but... okay well i guess it's just slightly more memory overhead and you'd alraedy be making thousands of threads anyway so you probalby don't care..
+01:31:20 <Lokathor> hmm
+01:32:09 <sternmull> xormor: And don't expect the performance of C/C++ from haskell. Its more like a super fast statically typed python. At least in the sense that it allows a high level of abstraction and lots of libraries. Of course a Haskell program looks much different from a python program, its not just different syntax.
+01:32:09 <moongazer> What does the <- operator do in python?
+01:32:17 <Athas> Also if you are patient.
+01:32:29 <Athas> moongazer: less-than-negation.
+01:32:33 <Athas> x<-y
+01:32:44 <Lokathor> sternmull, Haskell runs circles around python speedwise >_>
+01:33:13 <MarcelineVQ> when it comes to speed, as with all languages, it really depends on what you're doing and how you're doing it
+01:33:20 <sternmull> Lokathor: Yes. Thats what i wrote.
+01:34:00 <Lokathor> sternmull, sorry, let me restate my question, "why would you compare haskell to python in particular in the first place?"
+01:35:47 <sternmull> Lokathor: I was looking for a highlevel language that is statically typed and could replace my python scripts. So far haskell is the only thing that looks like it could do that job. Thats the reason i measure haskell against python.
+01:36:46 <Lokathor> sternmull, if startup time differences measured in ms are a major concern, I think that Rust is what you want, but you can't run a foo.rs file as a script, you have to compile the binary
+01:37:21 <Athas> sternmull: I am a Haskell programmer, but I still use Python for "scripts", where a "script" is a small (single-file) program that operates on partially-structured data.
+01:37:30 <Athas> Especially if the script mostly just orchestrates various libraries.
+01:37:45 <Athas> And doubly especially if I can just stick with Python's standard library, or close.
+01:38:11 <Athas> It's just more convenient.  Haskell scales better, but I find it more awkward for small things.
+01:38:33 <Lokathor> sternmull, perhaps I should ask, why can't you compile a haskell program that reads a config from the disk somewhere? I'm assuming "the script changes often" is part of why you currently want it to be a script and not compiled
+01:38:47 <sternmull> Lokathor: Well... i had an eye on rust in its early stages. But today it looks less attractive to me. Its much more low level compared to haskell and python. Also it has not settled on a concurrency library and some other things.
+01:39:03 <Lokathor> Athas, if you install a bunch of packages into your global project with stack, haskell turns out well with small stuff too
+01:39:24 <bjz> sternmull: What do you mean by 'a concurrency library'?
+01:40:08 * hackage base-feature-macros 0.1 - Semantic CPP feature macros for base  https://hackage.haskell.org/package/base-feature-macros-0.1 (HerbertValerioRiedel)
+01:40:17 <Athas> Lokathor: yes, that might help.
+01:40:39 <mniip> Lokathor, weird
+01:40:42 <sternmull> bjz: Python has asyncio (which i do not relly like, but its ok), Haskell has forkio (and more abstract stuff that is based on it), rust does not really have a mature solution for that.
+01:40:51 <mniip> it's like 'race' takes ~0.2 seconds to fork
+01:41:13 <Lokathor> mniip, ?
+01:41:32 <bjz> sternmull: indeed. But it seems like things are converging around tokio.
+01:41:38 <Lokathor> Athas, https://github.com/Lokathor/scratch/blob/8fc907ca5b531b25d83438051ddfdcac4cf2084a/src/EOConvert.hs here's a "sript" i did a few weeks ago that I would have written in python a decade ago
+01:42:17 <Lokathor> bjz, oh boy is tokio not ready for prime time if you're not a super rust expert
+01:42:32 <bjz> Lokathor: agreed :(
+01:43:07 <Lokathor> mniip, how many forkings are you trying to do exactly?
+01:43:12 <Athas> Lokathor: that doesn't really use any libraries or awkward data structures (JSON...), so it's a very nice fit for Haskell.
+01:43:21 <bjz> Lokathor: Hopefully will be different a year from now
+01:43:44 <mniip> up to about 200-ish
+01:43:45 <Athas> Just today I wrote a Python script that reads a bunch of JSON files with benchmark result data and produces graphs of the results (using Matplotlib).  I'm not sure that would be much nicer in Haskell.
+01:44:00 <sternmull> Athas: I am not sure if haskell will be able to replace my python scripts. But i want to try. One reason are the multiple time when i messed up a python script (typo in a variable, front arguments for functions, invalid operations on objects, ...) that a compiler would have told me about before i messed up in action.
+01:44:11 <Lokathor> bjz, i spent an afternoon asking how to write an IRC bot in tokio, because almost all docs are server oriented. no one could really explain or help much. Then I just did it with a bare TCP socked cloned into 2 threads
+01:45:00 <Lokathor> "that's crazy talk! how unsafe!" they cried, "but it runs at all!" i cried back
+01:45:15 <bjz> Lokathor: :P
+01:45:17 <Athas> sternmull: how big are these scripts?
+01:45:53 <Lokathor> Athas, perhaps my secret is that i don't know enough python to know what sweet libraries i'm missing out on
+01:47:36 <Athas> Lokathor: man, I don't either.  All my Python programming involves taking some older program of mine and modifying it; perhaps stretching back to some mythological ur-hello-world.
+01:47:56 <Lokathor> that's how my cabal files go
+01:47:58 <Athas> Does Haskell have anything that could replace Matplotlib?  Most of my Python ends up havin to interact with that thing.
+01:48:15 <Athas> Also every LaTeX file ever.
+01:48:35 <sternmull> Athas: Some of them have grown to a size where i wish i could compile/typecheck them before trying them out because it is hard to consider all uses of variables/classes/functions. Many of them are actually definitions of interfaces/projects that are processed to produce files.
+01:48:36 <Lokathor> I've thankfully moved from LaTeX to boring old github markdown
+01:50:42 <Athas> sternmull: if you start having data structures and internal interfaces more complex than hash tables, then Haskell can probably help you.
+01:50:48 <Athas> It depends on what you consider a "script".
+01:52:04 <sternmull> Don't get me wrong, i like python. Its standard library has so much to offer that all the stuff i did in the last decade barely needed any extra packages. That is really cool. Also it is easy to read and write and the error reporting (stack straces on exceptions) are fantastic. But i don't like it for more complex programs. At some point i simply miss static typing (and if its only for documentation purposes).
+01:53:45 <Athas> Agreed.  I don't mind Python for what it is.
+01:54:01 <Athas> Just like how I don't mind Haskell for what it is, but probably wouldn't use it for high-performance computing.
+01:55:13 <moongazer> Lol
+01:55:21 <moongazer> What does the <- operator do in *Haskell*
+01:55:43 <moongazer> I mean I have used it in list comprehensions
+01:55:45 <moongazer> But still
+01:56:09 <Athas> It's not an operator, it's a piece of syntax that can mean different things.
+01:56:28 <Athas> It's always a binding construct of some sort.
+01:56:35 <Athas> Monadic bind, list comprehension bind, or pattern guard bind.
+01:59:01 <mniip> Lokathor, apparently all that was needed was +RTS -V0
+02:00:06 <Lokathor> neat
+02:00:11 <Lokathor> what's -V0
+02:00:16 <sternmull> Athas: I agree. Years ago i gave haskell a try and compared it to my numeric-heavy C++ code of that days. Of course haskell lost. Today i have lots of use for a good high level language where reliable and maintainable programs are more important than performance as long as it is around the speed of python. Thats where haskell got attractive to me again.
+02:01:18 <mniip> Lokathor, disable the ticks
+02:01:57 <Lokathor> sternmull, Haskell is doing "not so bad" in high performance computing if you're willing to get specialized about it with CUDA and stuff
+02:02:13 <Athas> Lokathor: do you have any examples?
+02:02:18 <Athas> I have been looking for them for years.
+02:02:35 <Athas> There's lots of PoCs, but I can't find anyone who really uses it.
+02:02:57 <Lokathor> i'm afraid i don't have an actual example
+02:03:12 <Lokathor> as with most things Haskell, it's more like "Well you could if you wanted to" territory
+02:04:33 <Athas> I'm not sure it's particularly easy with Haskell.  It's inherently not built for performance, and the HPC libraries tend to be a little awkward.
+02:05:45 <sternmull> Lokathor: Back then i was interested in efficiently messing around with lots of 3D-vectors, matrices and quaternions for my OpenGL stuff. I think its quite difficult to get Haskell to compete with C++ and Eigen in that area.
+02:06:05 <Lokathor> it depends on if what you're doing can be run in parallel or not, yes
+02:06:31 <Lokathor> because haskell makes parallel trivial, but if you're not using that then it's useless after all
+02:06:39 <Lokathor> oh my it's 3am
+02:06:41 <Athas> Haskell makes *correct* parallelism trivial, but it's still not very fast.
+02:07:24 <Lokathor> http://chimera.labs.oreilly.com/books/1230000000929/ch05.html
+02:07:36 <Lokathor> heres's a full chapter on it, if you haven't read it
+02:08:12 <Lokathor> anyway, i gotta sleep
+02:08:13 <sternmull> but at least Haskell has lightweight threads. Something that rust announced in its early days and then abandoned.
+02:08:22 <Athas> Repa is OK, but it's a little restricted.
+02:08:41 <Athas> And the type machinery is heavy.
+02:08:44 <Lokathor> Athas, the next chapter is the accelerate package, if you like that better :P
+02:09:07 <Athas> Accelerate is also restricted (flat), still has type craziness, and is not very fast.
+02:09:12 <Athas> But it's pretty convenient.
+02:13:21 <HoboKing> When using stack, I'm getting a nonsensical error when trying to build my package.
+02:13:34 <HoboKing> The really odd thing is that it works in stack ghci, but not in stack build
+02:14:19 <HoboKing> The error is simply a complaint that I use <- outside of a do-block, which isn't true.
+02:14:58 <cocreature> HoboKing: can you show us the code?
+02:15:31 <HoboKing> How do I do that in IRC?
+02:15:39 <Lokathor> Athas, just skimming the benchmarks from http://www.cse.unsw.edu.au/~tmcdonell/papers/TrevorMcDonell_PhD_submission.pdf
+02:15:40 <Athas> HoboKing: put it on hpaste.org.
+02:15:56 <Lokathor> it seems to be "sufficiently fast" to me
+02:16:20 <Lokathor> though still more like "java and C++ faster" rather than "c and rust fast"
+02:17:14 <Athas> Lokathor: sure, Accelerate is (much!) better than straight Haskell, but it's far from what it could be.
+02:17:16 <lpaste> HoboKing pasted “The offending part” at http://lpaste.net/3846518731148623872
+02:17:29 <Athas> (I do functional GPU programming myself, and Accelerate is my main inspiration/competitor/reference.)
+02:17:46 <cocreature> HoboKing: try indenting that line 2-5 by 2 more spaces
+02:17:54 <Lokathor> gotta send those patches back upstream :P
+02:18:08 <Athas> For example, the N-body benchmark can improve by at least 2x by doing block tiling; a nontrivial optimisation.
+02:19:01 <Athas> It may of course also be that Accelerate was tuned for older GPUs than what I tested on.
+02:19:08 <HoboKing> cocreature: Same thing.
+02:19:25 <HoboKing> Again, WHY would it compile in stack ghci but not in stack build?
+02:20:42 <Athas> HoboKing: I've also found that ghci sometimes parses slightly differently.
+02:20:54 <cocreature> how exactly are you trying to use that in stack ghci? do you just paste this code in ghci or do you let stack ghci compile the modules for you?
+02:21:10 <HoboKing> I let stack ghci compile the modules for me
+02:21:19 <Athas> It's definitely the mis-indentation of the do-body.
+02:21:27 <MarcelineVQ> idk about parses differently, but if a module isn't listed in your cabal file some part of the build system may ignore it, so you won't see an error
+02:21:42 <cocreature> also it’s a standalone "let". that’s not valid Haskell (although it is valid in ghci)
+02:21:50 <HoboKing> It was in a do-block
+02:21:54 <cocreature> it would be helpful if you could show us the complete file
+02:22:05 <HoboKing> The complete file is over 1000 lines long
+02:22:07 <cocreature> or at least some part that’s valid haskell
+02:23:48 <cocreature> then show us at least the complete binding in which you use this
+02:24:47 <lpaste> HoboKing revised “The offending part”: “The offending part” at http://lpaste.net/3846518731148623872
+02:24:59 <cocreature> you still haven’t indented the do block
+02:25:31 <cocreature> line 17-20 and line 22-25 need to be indented
+02:26:26 <HoboKing> wait,something's weird with the way I pasted it
+02:27:18 <lpaste> HoboKing revised “The offending part”: “The offending part” at http://lpaste.net/3846518731148623872
+02:28:11 <HoboKing> cocreature: I don't understand. It looks indented to me.
+02:28:31 <cocreature> HoboKing: it needs to be indented more than the name of the let binding, i.e. until2
+02:29:14 <HoboKing> but it is?
+02:29:25 <HoboKing> Wait, am I even seeing the same thing as you?
+02:29:29 <MarcelineVQ> the reason the lines mentione need to be indented farther is that as they are now they belong to the 'let' instead of the do
+02:29:41 <HoboKing> OH
+02:29:43 <cocreature> HoboKing: pl starts in the same column as until2
+02:29:44 <HoboKing> huh
+02:30:54 <HoboKing> Alright, yeah now it works. I didn't realize you needed to indent twice; once for let, and another for do.
+02:32:23 <HoboKing> Now it finally compiles. Thanks for the help!
+02:32:32 <cocreature> np
+02:32:49 <Athas> The wonders of the layout rule!
+02:46:23 <MarcelineVQ> I do wonder if -XNondecreasingIndentation was making things odd with ghci
+02:47:20 <Athas> I have definitely seen ghci sometimes be more lenient about layout rule violations.
+02:47:23 <Athas> I was very confused too.
+03:00:29 <ADG> how to write this in haskell
+03:00:30 <ADG> https://github.com/adityagupta1089/Project-Euler/blob/master/src/problems/P023.java
+03:00:54 <ADG> given that I have getAbundantNumbers in Haskell already made
+03:03:24 <Cooler> does cabal update update cabal to the latest version?
+03:04:01 <phadej> Cooler: cabal update only updates the package database information (apt-get update vs. apt-get upgrade)
+03:04:12 <phadej> and there isn't `upgrade` variant in cabal
+03:04:24 <phadej> (because it's not package manager in a sense apt is)
+03:04:59 <Cooler> so do you have to manually download and install the latest version?
+03:06:30 <phadej> Cooler: nope; you can do cabal update; cabal install cabal-install; yet that's the thing you will get into cabal hell
+03:07:16 <phadej> Cooler: ATM; I'd suggest using `stack install cabal-install-versionnumber`; or then a bit more tricker cabal new-build variant
+03:07:52 <phadej> Cooler: yet downloading the binary from https://www.haskell.org/cabal/download.html is probably most easy way
+03:08:17 <Cooler> where does cabal install stuff?
+03:08:34 <Cooler> can ghc find it when i build?
+03:08:51 <phadej> Cooler: libraries or executables_
+03:09:38 <Cooler> phadej, libraries
+03:10:54 <phadej> Cooler: ghc has a notion of "package-db" and there are few default databases ("global" and "user") where it looks for. "user" databases is where `cabal install` *registers* packages. Yet it's shared database and I'd advice to *never* install anything into "user" package database.
+03:11:09 <phadej> Alternatives are: cabal sandboxes, stack or cabal new-build
+03:11:26 <Cooler> i just did cabal install fgl
+03:11:31 <Cooler> i think thats a global install
+03:11:55 <phadej> It is global. (yet it installs into your user package database, not system wide "global" db)
+03:12:16 <Cooler> well its in appdata
+03:12:26 <phadej> and it's bad because it's very hard to update the version of fgl (and packages depending on fgl)
+03:12:34 <phadej> so, just newer `cabal install`
+03:12:44 <phadej> as cabal new-build is still experimental, use stack
+03:12:47 <phadej> especially on windows
+03:13:12 <Cooler> do you use sublime text?
+03:13:29 <phadej> nope
+03:13:49 <phadej> s/newer/never/
+03:14:18 <phadej> stack solves problems you will eventually run into if you `cabal install` stuff
+03:15:05 <Cooler> cabal is also a build system right?
+03:15:19 <ertes> Cooler: if you're on linux, you could just use your system's package manager for cabal-install
+03:15:49 <phadej> cabal is build system; package management is "also" part
+03:15:53 <ertes> Cooler: cabal is a simple build/deployment system, and cabal-install is a command line interface to it
+03:16:08 * hackage acme-cofunctor 0.1.1.0 - A Cofunctor is a structure from category theory dual to Functor  https://hackage.haskell.org/package/acme-cofunctor-0.1.1.0 (JasperVanDerJeugt)
+03:16:34 <Cooler> hehe acme
+03:17:04 <ertes> Cooler: keep in mind that these are separate…  upgrading cabal amounts to upgrading GHC, but cabal-install can be upgraded separately
+03:18:01 <ertes> personally i just use the system package manager for GHC and cabal-install
+03:28:24 <ertes> can one see stack heaven, if one can't see cabal hell?  or is it more the other way around?  is it only when you clearly see cabal hell that you understand that stack heaven does not exist?
+03:33:43 <Cooler> anyone use hsdev?
+03:33:56 <Cooler> http://hackage.haskell.org/package/hsdev
+03:33:59 <torstein> say I have a non-recursive product data structure: data DB = ID Versions Files; what would be the best way to convert it to and from string, assuming it's elements are showable?
+03:34:31 <Cooler> i get an error trying to install hsdev
+03:34:32 <Cooler> https://hastebin.com/mobufojoha.tex
+03:34:43 <Cooler> doing cabal install hsdev
+03:34:44 <mrkgnao> torstein: is the default derived Show instance not suitable?
+03:35:11 <torstein> mrkgnao, I want newlines between elements
+03:35:14 <mrkgnao> hey, it seems my ten minutes of finally messing around with cgroups has worked
+03:35:53 <ertes> torstein: Read doesn't expect the format to match *exactly*…  use your own Show instance and the auto-derived Read instnace
+03:35:54 <ertes> instance
+03:36:00 <mrkgnao> well, then you probably have to write the Show instance yourself. is that infeasible for some reason?
+03:36:21 <Cale> Don't make it a Show instance
+03:36:25 <mrkgnao> ertes: I doubt torstein is expecting to do a Read for that, though. :)
+03:36:41 <mrkgnao> Pretty-printing
+03:36:51 <Cale> Show instances probably shouldn't ever generate newlines
+03:37:24 <ertes> it's a bit late to define how Show instances should behave =)
+03:37:35 <mrkgnao> Protolude enforces this by not exporting the class, afaik. It's infuriating but good for you.
+03:37:49 <Cale> I think that's going too far
+03:37:55 <ertes> yeah, me too
+03:38:06 <Cale> Sometimes you'll want to write a Show instance for data structures such as Set
+03:38:16 <ertes> i define custom Show instances a lot
+03:38:21 <Cale> which have very different internal structure from what they expose to their users
+03:38:42 <Cale> However, I think show ought to produce valid source code for reconstructing the structure, as often as possible.
+03:38:50 <ertes> instance Show BlahId where showsPrec d = showsPrec d . fromBlahId
+03:38:56 <ertes> turn "BlahId 500" into "500"
+03:38:59 <torstein> Maybe my approach is a bit sideways. I want to save a data structure consisting of an int and a map (int->string) to file, and load it from file. I know for certain that the data structure won't be extended so I'm looking for a simple approach
+03:39:12 <mrkgnao> I just wish GHCi let you use some other class which didn't have the problems with Show -- Read being a way to execute arbitrary stuff and so on (right?)
+03:39:16 <ertes> torstein: use aeson
+03:40:30 <ertes> torstein: aeson will write FromJSON and ToJSON instances for you automatically (unless you give explicit definitions), and then you can go to and from JSON very easily
+03:41:02 <torstein> okay that sounds good
+03:42:40 <Cooler> cabal install keeps stopping after several dependencies and reporting "openFile: does not exist"
+03:42:50 <Cooler> https://hastebin.com/mobufojoha.tex
+03:43:40 <torstein> seems aeson uses bytestring. Will the output be human readable? I want the file to be human readable; json is fine, binary is not
+03:43:52 <Cooler> also why the hell are there so many dependencies
+03:43:57 <ertes> torstein: it's human-readable
+03:44:44 <ertes> torstein: it uses ByteString mostly to be fast and to abstract the encoding away
+03:45:24 <phadej> ertes, torstein: see also http://hackage.haskell.org/package/aeson-1.2.0.0/docs/Data-Aeson-Text.html
+03:45:47 <Cooler> semigroupoids, cofunctors, comonads, wth
+03:45:48 <phadej> encodeToLazyText = LT.decodeUtf8 . encodingToLazyByteString . toEncoding
+03:46:11 <Cooler> profunctors, bifunctors, what....
+03:47:08 * hackage cryptonite-openssl 0.6 - Crypto stuff using OpenSSL cryptographic library  https://hackage.haskell.org/package/cryptonite-openssl-0.6 (VincentHanquez)
+03:48:06 <Cooler> this can't be right, theres no way they use even half of these
+03:48:24 <Rembane> Cooler: They do. 
+03:48:26 <phadej> Cooler: "they"?
+03:48:30 <phadej> most likely they do
+03:49:04 <Rembane> Cooler: Have you pasted the whole error message?
+03:49:28 <Cooler> well i just ran "cabal install hsdev" over and over again
+03:49:35 <Cooler> seems to resume where it left off
+03:50:48 <Rembane> Cooler: You could use stack instead. It might give you a better experience.
+03:50:58 <Cooler> well heres the new error
+03:50:59 <Cooler> https://hastebin.com/usizakurip.sql
+03:51:01 <phadej> that what I said.
+03:52:00 <phadej> wipe~/.cabal and ~/.ghc (not sure what they are on Windows); and start fresh with stack
+03:52:09 <Rembane> Now that's an error to write home about.
+03:52:13 <Rembane> Cooler: Do what phadej says.
+03:52:22 <phadej> `cabal install` will make your head hurt (already did; it seems)
+03:53:33 <Cooler> does everyone use stack? i see mentions of cabal only on github repos
+03:53:44 <ertes> Cooler: i don't use stack
+03:54:11 <Rembane> Cooler: I use both.
+03:54:13 <Cooler> they all say cabal install <package_name>
+03:56:39 <phadej> Cooler: I do use both; stack is way more beginner friendly; cabal is more flexible (but harder to use)
+03:57:07 <ertes> Cooler: cabal-install is fine, and if it doesn't work, stack will not help you either…  the only real advantage of using stack is to get per-package -foptions
+03:57:16 <ongy> It's a bit mixed. Stack is a bit like debian, can be behind a bit, but it's more stable. Cabal is more flexible, up to date. But breaks a bit more often (especially when someone doesn't follow best practice)
+03:57:51 <phadej> ertes: don't confuse beginner, if you don't want to explain how new-build or sandboxes work
+03:58:01 <phadej> and why they exist etc.
+03:58:09 <ertes> phadej: what?
+03:58:18 <ongy> new-build :) when will that go into a stable release?
+03:58:44 <phadej> ongy: it's quite usable in 2.0 which will be released with GHC-8.2
+03:58:51 <phadej> but not ready still :/
+03:59:01 <Rembane> Sandboxes are good though.
+03:59:07 <ongy> phadej: I do use it already, but I had to manually upgrade cabal, and I prefer things to be in my repos
+03:59:39 <phadej> ongy: in hvr-ppa there is cabal-install-2.0 package already
+03:59:47 <phadej> which is build from 2.0 branch
+03:59:48 <Cooler> what is Cale who uses Sublime text?
+04:00:03 <Cooler> was it*
+04:00:10 <phadej> ertes: sorry, my IRC client did something weird for me
+04:00:16 <Cooler> anyone use this? https://github.com/SublimeHaskell/SublimeHaskell
+04:00:35 <ongy> I'd  need a PKGBUILD in the aur, which I did think about creating, but never did that before and the build process was a bit unstable when I looked into it (there's an issue on github somewhere about the buildscript from then)
+04:02:02 <Cooler> or you guys on emacs?
+04:02:23 <phadej> ongy: IIRC you should be able to build cabal-install-head/cabal-install-2.0 with cabal-install-1.24
+04:02:29 <ertes> Cooler: i'm on emacs
+04:02:39 <wilornel> How could I tell `stack setup` to use an already downloaded ghc-8.0.2.tar.bz2 file?
+04:02:54 <phadej> wilornel: you cannot AFAIK
+04:03:06 <wilornel> darn, that's a bummer
+04:03:11 <wilornel> `stack setup` won't terminate
+04:03:25 <wilornel> it won't finish the download
+04:03:27 <wilornel> I'll try again
+04:04:16 <ongy> phadej: I think that's what I did then, but having a build-depend that will be replaced by what's build is a bit annoying, and from how I understand it, the script should bootstrap from ghc alone, which I would highly prefer for a PKGBUILD (but it had some problem picking the right version, which made things fail)
+04:05:12 <phadej> ongy: hmm. there's bootstrap.sh indeed, and I hope it should work, as it's tested on Travis
+04:05:33 <wilornel> oh I know, I'll try to redirect the url to local
+04:06:25 <wilornel> where does it download the file from?
+04:07:11 <phadej> wilornel: run stack setup -v; it should tell
+04:07:51 <ongy> phadej: https://github.com/haskell/cabal/issues/4365 this one was created back then, I have no idea if it's actually fixed yet. I'll give it a try in chroot, wanted to do that for a while either way
+04:09:07 <phadej> ongy: I see
+04:10:55 <phadej> Is there some basic archlinux-docker images?
+04:11:29 <phadej> with basic build tools
+04:11:45 <ongy> doubt it, there's no stable releases, so images would generally be a pain (there's even problems when upgrading from to long ago)
+04:12:01 <phadej> :S
+04:12:40 <ongy> pacman checks package signatures, but the public key are a signature, and if you don't update for to long, it can't check the package that will give new keys =.=
+04:13:00 <ongy> erm, public keys are a package
+04:13:11 <wilornel> well, that didn't work. Can't setup a virtualhost for github.com
+04:15:04 * ertes . o O ( just use cabal-install… )
+04:15:43 <ongy> I love that my log has "just use stack" and "just use cabal-install" in less than 100 lines from each other
+04:16:18 <ertes> stack questions always seem to be related to some problem that stack created by itself
+04:16:27 <ertes> and i still don't quite understand what problem it solves
+04:16:52 <wilornel> ertes, I am reading about Yesod
+04:16:56 <wilornel> and I thought I should use stack
+04:17:07 <wilornel> ongy:  hahah
+04:17:13 <ertes> wilornel: stack is by the same people who created yesod, so of course they would want you to use stack =)
+04:18:29 <Cooler> i don't understand how you have that many dependencies
+04:18:54 <wilornel> I do?
+04:19:04 <wilornel> I am just trying to do `stack setup`
+04:19:11 <wilornel> It's strange that it won't let you use a custom file
+04:19:17 <wilornel> It doesn't have a cache?
+04:21:31 <ertes> perhaps you can tell it to use your system's GHC
+04:21:55 <ertes> --you-suck-at-being-a-package-manager-so-please-just-use-my-system-ghc
+04:22:04 <Cooler> so s....l....o...........w
+04:22:41 <ertes> Cooler: what?
+04:22:43 <wilornel> ertes that flag would save me
+04:22:49 <ongy> if lens is in there somewhere, that pulls in half of hackage (only slightly exaggerating)
+04:22:51 <Cooler> cabal is stuck at building hlint
+04:23:19 <ertes> does new-build have a binary cache option?
+04:23:22 <cocreature> wilornel: https://docs.haskellstack.org/en/stable/yaml_configuration/?highlight=system%20ghc#system-ghc
+04:23:34 <Cooler> ongy, yes it contains lens
+04:23:42 <phadej> ongy: about the same amount as aeson
+04:23:47 <ongy> ertes: what would that be in the context of new-build? for the build applications?
+04:23:54 <Cooler> and it contains aeson too
+04:24:21 <phadej> ertes: what you mean by binary-cache?
+04:24:52 <phadej> ertes: new-build is a sandbox where you never reinstall packages
+04:24:59 <ertes> ongy: well, since it's inspired by nix, it might also have the option to prebuild packages on a hackage-side server, so users don't need to compile everything from scratch
+04:25:15 <phadej> ertes: ah that kind; not really
+04:25:34 <phadej> ertes: yet it's possible to make
+04:25:35 <Cooler> how is it taking longer to build than it took to download
+04:25:38 <ertes> i understand that such an option would turn new-build into basically-nix =)
+04:26:14 <phadej> ertes: and it would be killer feature for travis CI jobs
+04:26:24 <phadej> as matrix.hackage.haskell.org does build packages
+04:26:26 <ertes> Cooler: you can speed up the build by passing -j
+04:26:42 <phadej> (and that you could trust as a source, a bit like hydra in nix world)
+04:26:47 <cocreature> ertes: that would be quite fragile I think, given that cabal doesn’t track C dependencies or any other system dependencies
+04:26:54 <ertes> Cooler: if you have multiple cores
+04:27:19 <phadej> cocreature: but not in e.g. travis usecase
+04:27:19 <ertes> cocreature: yeah, that's why i said it would turn new-build into basically-nix, because then it would need to track all of that
+04:27:41 <phadej> as c dependencies come from the default ubuntu apt-get repositories
+04:27:44 <Cooler> ertes, passing -j to cabal install? well its too late now
+04:27:54 <Cooler> its just stuck at building
+04:28:08 <cocreature> phadej: in my experience they often don’t, even on travis, because travis is horribly out of date sometimes
+04:28:12 <ertes> Cooler: if you abort and restart it, it will continue where it left off, except that you will restart the current package
+04:28:40 <phadej> cocreature: well, they are upgrading to trusty (sarcastic yey)
+04:28:53 <cocreature> phadej: I know but even that is old :)
+04:29:01 <Cooler> ertes, what does building mean? its just compiling the sources with ghc right?
+04:29:05 <cocreature> good luck getting LLVM 4 from the official apt repos of trusty
+04:29:18 <ertes> Cooler: yeah
+04:29:34 <Cooler> so is ghc slow?
+04:29:41 <phadej> cocreature: you are thinking about specifics, but for testing of majority of libraries it's enough
+04:30:03 <cocreature> phadej: sure but then it’s still a fragile system. it just happens to work in most cases
+04:30:09 <ertes> Cooler: it's slow and uses a lot of memory, but keep in mind that one line of haskell can have much more meaning than one line of most other languages
+04:30:30 <phadej> cocreature: yep; using nix or docker or something would be way simpler
+04:30:44 <cocreature> phadej: also since travis introduced caching, building dependencies is rarely a problem ime
+04:30:44 <ertes> Cooler: you can make it a lot faster by disabling optimisation, but i strongly recommend not doing that =)
+04:31:48 <phadej> cocreature: yes and no; when say some package at the bottom of hierarchy is updated; e.g. bifunctors or semigroups; then virtually every repository have to rebuild everything
+04:31:51 <Cooler> well when you use a 100 different packages as dependencies i guess it takes a while to compile
+04:32:19 <phadej> cocreature: it's amortized time per repository (bifunctors aren't updated often); but O(n) in amount of repositories
+04:32:49 <phadej> especially visible when new GHC version is released
+04:33:03 <cocreature> phadej: sure but that’s more a problem for travis not for users of travis. as a user I don’t care a whole lot if the builds for my repo take a bit longer every once in a while
+04:33:43 <ertes> Cooler: what's your level of haskell?
+04:33:56 <phadej> cocreature: from my pov (as (co-)maintainer of many packages) it's a problem; not big one; but a problem.
+04:34:04 <cocreature> fair enough
+04:34:18 <Cooler> ertes, 0?
+04:37:06 <ertes> Cooler: ok…  there is a way to avoid all of that waiting, but i will not tell you right now…  wait until level 2, "intermediate" or "advanced beginner" or perhaps the "i'm now ready to learn more about tools" level =)
+04:37:15 <ongy> phadej: The build went through with the bootstrap.sh this time (I simply set up a fresh arch in a chroot). Do you by chance know the arguments to tell bootstrap.sh to install into /usr/bin instead of /root/.cabal/bin when run as root?
+04:38:08 <Cooler> ertes, well you can tell me now and i will understand later
+04:38:18 <Cooler> usually how it works
+04:38:48 <ertes> Cooler: trust me, it really wouldn't help you right now (there is a setup cost)
+04:39:09 <Cooler> are you talking about cabal sandbox?
+04:39:42 <ertes> that is also helpful, but it solves a different problem =)
+04:39:52 <ongy> sandboxes make this worse, not better, since packages are installed into sandboxes...
+04:40:00 <ertes> won't reduce your waiting time
+04:42:45 <phadej> ongy: would look into the source; iirc it's not overly complicated script
+04:43:28 <torstein> the functions readFile and writeFile from System.IO and ByteString.Lazy should automatically close handles, right? I'm getting "file is locked" but perhaps it's because I'm running from GHCi
+04:44:00 <ertes> torstein: windows?
+04:44:13 <torstein> linuxæ
+04:44:52 <ertes> hmm…  locking a file on linux doesn't actually prevent you from writing to it (as far as i know)
+04:45:45 <torstein> ByteString.Lazy.writeFile gives me: openBinaryFile: resource busy (file is locked) after creating said file with IO.writeFile
+04:46:22 <torstein> in GHCi though, I dont know if that matters
+04:46:31 <ertes> it shouldn't matter
+04:47:17 <cocreature> torstein: they only close the handles after they’ve read all input. that’s why they’re Lazy
+04:47:41 <cocreature> torstein: if you can, you probably want to use the strict versions instead or if you want to stream io, use some streaming library like pipes or conduit
+04:47:52 <ertes> ah, lazy
+04:48:05 <torstein> cocreature, ofc, that makes sense
+04:48:08 <ertes> but it shouldn't matter anyway
+04:48:36 <Gurkenglas> If Data.List exported sort's merger of ascending lists, "map head $ group $ sort [x+y | x <- asc, y <- asc, x<=y]" could be constant space. (Assuming space required by free variables doesn't count)
+04:48:37 <ertes> the error message doesn't really make sense to me
+04:56:14 <Cooler> error: parse error on input `type'
+04:56:25 <Cooler> type Table = Map.Map (Int, String) String
+04:56:32 <Cooler> in ghci
+04:57:59 <Cooler> why is that
+04:58:48 <wilornel> cocreature: I'd like to install 8.0.2, so I would need to be able to specify the .tar.bz2
+04:59:49 <cocreature> wilornel: I missed the beginning of this discussion. what problem are you having with the standard way stack downloads ghc?
+05:01:56 <wilornel> First of all, when I do `stack build yesod-bin-1.4.11 .` , I get : "Compiler version mismatched, found ghc-8.0.1 (x86_64), but expected minor version match with ghc-8.0.2 (x86_64) (based on resolver se"
+05:02:09 <cocreature> use stack setup
+05:02:10 <wilornel> It says "Try running "stack setup" to install teh correct GHC"
+05:02:13 <wilornel> so that's why I do
+05:02:17 <wilornel> but then the download hangs
+05:02:42 <wilornel> I was able to download the file through my browser
+05:03:31 <cocreature> I think you can just unpack it and move it to ~/.stack/programs/x86_64-linux/ghc-8.0.2
+05:04:02 <cocreature> and create ~/.stack/programs/x86_64-linux/ghc-8.0.2.installed with the content "installed\n"
+05:04:36 <wilornel> hmm I see!
+05:04:45 <wilornel> How did you figure that out? Where is the source for stack setup?
+05:05:12 <cocreature> I haven’t actually verified that this works. I just looked at how stack set up the GHCs I installed :)
+05:05:21 <cocreature> but it seems likely that this works
+05:05:23 <wilornel> tring!
+05:06:03 <wilornel> ah, I still need to make and/or install
+05:06:17 <cocreature> I don’t think so
+05:07:31 <wilornel> it's weird... http://paste.ubuntu.com/24566958/
+05:07:41 <cocreature> where have you gotten GHC from?
+05:08:16 <wilornel> ah, I might have gotten it from the wrong location. From here: http://downloads.haskell.org/~ghc/8.0.2/ghc-8.0.2-x86_64-apple-darwin.tar.xz
+05:08:20 <wilornel> let me check where stack gets it
+05:08:42 <cocreature> stack setup --verbose tells you that
+05:08:52 <cocreature> stack setup --verbose tells you that
+05:08:54 <wilornel> I followed this link from : 
+05:08:55 <cocreature> ups sry
+05:08:57 <wilornel> yes
+05:09:47 <wilornel> great, 2 hours left
+05:10:10 <wilornel> these could bedistributed using torrents
+05:10:28 <wilornel> github is not friendly sharing this file with me. I downloaded as much much quicker before
+05:10:57 <wilornel> oh, and now it hangs. Thanks github (https://github.com/commercialhaskell/ghc/releases/download/ghc-8.0.2-release/ghc-8.0.2-x86_64-apple-darwin.tar.bz2 )
+05:11:30 <wilornel> every time I try to start using haskell I get some issues with these cabal and stack
+05:22:04 <bollu> why is the categorical limit the same as the solution to (forall a. f a)?
+05:22:20 <bollu> jle`: I think you were the one who told me the limit f = (forall a. f a)  ?
+05:23:55 <ertes> wilornel: you don't *have to* use stack…  or yesod for that matter…  in fact, if your goal is to learn haskell, yesod is probably the worst possible choice to start with
+05:24:48 <ertes> wilornel: i suggest to install GHC and cabal-install through the standard mechanism of your OS, then start with a simple web framework (if you want to do web stuff) like scotty
+05:28:09 * hackage data-dword 0.3.1.1 - Stick two binary words together to get a bigger one  https://hackage.haskell.org/package/data-dword-0.3.1.1 (MikhailVorozhtsov)
+05:28:52 <Cooler> does emacs have good haskell support?
+05:31:10 <byorgey> Cooler: yes
+05:32:30 <byorgey> Cooler: http://haskell.github.io/haskell-mode/
+05:33:07 <wilornel> ertes: The reason I went with Yesod is because the haskell website listed the book "Developing Web Applications with Yesod and Haskell"
+05:35:39 <Cooler> uh somethings wrong, fgl uses Data.Graph
+05:42:22 <lpaste> ongy pasted “boostrap.sh error” at http://lpaste.net/355472
+05:42:48 <ongy> this is interesting, on a fresh system boostrap.sh worked, but when I try it on my normal pc, something fails to work
+05:42:51 <ongy> phadej: ^
+05:43:13 <phadej> ongy: do you have something in global package db
+05:43:21 <phadej> i.e. what ghc-pkg list says to you
+05:46:29 <lpaste> ongy pasted “ghc-pkg list” at http://lpaste.net/4474412365361709056
+05:47:32 <ongy> that's my daily use system, so: a bunch of stuff
+05:47:47 <phadej> that's probably a problem
+05:47:57 <phadej> and why you shouldn't cabal install stuff :)
+05:48:25 <ongy> what else should I do? :o
+05:49:26 <ongy> I have that weird usecase, where I want to install something packages on hackage
+05:51:55 <cocreature> ongy: install in sandboxes
+05:53:02 <ongy> cocreature: and that gets into PATH how? or does the `cabal install` in a sandbox still install into ~/.cabal/bin (I hope not)
+05:53:15 <phadej> ongy: copy it out into ~/.cabal/bin
+05:53:24 <cocreature> I just copy binaries manually around
+05:53:29 <phadej> ^ :+1:
+05:53:40 <cocreature> it’s not great but it’s better than having a broken system
+05:55:02 <ongy> to be honest, when cabal is installed, it's probably better to use cabal to build instead of the bootstrap.sh either way, so this isn't that much of a problem here
+05:56:15 <ongy> I'll do that when new-build arives. currently I don't like sandboxes, since it duplicates a bunch of stuff (and I don't want to have a windows-esque programs dir around....)
+05:58:41 <phadej> ongy: make single sandbox from where you install stuff
+05:59:11 <phadej> yet, that's a bit what stack (kind of) automates for you
+05:59:29 <phadej> i.e. not sandbox per program
+06:00:17 <ongy> hm, that sounds more sane (and then I could just add the bin dir of that sandbox to $PATH)
+06:01:08 * hackage websockets-snap 0.10.2.2 - Snap integration for the websockets library  https://hackage.haskell.org/package/websockets-snap-0.10.2.2 (JasperVanDerJeugt)
+06:17:20 <Cooler> is & a operator?
+06:17:21 <ertes> wilornel: it does?
+06:17:22 <ania123> is here latex expert?
+06:17:40 <cocreature> Cooler: yes
+06:17:49 <Cooler> what is it
+06:17:53 <cocreature> @src (&)
+06:17:53 <lambdabot> Source not found. stty: unknown mode: doofus
+06:18:07 <cocreature> it’s flipped function application
+06:18:12 <cocreature> x & f = f x
+06:18:49 <Cooler> cocreature, https://hastebin.com/dihupanafe.hs
+06:19:01 <Cooler> thats in fgl
+06:19:01 <cocreature> well that’s a different operator
+06:19:17 <ertes> wilornel: ah, yeah, i see…  i think that entry is in the wrong category, because learning haskell and learning yesod are pretty orthogonal
+06:19:20 <torstein> How to import Merge from Map in containers? Have tried Data.Map.Strict.Merge and Data.Map.Merge.Strict but neither works (Data.Map.Strict does work)
+06:19:21 <cocreature> I was talking about https://hackage.haskell.org/package/base-4.9.1.0/docs/Data-Function.html#v:-38-
+06:19:29 <Cooler> so does it override?
+06:19:47 <ertes> torstein: note that Merge is a rather new feature
+06:20:01 <ertes> torstein: make sure your version of containers is recent enough
+06:20:02 <phadej> Cooler: they clash if both are imported
+06:20:03 <cocreature> in particular, the version of containers included in stackage does not support it
+06:20:06 <ongy> hm, nuking ~/.ghc allows the bootstrap to build... But I have no idea which other things just broke :)
+06:20:36 <Cooler> phadej, why did they do this then
+06:20:58 <phadej> Cooler: because you seldom need both at the same time
+06:21:00 <Cooler> i mean fgl is pretty old, the paper is from 2000
+06:21:16 <torstein> okay that explains it
+06:21:24 <phadej> ongy: the binaries which use data-files etc.
+06:21:24 <Cooler> so is the application flip operator & new?
+06:21:52 <phadej> Cooler: it's new in base, but old in lens
+06:22:09 <phadej> yet lens is newer than fgl, but fgl is less used than lens...
+06:23:00 <Cooler> & is a very simple symbol very likely to be used a lot
+06:23:53 <phadej> Cooler: it is, e.g in Clay http://hackage.haskell.org/package/clay-0.12.1/docs/Clay.html
+06:24:25 <Cooler> phadej, what happens when Data.Graph.Inductive.Graph.& is imported
+06:24:40 <phadej> "operator controllin entity"
+06:24:48 <phadej> there isn't such
+06:24:52 <Cooler> does it override the applicative flip
+06:25:06 <Cooler> application*
+06:25:10 <phadej> no; if you use (&) GHC will report ambiguity error
+06:25:27 <phadej> so you'll need to use fully qualified name to disambiguate
+06:25:48 <phadej> (or short name; if you import the module qualified)
+06:26:30 <phadej> Note, that (&) from base isn't imported by default; so if you only use fgl imports; there are no problems
+06:26:44 <phadej> (i.e. don't import Data.Function ((&)) )
+06:26:54 <Cooler> nide
+06:26:57 <Cooler> nice*
+06:27:59 <phadej> I encourage you to just try; if you encounter a GHC error you don't understand, you can ask here about it here
+06:28:25 <phadej> there is no reason to be afraid of things you don't ever see
+06:29:25 <phadej> but trying to write perfect code from scratch won't work
+06:29:51 <phadej> (so you'll see errors, and you'll have to learn understand what they mean)
+06:31:32 <phadej> that's why I still recommend to use stack; you'll see less irrelevant (especially at the beginning) errors
+06:36:00 <wilornel> ertes: Hmmm, I thought starting off with web would be nice 
+06:36:09 <wilornel> That's how I started learning other languages as well
+06:36:19 <wilornel> Then I think I should go with the more lightweight option you suggeste
+06:36:26 <ertes> wilornel: just learn haskell, then you can pick up any framework you like
+06:36:47 <wilornel> What should I use ? cabal? stack? I'm having a lot of trouble with the package managers...
+06:36:55 <phadej> wilornel: stack
+06:37:02 <wilornel> ertes: And to learn I shall start working on some projects
+06:37:08 <wilornel> phadej: It doesn't bloody work!
+06:37:10 <ertes> wilornel: cabal
+06:37:17 <phadej> also learning Haskell by learning Yesod, is a bit like learning Ruby by leanring Ruby-on-Rials
+06:37:19 <wilornel> well, I need to do `stakc setup` but that doesn't finish the download
+06:37:20 <wilornel> hahaha
+06:37:22 <phadej> ertes: :)
+06:37:26 <wilornel> phadej: agreed
+06:37:38 <wilornel> so it doesn't matter what do I use?
+06:37:39 <ertes> wilornel: (in other words cabal vs. stack is like emacs vs. vim)
+06:37:40 <phadej> wilornel: have you reported the issue?
+06:37:48 <wilornel> no, where do I do this?
+06:37:58 <wilornel> it's essentially just very slow to download the file
+06:38:02 <phadej> wilornel: https://github.com/commercialhaskell//stack
+06:38:04 <wilornel> It's some cloud host that's being slow
+06:38:23 <wilornel> Oh now it's done in 12 mins!!
+06:38:29 <wilornel> it might work this time
+06:39:15 <phadej> cloud was too high
+06:39:20 <phadej> </bad joke>
+06:40:29 <wilornel> :-)
+06:49:01 <Cooler> does emacs have syntax highlighting?
+06:49:53 <Cooler> the syntax highlighting in sublime text 3 is lacking
+06:50:01 <ertes> Cooler: of course
+06:50:21 <Cooler> obviously it has it, i mean how good is it
+06:50:22 <ertes> Cooler: haskell-mode is an extra package though…  you need to install it first
+06:51:04 <ertes> Cooler: it's fairly comprehensive…  i don't think i've ever seen an artifact
+06:52:59 <Cooler> ertes, does it have repl in the editor?
+06:53:43 <ertes> Cooler: yes, it has full GHCi integration
+06:54:11 <ertes> it's optional, but i highly recommend it
+06:54:49 <wilornel> Ah... here comes debugging `stack`: http://paste.ubuntu.com/24567535/
+07:01:22 <wilornel> Why does it configure and build 26 items  when I try `stack setup `again?
+07:01:32 <wilornel> Should it not cache it?
+07:01:33 <wilornel> I feel like stack is not mature enough
+07:02:02 <hpc> stack mature: rated R for reproducible
+07:02:23 <ertes> hahaha
+07:02:27 <wilornel> hahah nice
+07:02:38 <wilornel> is it really more reproducible than cabal?
+07:02:42 <wilornel> less state?
+07:03:07 <hpc> stack uses cabal, but the reproducibility comes from controlling the exact build environment
+07:03:17 <hpc> what versions of packages to use, what version of ghc to use, etc
+07:03:24 <hpc> stackage even includes foreign libraries
+07:03:28 <wilornel> why not just use `cabal sandbox`?
+07:03:52 <ertes> wilornel: that's what i've been telling you…
+07:04:06 <hpc> a cabal sandbox gives you some of that control, but is designed for isolation going the other way
+07:04:16 <hpc> protecting the host machine from the build environment, not the build environment from the host machine
+07:04:29 <ezyang> wilornel: you should use new-build instead :) 
+07:04:34 <Cooler> ertes, does emacs show errors in the code?
+07:04:54 <ertes> Cooler: yes
+07:05:36 <ertes> Cooler: if you choose to use haskell-interactive-mode, development goes a bit like this:  edit, load, edit, load, edit, load, jump to error, fix, load, etc.
+07:05:40 <Cooler> sublime text popsup a thing next to the line where the error is and you can navigate b/w errors with F4
+07:05:57 <ertes> Cooler: yes, you get basically the same thing
+07:06:04 <Cooler> nice
+07:08:32 <wilornel> darn it, I want the host and the build environment to be separate, bot hways
+07:08:41 <wilornel> I'll have to go with cabal, because stack is too much trouble
+07:09:07 <wilornel> darn! but  then that also does not work, I still need to do some setup
+07:09:18 <ertes> learning haskell the yesod way, day 1: fix stack
+07:09:21 <ertes> day 2: fix stack
+07:09:26 <wilornel> hahaha
+07:09:36 <wilornel> exactly, and you don't even know what you are fixing
+07:11:44 <phadej> i'd recommened going to the local haskell meetup and grab someone to do the initial setup with someone
+07:11:58 <phadej> it will save a lot of time for everyone
+07:12:10 <wilornel> `rejecting: todo-0.2.0.1, todo-0.2.0.0, todo-0.1.0.0 (constraint from user`. Why does it do that? I tell it my current package will be todo version 0.0.1
+07:12:26 <wilornel> phadej: Good idea, I'll try something similar to this
+07:13:01 <wilornel> Getting started with haskell step 1. Why does it end up like this? Python has it simple with virtualenv imo
+07:13:13 <phadej> wilornel: cabal sandbox is virtualenv
+07:13:19 <ertes> this is ridiculous…  in python it's like install and go
+07:13:19 <geekosaur> http://hackage.haskell.org/package/todo
+07:13:24 <Cooler> why is Graph a typeclass? https://hackage.haskell.org/package/fgl-5.5.3.1/docs/Data-Graph-Inductive-Graph.html
+07:13:33 <ezyang> wilornel: This is from cabal? 
+07:13:40 <ertes> and it's the same fucking way with haskell, if you don't insist that stack is the way to go
+07:13:46 <wilornel> ezyang: I'm following http://adit.io/posts/2013-04-15-making-a-website-with-haskell.html
+07:14:04 <wilornel> ertes: I see! 
+07:14:10 <wilornel> What do they to in prod? cabal or stack?
+07:14:13 <ertes> seriously, i hate this stack fanboyism
+07:14:26 <ezyang> yeah, that's not the relevant error here 
+07:14:30 <wilornel> It doesn't matter in prod right? Since you can do whatever
+07:14:38 <ezyang> it's just saying, "You have a local package named todo, so I'm gonna use that" 
+07:14:56 <wilornel> http://paste.ubuntu.com/24567646/
+07:15:16 <wilornel> ooh yes, it did get it right, sorry
+07:15:27 <wilornel> so I need base
+07:15:32 <phadej> ertes: stack is better for something than cabal; and imho is better for beginners
+07:15:50 <ertes> wilornel: base comes with GHC
+07:15:50 <phadej> wilornel: you need to allow base-4.9
+07:15:56 <wilornel> no way it's better for beginners
+07:16:00 <ezyang> Perhaps the big problem is using a tutorial from 2014 
+07:16:04 <phadej> indeed
+07:16:14 <phadej> if tutorial used stack it would just work
+07:16:15 <wilornel> which one
+07:16:28 <wilornel> phadej: its in build-depends. How do I allow it? 
+07:16:33 <ertes> phadej: based on everything i have experienced, including workshops i have run myself, i have to disagree…  stack is a layer of complexity that doesn't solve an actual problem, and forces everything to go the stack way
+07:16:36 <phadej> wilornel: rejecting: base-4.9.0.0/installed-4.9.
+07:16:40 <wilornel> seems like base does not come with my ghc
+07:16:44 <wilornel> let me check
+07:17:02 <phadej> you have base 4.9
+07:17:18 <wilornel> yes
+07:18:15 <wilornel> "Resolving dependencies..."
+07:18:49 <phadej> it won't work.
+07:19:08 <phadej> persistent==1.3 is ancient
+07:19:28 <phadej> http://matrix.hackage.haskell.org/package/persistent
+07:19:30 <wilornel> yes! it didn't work but this time because of monad-logger
+07:20:11 <phadej> well, or monad-logger; and just bumping them will most-likely introduce compile errors (i.e. the body of the tutorial isn't updated for GHC-8)
+07:20:23 <wilornel> arg, alright moving on
+07:20:24 <Cooler> need some help with fgl
+07:20:49 <Cooler> how do you make a function that takes a Graph? Graph is declared as a typeclass
+07:21:20 <phadej> wilornel: I must recommend http://haskellbook.com/
+07:21:23 <ertes> wilornel: this will be my last remark: if you just go with scotty, you will have your hello-world web app up and running in 10-15 minutes =)
+07:21:28 <Cooler> i need to make   table_from_states :: StateGraph -> Table
+07:21:28 <Cooler>   where   type StateGraph = Graph.Graph ItemTree ()
+07:21:51 <Cooler> but that doesn't work since Graph.Graph is a typeclass
+07:21:56 <phadej> it makes choices for you, (e.g. stack) but at least it guides holding your hand
+07:22:01 <ertes> haskellbook.com is a stack sales pitch
+07:22:20 <phadej> ertes: not really, first drafts were using cabal
+07:22:50 <phadej> ertes: but it turned out that explaining the technicalities isn't productive
+07:22:54 <wilornel> If I need to work with stack, I think I'll have to uninstall GHC and all dependencies and then start from the ground up and then fix stack and then work on the book
+07:23:24 <geekosaur> "but you must do that because stack is the way and the truth and the life"
+07:23:47 <ertes> yes, you do believe in cabal hell, right?  because you must do so to believe in stack heaven
+07:24:13 <phadej> ertes: cabal without new-build is hell
+07:24:18 <geekosaur> ...this past while is just what "cabal" hell looks like when it's stack instead of cabal
+07:24:20 <phadej> but new-build isn't ready for be used by beginners
+07:24:37 <ertes> phadej: i disagree
+07:25:24 <phadej> ertes: well, just today ongy run with problems by using `cabal install`
+07:25:58 <phadej> (or if you disagree that new-build isn't ready, it isn't there isn't new-install for example)
+07:26:17 <ertes> phadej: you're making three mistakes here: 1. you're assuming that one must use a deployment solution immediately, 2. you're assuming complexity about cabal-install that simply isn't there, 3. you think stack would solve the problems that ongy ran into, but it doesn't
+07:26:19 <ongy> phadej: is that a problem with cabal install, or the cabal bootstrap process when another cabal version is installed?
+07:26:26 <ertes> it's not a cabal problem, it's a dependency probalem!
+07:26:35 <ertes> *problem
+07:28:26 <orion> In a monad transformer, why is IO usually the base by convention?
+07:29:18 <phadej> ertes: it's started with a tutorial; if it was using stack; then it would work; wilornel would get and old GHC, but it would work. No "now I need newer base" problem. How cabal packages work is not trivial, and cabal-install doesn't hide the complexity; it's both pro and cons. And if ongy used stack install to install executables, the user-db won't be polluted with packages
+07:29:35 <wilornel> what old GHC, I can't do `stack setup`
+07:29:57 <wilornel> stack told me I needed to do `stack setup` for 8.0.2
+07:30:27 <ertes> phadej: polluted?
+07:30:43 <ongy> phadej: to be honest, I think this is a problem with the bootstrap process, being troubled by the user-db. I don't think that makes much sense
+07:31:04 <ertes> phadej: here is how my workshops go: install GHC (5-10 minutes for everybody to get up and running), fire up GHCi and go straight into learning haskell…  if i had to explain how to set up a pseudo-project, and explain why "stack ghci" works and "ghci" doesn't, and why all that bullshit is even necessary, it would take the first evening
+07:31:15 <Cooler> help https://hastebin.com/akuvebenex.coffeescript
+07:32:00 <phadej> ertes: that works; but it breaks when you start adding dependencies
+07:32:27 <phadej> (i.e .if you cabal install them)
+07:32:30 <ertes> phadej: no, because i explain how to set up a cabal project and a sandbox for it
+07:32:38 <ertes> but that's day 2
+07:33:08 * hackage hpc-coveralls 1.0.10 - Coveralls.io support for Haskell.  https://hackage.haskell.org/package/hpc-coveralls-1.0.10 (killy971)
+07:33:19 <wilornel> FINALLY!
+07:33:26 <wilornel> "Hello World!" with scotty!
+07:33:46 <ertes> wilornel: =)
+07:34:05 <wilornel> Going to bed now, thank you all, have a good day/night/lunch/dinner/evening/breakfast/walk/shower/commute/socializing/etc
+07:34:13 <wilornel> ertes: thanks!
+07:34:15 <phadej> that indeed work. But e.g. if *someone* need to proceed with old tutorial (which only lously specifies dependencies), it might or might not work
+07:34:26 <phadej> e.g. you might need old GHC to start with
+07:34:53 <Cooler> help https://hastebin.com/akuvebenex.coffeescript
+07:34:57 <wilornel> phadej and every time stack would be able to set me up? 
+07:35:09 <ertes> phadej: yes, in other words: there is a small percentage of people who might actually benefit from stack, and those people will know it
+07:35:23 <wilornel> It was not able to download that file. It really should allow me to specify a file I have locally / cached, and these files should be served with torrents
+07:35:25 <ertes> for everybody else it's just a waste of time
+07:35:27 <phadej> thanks to hvr-ppa getting old GHC on ubuntu (actually having multiple GHC's) is easy; but on windows it's a pain
+07:35:28 <Cooler> ertes, whats happening
+07:35:33 <wilornel> in any case, both stack and cabal were not as easy to deal with
+07:35:43 <Cooler> why am i getting that error
+07:35:53 <ertes> Cooler: sorry, could you paste to lpaste.net?  i can't see the paste there
+07:36:30 <Cooler> http://lpaste.net/355474
+07:36:39 <phadej> or macOS; a bit simpler; but still not easy
+07:40:53 <phadej> luckily you can specify compiler and index-state in cabal.project files (new-build); so you can guarantee much stronger reproducibility
+07:43:18 <Cooler> someone help
+07:43:20 <Cooler> http://lpaste.net/355474
+07:44:23 <lyxia> Cooler: the type checker cannot guess what type of graph you want to use
+07:44:46 <phadej> Cooler: you should use concrete type
+07:44:59 <phadej> > (show . read) "something"
+07:45:01 <lambdabot>  "*Exception: Prelude.read: no parse
+07:45:09 <phadej> ah, lambdabot defaults to ()
+07:45:23 <phadej> > (show . read) "()"
+07:45:24 <Cooler> what?
+07:45:27 <lambdabot>  "()"
+07:45:54 <phadej> Cooler: e.g. the above example "show . read :: String -> String"
+07:45:59 <Cooler> lyxia, i specified the type
+07:46:03 <phadej> the compiler doesn't know what you try to read in between
+07:46:12 <mauke> Cooler: where?
+07:46:22 <phadej> same situation is in your code, as compiler doesn't know what concrete graph type it should use
+07:46:23 <Cooler> is a Graph g
+07:46:28 <mauke> that's not a type
+07:46:30 <Cooler> and
+07:46:35 <Cooler> g ItemTree ()
+07:46:41 <mauke> g is a type variable
+07:46:44 <phadej> you say "some type which is Graph"
+07:46:59 <Cooler> yeah g has kind * -> * -> *
+07:48:05 <Cooler> class Data.Graph.Inductive.Graph.Graph (gr :: * -> * -> *) where
+07:48:15 <phadej> you should use concrete instance: like http://hackage.haskell.org/package/fgl-5.5.3.1/docs/Data-Graph-Inductive-PatriciaTree.html#t:Gr
+07:48:22 <phadej> Gr is Graph
+07:48:44 <phadej> but compiler doesn't know that you want to use that, or some other Graph
+07:49:13 <Cooler> what? why can't i have a function that takes something of a typeclass?
+07:49:29 <Cooler> f :: Eq a => a -> a -> bool
+07:49:45 <Cooler> its the same thing
+07:49:54 <phadej> Cooler: you can; yes. it is.
+07:49:55 <lyxia> Cooler: a is not a concrete type, you must specialize f
+07:50:08 <lyxia> to use it
+07:50:08 <Cooler> a doesn't have to be a concrete type
+07:50:09 <phadej> but you have "make me some type" and "consume some type"
+07:50:22 <Cooler> thats the point
+07:50:23 <phadej> Cooler: and you don't specify what concrete type you want
+07:50:33 <phadej> compiler refuses to guess
+07:51:13 <Cooler> wait
+07:51:30 <Cooler> can i do   f :: Eq a => b -> a
+07:51:54 <mauke> in principle, yes
+07:51:56 <Cooler> or something, does final output have to be a concrete type?
+07:52:34 <phadej> Cooler: think about (show (read input))
+07:52:49 <phadej> > show (read "()")
+07:52:50 <phadej> works
+07:52:51 <lambdabot>  "()"
+07:52:54 <phadej> but why
+07:53:00 <phadej> > show (read "1")
+07:53:02 <lambdabot>  "*Exception: Prelude.read: no parse
+07:53:11 <phadej> doesn't? isn't obvious that I try to read Int?
+07:53:26 <Cooler> it says here "The Patricia tree implementation does not support multiple edges between two nodes.
+07:53:26 <Cooler> "
+07:53:29 <Cooler> http://web.engr.oregonstate.edu/~erwig/fgl/haskell/
+07:53:40 <Xnuk> > show (read "1" :: Int)
+07:53:41 <Cooler> Kown bug:
+07:53:43 <lambdabot>  "1"
+07:54:06 <Cooler> typo, they mean Known bug
+07:54:21 <phadej> Cooler: there's also another instance http://hackage.haskell.org/package/fgl-5.5.3.1/docs/Data-Graph-Inductive-Tree.html#t:Gr
+07:54:33 <phadej> and you have to choose which one you want to use
+07:55:14 <Cooler> phadej, in the code, prod_tree is a concrete type
+07:55:29 <Cooler> only the output is polymorphic
+07:56:00 <phadej> Cooler: as Xnuk fixed show read example above
+07:56:03 <phadej> you have to do
+07:56:07 <Cooler> so whatever type that create_state_tree returns, is the type that table_from_states takes
+07:56:11 <phadej> table_from_states (create_state_tree prod_tree :: Gr ItemTree ())
+07:56:20 <mauke> Cooler: no, create_state_tree doesn't get to choose a type it returns
+07:56:26 <mauke> Cooler: you have to tell it which type to return
+07:56:33 <mauke> just like read
+07:56:51 <Cooler> oh
+07:57:03 <Cooler> why can't it choose?
+07:57:15 <mauke> because g is universally quantified
+07:57:36 <Cooler> ?
+07:57:36 <mauke> that is, create_state_tree has to be able to produce a result of type 'g ItemTree ()' for all types g
+07:57:53 <phadej> :t read
+07:57:54 <lambdabot> Read a => String -> a
+07:58:05 <mauke> that's what the type says
+07:58:07 <phadej> it would be quite boring if `read` would decide which type to produce
+07:58:35 <phadej> I "as programmer" want to say which type I want `read` to return
+07:58:42 <Cooler> why can't read decide at runtime from the input which type to produce
+07:59:02 <phadej> how it would pick between Int or Double?
+07:59:09 <mauke> it could, but then you'd have to change its type completely
+07:59:14 <Cooler> arbitrarily
+07:59:40 <Cooler> mauke, change its type to what?
+07:59:56 <mauke> depends on how we want to encode existential types
+08:00:15 <Cooler> whats wrong with Read a => String -> a
+08:00:22 <mauke> nothing
+08:00:27 <lyxia> "arbitrarily" is not a good idea since the behavior of the function depends on that choice...
+08:00:32 <mauke> it just lets me, the caller, choose an 'a'
+08:00:41 <Cooler> lyxia, thats not the point, the point is if its possible
+08:00:47 <mauke> i.e. read has to be able to produce a result no matter which 'a' I pick
+08:01:46 <mauke> I could do something like: wtfRead :: String -> (forall a. a -> b) -> b
+08:01:51 <Cooler> well its simple, don't allow the caller to choose the type
+08:01:55 <mauke> but then you couldn't use its result because it could return any type at all
+08:02:15 <mauke> wtfRead gets to choose, and you have to write code that has to deal with that
+08:02:20 <mauke> good luck :-)
+08:02:35 <Cooler> mauke, well thats only because its too general, in this case it returns a object of a typeclass
+08:02:40 <Cooler> Graph
+08:02:53 <Cooler> its still usable
+08:03:18 <mauke> create_state_tree :: ProdTree -> (forall g. (Graph g) => g ItemTree () -> b) -> b
+08:03:21 <mauke> that could work
+08:03:29 <phadej> but then you have to code in when create_state_tree created Patricia graph, and when inductive graph
+08:03:58 <mauke> table_generator prod_tree = create_state_tree prod_tree table_from_states
+08:04:30 <Cooler> phadej, no you don't even know what type it is, you just know its of typeclass Graph and you can use the methods of that typeclass only
+08:04:56 <lyxia> I think you're blaming a type system you don't understand
+08:04:56 <phadej> at some point you still have to choose the conrete representation
+08:05:08 <Cooler> why
+08:05:21 <phadej> because it just doesn't make arbitrary choices
+08:05:24 <Cooler> i don't need the concrete representation, i just need the methods on Graph
+08:05:33 <mauke> yes, and with my code you can do that
+08:06:46 <Cooler> mauke, what is create_state_tree :: ProdTree -> (forall g. (Graph g) => g ItemTree () -> b) -> b
+08:06:57 <Cooler> (forall g. (Graph g) => g ItemTree () -> b) is that a function?
+08:07:08 <Cooler> that converts from Graph to what?
+08:07:27 <Cooler> and also why
+08:07:39 <mauke> this is a trick known as CPS transform
+08:08:01 <mauke> instead of returning a value of an unknown (to the caller) type, which haskell doesn't allow ...
+08:08:16 <mauke> we take a function that we apply to our result
+08:08:45 <mauke> so instead of f x = y we have f x g = g y
+08:08:57 <mniip> "The -pa option produces the most detailed report containing all cost centres in addition to the actual time and allocation data."
+08:09:06 <mniip> somehow, I did not find it as detailed as I wanted it to be?
+08:09:39 <mauke> the type signature says this function has to be able to work with all types g, as long as they're an instance of Graph
+08:10:00 <mniip> how do I get a more detailed report?
+08:10:01 <mauke> this lets us secretly pick any graph type we want, then apply the function to it
+08:10:16 <mauke> i.e. create_state_tree gets too choose g
+08:10:20 <mauke> s/too/to/
+08:10:39 <phadej> mauke: it wont
+08:10:40 <Cooler> mauke, how is forall g. (Graph g) => g ItemTree () -> b different from Graph g => g ItemTree () -> b
+08:10:52 <mauke> Cooler: by itself, it isn't
+08:11:03 <mauke> but it makes a difference when embedded in a larger type
+08:11:11 <mauke> phadej: why not?
+08:11:50 <phadej> mauke: 
+08:11:50 <phadej> http://lpaste.net/355475
+08:12:33 <phadej> mauke: in producer you have to pick concrete representation
+08:12:38 <mauke> phadej: yes, exactly
+08:12:42 <phadej> it can be different based on the inputs, but you have to make a choice
+08:12:47 <mauke> yes
+08:12:49 <mauke> that's what I'm saying
+08:12:57 <phadej> mauke: good
+08:13:03 <phadej> but that's not what Cooler wants
+08:13:11 <mauke> I think it is
+08:13:31 <phadej> I guess he want's more of show (read input :: Int) approach
+08:14:03 <Cooler> phadej, by producer you mean the first function that produces a Graph g?
+08:14:11 <phadej> Cooler: yes
+08:14:16 <Cooler> yeah that function picks a concrete type at runtime
+08:14:27 <Cooler> depending on the input
+08:14:56 <phadej> from Inductive.Tree or PatriciaTree?
+08:14:58 <Cooler> at compile time all you know is that its a Graph g that it produces
+08:15:16 <mauke> > let { foo :: (forall a. (Show a) => a -> String) -> (String, String, String); foo f = (f 0, f 'x', f [1,2,3]) } in foo show
+08:15:19 <lambdabot>  ("0","'x'","[1,2,3]")
+08:16:19 <mauke> here foo can apply f to an Integer, a Char, or list of Integers
+08:16:30 <mauke> any value works as long as its type has a Show instance
+08:16:48 <Cooler> mauke, CPS is basically callbacks
+08:17:10 <Cooler> don't know why they gave it a fancy name
+08:17:50 <phadej> Cooler: that's an intersting question which name was first :)
+08:18:01 <nshepperd_> Uhm, have you considered outputting an Either Patricia.Gr Inductive.Gr
+08:18:33 <nshepperd_> Also what's the actual problem with just choosing a type
+08:18:50 <Cooler> well this was more about the principle of the thing, actually i am probly just gonna use a single concrete type
+08:19:22 <phadej> Cooler: you don't need to choose a concrete type for  create_state_tree or table_from_states
+08:19:27 <phadej> only in table_generator
+08:19:33 <Cooler> yeah
+08:20:02 <mniip> Cooler, it's not a callback
+08:20:10 <mniip> it's a continuation
+08:20:12 <phadej> except if you really want create_state_tree to choose the type; which I doubt
+08:20:16 <Cooler> probably not patricia, because it can't handle multiple edges
+08:20:23 <mniip> a more specific kind of pattern
+08:20:33 <mniip> where you decide what function to call *after* this one finishes
+08:20:41 <mniip> not just sometime during its execution
+08:20:47 <mniip> hence, you can decide the return type
+08:20:57 <mauke> mniip: well, I'd say a "continuation" in this sense is a type of callback
+08:21:05 <mauke> just a specific one
+08:21:10 <phadej> mauke: that's what mniip said
+08:21:16 <mniip> well yes, I did specify that this is a specialization
+08:21:21 <mauke> <mniip> Cooler, it's not a callback
+08:21:24 <Cooler> mniip, well its a special case of a callback
+08:21:38 <mniip> it needs a fancy name because it's a specific callback
+08:21:50 <mniip> for the same reason we don't call everything Thing
+08:21:55 <phadej> :P
+08:22:09 <mauke> also because we're only modelling continuations using callbacks
+08:22:15 <mauke> some languages support continuations directly
+08:22:16 <Cooler> its just a JMP instruction
+08:23:54 <lyxia> that's an implementation detail
+08:24:30 <Cooler> its also a much simpler explanation
+08:25:10 <mniip> jmp?
+08:25:25 <mniip> I would not be so sure
+08:25:54 <mniip> hm, alright it is
+08:26:07 <mniip> but only because stg never bothers to use actual 'call'
+08:26:08 <mauke> tail call == jump
+08:27:25 <mniip> Can I see the call (case-of) stack during allocation profiling?
+08:29:07 <sighingnow> Hi all, I encountered a bug when tried to instantiate Vector as Foundation's Collection, maybe be related to UndecidableInstances
+08:29:11 <sighingnow> I have put may code here
+08:29:15 <sighingnow> https://gist.github.com/sighingnow/7ed34d26b8c64226e8fe945022ac59ac
+08:29:24 <sighingnow> Could anyone help with this error message ?
+08:30:10 <mniip> you've defined an overly broad instance
+08:31:25 <sighingnow> I have put a `G.Vector v a` constraint in the instance declaration, why type `[Int]` is matched with this instance declaration ?
+08:32:01 <sighingnow> `[]` type is not satisfy the constraint `G.Vector v a`
+08:32:18 <mauke> because constraints don't affect instance selection
+08:34:01 <mniip> sighingnow, it is not possible for the typechecker to make an instance selection based on a constraint like that
+08:34:50 <sighingnow> Is it related to the `UndecidableInstances` extension?
+08:34:59 <lyxia> no, you have overlapping instances
+08:35:15 <geekosaur> it is related to the fact that you can define a class in a package and a year later define a new instance in another package using the first
+08:35:58 <sighingnow> So, how could I put a constraint on the type variable `v` ?
+08:36:14 <mniip> you cannot write that instance
+08:37:15 <mniip> (you can, but this is a good time to reconsider what you're doing)
+08:40:36 <sighingnow> mniip, do you mean that the constrains which are not related to the pre-condition of class `Collection` will have no effect when type checking ?
+08:41:39 <mniip> constraints *are not* checked when finding an instance
+08:44:16 <mniip> on an unrelated note, I got -pa to give me a call stack
+08:44:26 <mniip> but how do I get it to produce an *evaluation* stack
+08:44:37 <mniip> a call stack is of no use to me...
+08:48:52 <ezyang> as in, who was responsible for causing the thunk to be evaluated? 
+08:50:16 <mniip> yes
+08:50:17 <ongy> can I tell cabal where to put the package list it downloads from hackage?
+08:50:40 <mniip> I'm producing a lazy structure, and consuming it in another function
+08:50:47 <mniip> I suspect the consumer is insufficiently lazy
+08:50:48 <monochrom> Yes. Look around in $HOME/.cabal/config
+08:51:26 <sighingnow> as my understanding, the constraints are assertions of type variables when matching instance declaration, as in `(Ord k, Ord v) => Ord (Map k v)`, when the `Ord k` and `Ord v` are all satisfied, then `Ord (Map k v)` is satisfied.
+08:52:08 <mniip> sighingnow, they are assertions
+08:52:10 <mniip> not guards
+08:52:16 <sighingnow> mniip, why this case is different from my `Collection (v a)` instance ?
+08:52:18 <EvanR> the direction of implication depends on class vs instance
+08:52:40 <mniip> sighingnow, again, assertions, not guards
+08:53:02 <mniip> this case is different because instance selection is based on the top-level type constructor
+08:53:03 <monochrom> If you know Prolog, "instance X a => Y a" means "Y(a) :- !, X(a)". Note the cut right at the beginning.
+08:53:03 <mniip> Map
+08:53:35 <mniip> instance selection is based on the structural shape of the type
+08:53:53 <monochrom> Therefore it is never in your best interest to write "instance Whatever => Y a" at all.
+08:54:06 <mniip> yeah
+08:54:12 <mniip> everything matches the "shape" 'a'
+08:54:30 <mniip> likewise almost everything matches "shape" 'v a'
+08:54:33 <EvanR> i need to know prolog now
+08:55:16 <monochrom> The "X a" does not matter until after the cut. I.e., already committed. Even if X a comes out false, there will be no backtracking.
+08:56:34 <mniip> no one knows prolog :v
+08:57:29 <monochrom> Anyway, the difference with Ord (Map k v) is that Map is not a type variable.
+08:57:56 <monochrom> Map k v will not match Either Int Bool, but v a will.
+09:00:10 <mniip> so, any idea about the evaluation stack
+09:03:39 <sighingnow> mniip, thanks for your guide, I'm going to find some materials to understand instance constraints better.
+09:04:51 <monochrom> You could try Typing Haskell in Haskell.
+09:07:17 <sighingnow> I think the `OVERLAPPABLE` and `OVERLAPPING` pragmas will help in my case, right?
+09:07:32 <mniip> no
+09:07:51 <mniip> only if the implementations for specific and generic instances behave identically
+09:08:25 <monochrom> They might make your program legal. Doesn't mean your program is meaningful.
+09:08:41 <monochrom> Much less meaning what you think.
+09:09:25 <sighingnow> After put a `OVERLAPPABLE` in my custom instance declaration, the list type can matched with the right instance implementation.
+09:11:01 <sighingnow> I think, compared to `Collection [a]`, the `Collection (v a)` is more generic.
+09:12:55 <iqubic> sighingnow: It is actually.
+09:13:19 <iqubic> Collection (v a) is more generic.
+09:14:12 <iqubic> What are you trying to do with Collections?
+09:14:36 <sighingnow> In `Collection (v a)`, the assertions about `a` will be checked, but assertions about `v` won't, right ?
+09:15:11 <mniip> they will be
+09:15:34 <iqubic> What are assertions?
+09:15:47 <sighingnow> I'm trying to do something about the repo foundation-edge, bridging the foundation package and the vector package together.
+09:16:07 <iqubic> What is the foundation package?
+09:16:11 <sighingnow> iqubic, here is my source code, https://gist.github.com/sighingnow/7ed34d26b8c64226e8fe945022ac59ac
+09:16:40 <iqubic> I've looked at that. What is the issue?
+09:16:45 <sighingnow> The foundation package is http://hackage.haskell.org/package/foundation
+09:17:06 <monochrom> The point is not "whether". The point is "when", and "what if false".
+09:17:40 <monochrom> The answer to "when" is "too late". The answer to "what if false" is "nothing else is tried".
+09:18:56 <iqubic> monochrom: Are you a philosopher? What are you talking about
+09:19:19 <monochrom> Are you Elizer?
+09:19:35 <monochrom> Err, I guess it's spelled Eliza.
+09:19:46 <iqubic> No.
+09:19:55 <iqubic> I am not Eliza
+09:19:56 <Axman6> How does Err, I guess it's spelled Eliza. make you feel?
+09:20:09 <Axman6> I am not Eliza?
+09:20:21 <iqubic> No, I am not Eliza.
+09:20:26 <iqubic> I am iqubic
+09:20:26 <monochrom> I feel bad that I made a spelling mistake in a rhetorical question. :)
+09:21:45 <jcjf> Kills the vibe
+09:32:11 <sighingnow> Now I could see that constraints in the context of instance declaration only have effect for satisfying the constraints in superclasses, or making assertions in the method implementations of this type class. And the context has no effect when for matching instance when type checking, right ?
+09:36:43 <EvanR> @index Fix
+09:36:43 <lambdabot> bzzt
+09:45:03 <iqubic> @index fix
+09:45:03 <lambdabot> Data.Function, Control.Monad.Fix
+09:59:41 <Myrl-saki> Does anyone here know how to make reflex widgets?
+10:10:50 <robertkennedy> Is there any way to write a `reallyUnsafePtrEquality'# :: a -> b -> Int#` so that, if I wrote `data A = A Bool Int; data B = B Bool Int`, reallyUnsafePtrEquality`# A B is true?
+10:11:35 <EvanR> how would this be true
+10:12:28 <robertkennedy> Well their data constructors, which in an untyped setting would be memory allocators, yeah?
+10:13:14 <robertkennedy> And like assuming the function is type correct until the last stage, a program could shrink those together
+10:13:15 <EvanR> youre comparing types for ptr equality?
+10:13:57 <robertkennedy> No, sorry, I shouldn't have punned the constructors
+10:14:46 <EvanR> youre trying to detect an optimization that makes A and B's support code the same?
+10:14:51 <robertkennedy> So I'm imagining just `reallyUnsafeEquality# MkA MkB`
+10:14:58 <EvanR> oh
+10:15:00 <robertkennedy> Yeah
+10:15:07 <robertkennedy> Maybe 
+10:15:09 <EvanR> seems impossible
+10:15:57 <robertkennedy> Well if ADTs shrink to sum and product types
+10:16:32 <EvanR> theres no guarantee the optimization would happen
+10:16:48 <byorgey> EvanR: that's why it would be reallyUnsafe
+10:16:49 <EvanR> so you can make the ptr equality operation but you cant necessarily have it do what youre saying
+10:17:15 <EvanR> im ignoring the name as thinking about what its supposed to do
+10:17:18 <byorgey> robertkennedy: it is certainly possible to imagine a compiler where reallyUnsafeEquality# MkA MkB  sometimes returns True
+10:17:21 <EvanR> s/as/and/
+10:18:29 <orion> Is data Foo a = A | B | C a Functor? If so, is it possible to perform a natural transformation on it such as (forall x. Foo x -> IO x)?
+10:18:50 <c_wraith> orion: that data type supports a Functor instance.  
+10:19:32 <c_wraith> orion: however, that polymorphic type is a bit difficult to write.
+10:20:14 <byorgey> It's not too hard to write.   Just  return  the value in the case of  C a,  and throw an exception otherwise.
+10:20:38 <byorgey> oh, wait, I read that as   Foo a = A | B | C a
+10:20:47 <byorgey> but the 'a' was part of 'a Functor'
+10:20:50 <byorgey> ?
+10:20:51 <c_wraith> Oh, so did I
+10:20:53 <robertkennedy> The name was to suggest functionality admittances, ie you can make such a function return different argument with `seq`
+10:21:00 <EvanR> haha
+10:21:07 <c_wraith> It still can be a Functor instance either way!
+10:21:23 <byorgey> indeed
+10:21:26 <c_wraith> But I, personally, really do have trouble writing partial functions. :)
+10:21:35 <c_wraith> it burns!
+10:22:06 <byorgey> c_wraith: I do too, but when the output type is  IO x  it somehow seems less partial to me to throw an exception.
+10:22:09 * EvanR lights cigar, i love it when a function is total
+10:22:17 <byorgey> Exceptions are a well-defined part of the semantics of IO.
+10:23:00 <bollu> why is the intuition for limit of a functor "f" the same as the solution to (forall a. f a) ?
+10:23:14 <monochrom> Totality is wrong vocabulary for IO.
+10:23:33 <byorgey> monochrom: what is the right vocabulary?
+10:23:36 <bollu> Like, I mean, why does the "cone" definition match up with (forall a. f a)
+10:23:43 <monochrom> Control flow.
+10:24:40 <bollu> monochrom: how so?
+10:24:56 <monochrom> bollu, perhaps because forall is intersection.
+10:25:21 <bollu> monochrom: but, the cone definition doesn't ask for intersection, just "the universal cone"
+10:25:34 <bollu> ah, are you saying that universality is like looking for the intersection of all solutinos?
+10:25:37 <bollu> solutions*?
+10:26:13 <orion> c_wraith: I am trying to write a function to perform this natural transformation, but I am unable to figure it out: https://gist.github.com/centromere/be51d19858cb082b4c3382f02fdbc91d
+10:26:31 <orion> '
+10:26:32 <monochrom> Not all universality. But the cone one. It really looks like greatest lower bound or least upper bound.
+10:26:39 <bollu> hm
+10:26:47 <bollu> let me go back and draw diagrams
+10:26:55 <bollu> and see what happens to cones of an endofunctor
+10:26:56 <bollu> thanks 
+10:27:06 <monochrom> "I have a collection. What is the one thing above/below all of my collection?"
+10:27:29 <orion> The `transform` function is returning IO (), but it needs to return IO a. I am not sure how to do that.
+10:27:50 <bollu> monochrom: but, like, for a functor F: J -> C, the cones of this are the "things in C that look like J"
+10:27:59 <bollu> I don't see how above/below plays in
+10:28:03 <cocreature> orion: without throwing exceptions or writing a partial transformation, you can’t
+10:28:35 <orion> Oh man, that's terrible. :(
+10:28:46 <cocreature> orion: why do you need to write this?
+10:30:03 <byorgey> orion: your 'transform' function has type  Ap Foo a -> IO a,  but it looks like it is pattern-matching on... something else
+10:30:24 <orion> byorgey: My mistake.
+10:30:36 <orion> I copy/pasted code and re-worked it in the gist without validating it.
+10:30:52 <byorgey> orion: it is definitely possible to write a function of type   Ap Foo a -> IO a  .   It is not possible to write a function of type   Foo a -> IO a.
+10:31:27 <orion> byorgey: I have updated the gist. Is that better?
+10:31:40 <orion> wait
+10:31:59 <byorgey> orion: since   Ap f  is the free applicative functor for f,  that means it is possible to write a function  (forall a. Ap f a -> g a)  for *any* Applicative g
+10:32:07 <cocreature> orion: that doesn’t compile
+10:32:17 <byorgey> in fact you can write it without even knowing what g is.
+10:32:18 <orion> cocreature: Yes, I just realized.
+10:32:48 <orion> The goal is to write the Free Applicative interpreter for Ap Foo a.
+10:34:01 <orion> 'runAp ??? a' should print "Foo: A" and evaluate to ().
+10:34:09 <lyxia> Don't you need (forall a. f a -> g a) first?
+10:34:49 <byorgey> oh, right, my bad.
+10:35:33 <orion> The interpreter (represented in my previous statement by '???') is a natural transformation from Ap Foo a -> IO a for all a. That's what I struggle with.
+10:35:57 <byorgey> orion: ok, sorry, I was wrong before.  This is impossible.  I don't think the definition of Foo is what you want.
+10:37:19 <orion> I see. Would it be correct to change it to something like, "data Foo next = A next | B next | C next" ?
+10:37:36 <cocreature> it’s not impossible, give me a minute. lpaste is being slow
+10:38:06 <cocreature> gnah I think it’s just broken
+10:38:19 <cocreature> orion: https://gist.github.com/cocreature/03b6bf83dcd5d044746d67e3dde0009d
+10:38:32 <EvanR> is there something like a read-only STM TVar
+10:38:36 <byorgey> oh, if you return an IO (), sure
+10:39:02 <cocreature> they said they want to evaluate to () :)
+10:39:33 <orion> Oh wow.
+10:39:41 <cocreature> and it works for any IO a where a is a monoid
+10:39:58 <iqubic> What is quasiquote?
+10:40:09 <byorgey> orion: I don't really know what you want to do, but data Foo next = A next | ...  could be reasonable too
+10:40:10 <orion> cocreature: I never would have thought to use runAp_
+10:40:36 <cocreature> orion: the monoid instance for IO a is relatively new but it can be quite handy :)
+10:40:54 <iqubic> What's a quasiquote?
+10:40:54 <byorgey> orion: with  data Foo a = A | B | C,   Ap Foo () is basically just a list of Foo values; the Applicative interface serves no purpose
+10:41:50 <orion> byorgey: The purpose is to create a DSL.
+10:42:05 <orion> A, B, and C are operations that take no parameters.
+10:42:23 <cocreature> so you’ll add other operations that have parameters?
+10:44:09 <orion> Possibly.
+10:44:25 <cocreature> if not, byorgey is right and Ap doesn’t buy you anything
+10:50:25 <orion> I see.
+10:50:49 <mrkgnao> iqubic: it's a way of generating an AST from Haskell code, modulo some stuff
+10:51:57 <orion> cocreature / byorgey: I mean, I want the DSL to be extendible so that some other person could add their own operations (D Int, E String, F, ...) and use an Applicative transformer (ApT) to merge the two together.
+11:07:51 <quchen> Anyone else having trouble running HLint 2.x?
+11:08:05 <quchen> It seems like it doesn’t walk through directories recursively
+11:08:28 <quchen> »openFile: inappropriate type (is a directory)«
+11:13:03 <lknows> I made a very simple function named maxmin that takes in a list and returns a two component tuple (maximum and minimal value of the list). I tried using the following type signature but it throws a comp. error
+11:13:12 <lknows> maxmin :: [a] -> (a, a)
+11:13:46 <quchen> lknows: You can’t calculate the maximum of any value, just of values that support comparison.
+11:14:01 <quchen> Your type signature claims that it works for *any* choice of »a«, e.g. »IO ()«.
+11:14:23 <quchen> lknows: Try leaving the type signature away, and ask GHCi for the type of your definition using »:t maxmin« :-)
+11:14:29 <Athas> That would work in OCaml!
+11:14:38 <quchen> :t \xs -> (minimum xs, maximum xs)
+11:14:40 <lambdabot> (Ord t, Foldable t1) => t1 t -> (t, t)
+11:15:11 <quchen> Well, in your case t1 is [] (list), but the Ord is the key component you’re missing.
+11:16:08 <lknows> Hmmm, I see.
+11:16:15 <Athas> quchen: do you know if GHC will fuse those two loops?
+11:16:37 <quchen> Fusion works only in chains of functions, not over multiple independent structures.
+11:16:47 <ongy> join #mutt
+11:17:08 <lknows> I've not seen this 'Ord a' before, I think this is where I'll find my answer.
+11:17:09 <quchen> I won’t claim GHC will not fuse this, because GHC is crazy smart, but I’d be surprised.
+11:17:37 <quchen> lknows: It’s a constraint on »a«. The type basically says »works for any a, as long as it has the Ord instance«
+11:17:41 <Athas> Yeah, me too.  GHC is a little limited in that regard.
+11:17:49 <Athas> It's hard to write that fusion as a rewrite rule.
+11:17:58 <quchen> lknows: Ord is what gives you the comparison functions like < and > and so on
+11:18:01 <quchen> ?src ord
+11:18:01 <lambdabot> Source not found. Whoa.
+11:18:04 <quchen> ?src Orf
+11:18:04 <lambdabot> Source not found. I am sorry.
+11:18:05 <quchen> ?src Ord
+11:18:05 <lambdabot> class (Eq a) => Ord a where
+11:18:05 <lambdabot>     compare              :: a -> a -> Ordering
+11:18:06 <lambdabot>     (<), (<=), (>), (>=) :: a -> a -> Bool
+11:18:06 <lambdabot>     max, min             :: a -> a -> a
+11:18:08 <quchen> Goddammit. Finally!
+11:18:13 <Tuplanolla> I recall seeing a rewrite rule for a pair of folds somewhere.
+11:24:21 <Tuplanolla> Something like `(foldr f y xs, foldr g z xs) = foldr (\ x (y, z) -> (f x y, g x z)) (y, z) xs` or `(foldr f y xs, foldr g y xs) = foldr (\ x y -> (f x y, g x y)) y xs`.
+12:09:40 <EvanR> nice... hs-boot file worked ;)
+12:10:04 <EvanR> mutual recursion wins flawless victory
+12:12:08 * hackage mustache 2.1.4 - A mustache template parser library.  https://hackage.haskell.org/package/mustache-2.1.4 (justus)
+12:23:47 <Gurkenglas> Is there a full text source search across hackage, or simple way to set one up?
+12:25:24 <lyxia> doesn't google index it
+12:49:52 <rntz> so, ListT warns that "this does not yield a monad unless the argument monad is commutative"
+12:50:11 <rntz> (in http://hackage.haskell.org/package/mtl-2.2.1/docs/Control-Monad-List.html)
+12:50:23 <rntz> specifically, is (Either String) commutative?
+12:50:28 <rntz> and, generally, when is a monad commutative?
+12:51:00 <rntz> and if (Either String) is not commutative, is there an example of why ListT (Either String) is not a monad?
+12:51:38 * hackage search-algorithms 0.2.0 - Common graph search algorithms  https://hackage.haskell.org/package/search-algorithms-0.2.0 (devonhollowood)
+12:54:05 <rightfold> Do invariant biapplicatives exist?
+12:55:01 <lyxia> > (Left "a" >> Left "b", Left "b" >> Left "a") -- Either String is not commutative
+12:55:03 <lambdabot>  (Left "a",Left "b")
+12:55:31 <bennofs> rightfold: i'm don't quite understand what that would be. even invariant applicatives don't exist, do they? (I thought you need to be covariant for applicative?)
+12:55:40 <rightfold> Hmm
+12:55:54 <rntz> ah. so a monad is commutative iff (x >> y) = (y >> x)?
+12:56:35 <lyxia> I'm not sure that's sufficient. Here x, y should be of type m ()
+12:56:46 <rntz> aha
+12:56:55 <rntz> yeah, that... would seem a little strong if they produced a result
+12:57:14 <rntz> that is, if they were of type (m a) for some type a which has multiple values :P
+12:57:29 <lyxia> I think a more general requirement would have you flip the results on one side
+12:57:52 <rntz> hm, so why is ListT (Either String) therefore not a monad? which law does it violate?
+12:58:10 <rightfold> bennofs: gooling "invariant applicative" gives 0 relevant results
+12:58:16 <rightfold> we can conclude that you're right
+12:58:48 <rightfold> Yeah what would pure look like lol
+12:58:58 <EvanR> only if you can derive a (f : Applicative) -> Invariant f -> Void
+12:59:26 <rightfold> ipure :: forall a. (f a, a -> f a) or something
+13:00:30 <lyxia> rntz: https://wiki.haskell.org/Monad#Commutative_monads for the actual characterization of commutative monads
+13:03:35 <Gurkenglas> rntz, http://stackoverflow.com/questions/12617916/why-is-listt-monad-transformer-considered-buggy-what-monad-laws-it-breaks
+13:05:34 <Gurkenglas> The definition lyxia links should be equivalent to (x >> y) = (y >> x) if we say that (>>) is "Monad m => m () -> m a -> m a" :P
+13:12:49 <EvanR> sdl2 bindings depends on linear which uses template haskell which is problematic on raspberry pi....
+13:13:18 <davean> EvanR: whats the problem with template haskell on a rpi?
+13:13:30 <thang1> It doesn't really work because you can't compile TH on a rpi due to hardware limitations
+13:13:46 <thang1> EvanR and I had a nice discussion about that a few days ago with a few other people on here
+13:13:55 <EvanR> without alien technology you cant cross compile code with TH
+13:14:34 <EvanR> so i forsee alien technology in my future
+13:14:36 <davean> All you need is the TH server on the rpi
+13:14:49 <davean> also, you can compile on an rpi, its just slow?
+13:15:03 <EvanR> you may not be able to compile on a rpi because you run out of memory
+13:15:11 <davean> You use swap
+13:15:18 <EvanR> ...swap?
+13:15:18 <davean> which is why its slow
+13:15:23 <davean> but I've seen ghc compiled on an rpi
+13:15:25 <EvanR> SD card swap?
+13:15:31 <EvanR> i dont want to compile ghc
+13:15:39 <EvanR> not sure why that always comes up
+13:15:49 <davean> yes, but my point is that if GHC gets compiled on an rpi, your project surely can
+13:16:19 <davean> and the TH server doesn't require the compilation to be done the rpi
+13:16:20 <EvanR> what do you consider slow?
+13:16:22 <davean> just the TH to execute that
+13:16:32 <EvanR> yeah im not compiling on the rpi
+13:16:59 <EvanR> also i need latest ghc features, not sure if prebuilt ghc's exist  for rpi
+13:17:14 <davean> They do
+13:17:25 <EvanR> of the latest version
+13:17:44 <davean> yes, I often see them for ghc-head
+13:18:02 <davean> They're not generally released to my knowlege though
+13:18:17 <EvanR> TH server here i come
+13:18:20 <davean> (rpis are oddly frequently used for testing)
+13:19:03 <thang1> davean: they're cheap as shit and tons of people build free stuff for RPIs so of course you'd use them for testing. Plus they cost like zero electricity to leave them on forever just buildling crap
+13:21:30 <davean> EvanR: https://ghc.haskell.org/trac/ghc/wiki/Commentary/Compiler/ExternalInterpreter
+13:21:52 <sternmull> could you use qemu to compile in a rpi-like environment that is powered by desktop PC? Not sure if this will be faster... but i think at least RAM should no longer be a problem.
+13:22:53 <davean> EvanR: iserv was available as long ago as 8.0.1
+13:22:56 <EvanR> yes i thought of that
+13:23:40 <cocreature> I don’t think you can use iserv for cross compilation in 8.0.1. this has been fixed recently but I’m not sure if all patches have made it into HEAD yet
+13:27:54 <Cooler> is this a instance of graph? https://hackage.haskell.org/package/fgl-5.5.3.1/docs/Data-Graph-Inductive-PatriciaTree.html
+13:28:01 <Cooler> https://hackage.haskell.org/package/fgl-5.5.3.1/docs/Data-Graph-Inductive-Graph.html
+13:28:08 <Cooler> i mean it is, but its a tree
+13:28:17 <cocreature> trees are graphs
+13:28:30 <Cooler> i need a directed graph with cycles
+13:28:49 <cocreature> also I don’t think it’s a tree. it’s an arbitrary graph that is internally represented as a tree
+13:28:57 <EvanR> yes Cooler you can do it
+13:30:24 <Cooler> so PatriciaTree.Gr ItemTree () would work?
+13:32:08 <Cooler> also i don't seem to be getting auto completion in haskell-mode
+13:32:43 <Cooler> in emacs
+13:36:37 <bennofs> Cooler: I think haskell-mode does not include completion. you'd need either ghc-mod or intero for that iirc
+13:37:11 <Cooler> thats not what it says here http://haskell.github.io/haskell-mode/manual/latest/Completion-support.html#Completion-support
+13:37:13 <monochrom> haskell-mode autocomplete uses ghci's autocomplete command. This means they are equally smart or dumb.
+13:37:38 <monochrom> For example if your last loading was a failure, you lose autocomplete of all but Prelude stuff.
+13:38:59 <monochrom> For example if your last loading was a success, but you're now adding a brand new function called "foofoofoo", then autocomplete has not learned of it yet.
+13:39:22 <Gurkenglas> http://lpaste.net/4097793525058371584 have I used hackage-mirror wrong, or is it broken? (perhaps only on windows?)
+13:39:32 <monochrom> But it does know about "foofoo" if it already existed at that loading.
+13:39:41 <Cooler> haskell-interactive-mode does something weird
+13:40:07 <Cooler> it gets rid of all the syntax highlighting and makes the text read only
+13:40:22 <Cooler> it also put a line at the bottom with lambda >
+13:41:18 <Cooler> wheres ertes 
+13:44:13 <cocreature> haskell-interactive-mode is for the repl buffer not for Haskell files iirc
+13:45:11 <monochrom> Right.
+13:46:16 <lknows> A question that's a bit off-topic, but I've no other place to ask. How long did it take you folks to finish "Learn you a Haskell for great good"?
+13:46:37 <lyxia> never started it
+13:46:51 <hpc> about a month
+13:46:58 <cocreature> lknows: I think about a week
+13:47:18 <Tuplanolla> I read it on coffee breaks before writing a single line, so about three months at that pace, lknows.
+13:50:11 <thang1> How about Haskell From First Principles? (which is a much better book, anyway)
+13:53:50 <EvanR> is there a standard filterMap :: (a -> Maybe b) -> [a] -> [b]
+13:54:08 * hackage yesod-bin 1.5.2.3 - The yesod helper executable.  https://hackage.haskell.org/package/yesod-bin-1.5.2.3 (MichaelSnoyman)
+13:54:14 <hpc> :t catMaybes .: filter
+13:54:15 <lambdabot> error:
+13:54:16 <lambdabot>     • Variable not in scope:
+13:54:16 <lambdabot>         (.:) :: ([Maybe a1] -> [a1]) -> ((a0 -> Bool) -> [a0] -> [a0]) -> t
+13:54:20 <hpc> :t catMaybes . filter
+13:54:22 <lambdabot> error:
+13:54:22 <lambdabot>     • Couldn't match type ‘[a1] -> [a1]’ with ‘[Maybe a]’
+13:54:22 <lambdabot>       Expected type: (a1 -> Bool) -> [Maybe a]
+13:54:24 <cocreature> :t mapMaybe
+13:54:25 <hpc> pah
+13:54:25 <lambdabot> (a -> Maybe b) -> [a] -> [b]
+13:54:31 <hpc> ah
+13:54:34 <EvanR> huzzah
+13:54:44 * hpc lrns2hoogle
+13:54:54 <EvanR> @hoogle mapMaybe
+13:54:54 <lambdabot> Data.Maybe mapMaybe :: (a -> Maybe b) -> [a] -> [b]
+13:54:54 <lambdabot> Data.IntMap.Internal mapMaybe :: (a -> Maybe b) -> IntMap a -> IntMap b
+13:54:54 <lambdabot> Data.IntMap.Lazy mapMaybe :: (a -> Maybe b) -> IntMap a -> IntMap b
+13:55:03 <EvanR> @hoogle (a -> Maybe b) -> [a] -> [b]
+13:55:04 <lambdabot> Data.Maybe mapMaybe :: (a -> Maybe b) -> [a] -> [b]
+13:55:04 <lambdabot> CorePrelude mapMaybe :: (a -> Maybe b) -> [a] -> [b]
+13:55:04 <lambdabot> Agda.Utils.List takeWhileJust :: (a -> Maybe b) -> [a] -> [b]
+13:55:08 <Myrl-saki> Also.
+13:55:11 <EvanR> worked
+13:55:12 <Myrl-saki> :t catMaybes . map
+13:55:13 <lambdabot> error:
+13:55:14 <lambdabot>     • Couldn't match type ‘[a] -> [b]’ with ‘[Maybe a1]’
+13:55:14 <lambdabot>       Expected type: (a -> b) -> [Maybe a1]
+13:55:17 <Myrl-saki> WAT
+13:55:23 <EvanR> it requires .:
+13:55:27 <Myrl-saki> :t \f -> catMaybes . map f
+13:55:28 <lambdabot> (a1 -> Maybe a) -> [a1] -> [a]
+13:55:36 <Myrl-saki> EvanR: What is (.:) ?
+13:55:41 <EvanR> (.) . (.)
+13:55:52 <EvanR> :t (catMaybes .) . map
+13:55:53 <Myrl-saki> Oh cool. Where's it defined?
+13:55:54 <lambdabot> (a1 -> Maybe a) -> [a1] -> [a]
+13:55:59 <EvanR> nowhere, thats the issue
+13:56:37 <EvanR> and (.::) = (.) . (.) . (.) to do it for two arguments
+13:59:11 <Myrl-saki> It's in Data.Function.
+13:59:18 <Myrl-saki> And it's used for deeper maps.
+13:59:27 <Myrl-saki> @let import Data.Function
+13:59:28 <lambdabot>  Defined.
+13:59:33 <Myrl-saki> :t (.:)
+13:59:34 <lambdabot> error:
+13:59:34 <lambdabot>     • Variable not in scope: .:
+13:59:34 <lambdabot>     • Perhaps you meant one of these:
+13:59:38 <Myrl-saki> :(
+13:59:54 <Myrl-saki> Wait. I'm stupid. Ignore that.
+14:00:42 <Myrl-saki> I like the deeper maps better than the function only, tbh.
+14:11:38 * hackage monad-logger-syslog 0.1.4.0 - syslog output for monad-logger  https://hackage.haskell.org/package/monad-logger-syslog-0.1.4.0 (MichaelSnoyman)
+14:19:48 <sternmull> I wonder why the documentation does not show argument names. Often they would carry information. For instance "makeRelative :: FilePath -> FilePath -> FilePath" is not very helpful.
+14:20:08 <EvanR> they only show argument names if they are documented
+14:20:22 <EvanR> in chiasmic fashion
+14:21:10 <sternmull> in my opinion they should be there all the time.
+14:21:14 <EvanR> (a cool feature of dependent function types, you get argument names for "free")
+14:21:45 <EvanR> well in many cases the names are in the way
+14:22:12 <EvanR> for the zillion functions like mappend :: Monoid a => a -> a -> a youd be sifting through artificial names like arg1 and arg2
+14:22:34 <EvanR> when a name would make sense, haddock lets you document it
+14:22:52 <EvanR> but people usuall dont
+14:23:08 * hackage http-client-tls 0.3.4.2 - http-client backend using the connection package and tls library  https://hackage.haskell.org/package/http-client-tls-0.3.4.2 (MichaelSnoyman)
+14:23:19 <monochrom> I agree with documentation. I disagree that they must be names.
+14:23:28 <sternmull> yes, looks like they don't. I can't remember seeing argument names in the docs.
+14:23:35 <EvanR> wellNamedIOActionHopefully :: IO ()
+14:23:39 <Lokathor> can one set it up so that stack will automatically rebuild the haddock of a module every time the module changes on disk?
+14:23:48 <Lokathor> i seem to recall stack being able to monitor stuff at least a little
+14:24:12 <monochrom> Now add to the fact that Haskell lets you write "f (Just (x:xs)) = ..." so there is no name to begin with.
+14:24:39 <EvanR> sternmull: see here https://hackage.haskell.org/package/mikmod-0.2.0.1/docs/Sound-MikMod.html#v:setModuleChannelVolume
+14:24:55 <EvanR> arg by arg docs, names or otherwise
+14:25:14 <monochrom> More precisely, "f Nothing = ...; f (Just []) = ...; f (Just (4:5:xs)) = ...; f (Just (x:xs)) = ..." so there is no single name.
+14:25:33 <lyxia> Lokathor: stack build --haddock --file-watch   perhaps
+14:25:39 * hackage yesod-form 1.4.12, yesod-auth 1.4.17.1 (MichaelSnoyman): https://qbin.io/fz2h7nzn
+14:25:40 <sternmull> monochrom: In that case i would understand if the argument names are missing. But if there is a meaningful name it would enhance the documentation with zero overhead for the author.
+14:25:55 <Lokathor> lyxia, neato
+14:25:57 <EvanR> big if
+14:26:01 <monochrom> Unless you tell me: Never use that feature. Write f meaningfulname = case meaningful name of ...
+14:26:16 <EvanR> overhead for the reader to look at swatches of "x" and two letters names
+14:26:29 <EvanR> swathes
+14:26:34 <sternmull> EvanR: Ah! Yes, i recognize that... ok maybe i have seen documented arguments before.
+14:28:17 <EvanR> 2 out of the 3 args there are documented, i feel just stupid documenting the other one. in many other languages people dont
+14:28:51 <EvanR> well or naming the other one
+14:29:15 <athan> Hi all. I ported monad-control to expose the "monadic state" type chosen at the constraint level, instead of an assicated type family. Please let me know what you think: http://hackage.haskell.org/package/monad-control-aligned-0.0.1/docs/Control-Monad-Trans-Control-Aligned.html
+14:29:29 <athan> coupled with this: http://hackage.haskell.org/package/extractable-singleton-0.0.1/docs/Data-Singleton-Class.html
+14:30:03 <athan> would allow for someone to "run an action" in the monad-to-be-lifted, _and_ extract the return value
+14:31:13 <lyxia> why turn this into a fundep
+14:31:18 <athan> so you can do `liftBaseWith $ \runInBase -> do x <- runSingleton <$> runInBase someMonadicAction`, where `x :: a` is the exact value that `someMonadicAction :: m a` would have returned
+14:31:32 <monochrom> To be sure, the opposite scenerio also happens. In some cases you want to give meaningless labels to arguments. This is so that you can later describe the function holistically (as opposed to per-argument incohesion) and you can use the labels as pronouns.
+14:31:48 <sternmull> can i tell stack to install the sources of my dependencies so i have a chance to look at the sources for more information? At the moment i use online docs and hope they are about the same version of the packages that i use.
+14:31:53 <athan> lyxia: because then you can write `(MonadBaseControl b m stM, Extractable stM) => ...`
+14:32:12 <athan> using the `runSingleton` method I just mentioned
+14:32:38 * hackage hsudoku 0.1.0.1 - Sudoku game with a GTK3 interface  https://hackage.haskell.org/package/hsudoku-0.1.0.1 (mmo)
+14:32:43 <athan> which is a `forall (f :: * -> *) (a :: *). f a -> a` function
+14:33:52 <athan> lyxia: without `Extractable`, you have no ability to witness the returned value from a run expression, when inside the monad to be lifted
+14:34:23 <athan> x <- runSingleton <$> runInBase someCrazyValueFromMyMonadStack
+14:35:22 <athan> law: forall x. liftBaseWith (\runInBase -> runSingleton <$> runInBase x) == x
+14:35:30 <lyxia> hmmm ok
+14:35:58 <drdo> Is it possible to get the leftover string when using parsec?
+14:36:00 <athan> I think it would be sweet to have
+14:37:52 <EvanR> drdo: yes
+14:38:21 <athan> Would there be a good way to state "all * -> * kinded-types which are isomorphic to Identity" in haskell?
+14:38:29 <EvanR> getInput :: Monad m => ParsecT s u m s
+14:38:30 <lyxia> You could also have Extractable use b and m as parameters, perhaps. That would be compatible with the current monad-control
+14:39:31 <lyxia> athan: "isomorphic to identity" sounds wrong
+14:39:47 <drdo> EvanR: I meant  after running a parser, but that works too :)
+14:39:54 <EvanR> right, no
+14:40:07 <athan> lyxia: well, that would mean you would have to pattern-match on (StT b m) for all cases, though :\
+14:40:21 <athan> or just make individual pointed instances for each existing instance of MonadBaseControl etc
+14:40:34 <c_wraith> athan: I can't think of a standard term, or a non-standard term that's any better than (the truly awful) "identity-like"
+14:40:34 <lyxia> right
+14:40:40 <athan> lyxia: ahh yeah I think you're right
+14:40:52 <athan> because you can't "create one" with the same chosen state, forgetfully
+14:41:11 <athan> c_wraith: hmm... thank you
+14:41:37 * athan wants generic programming for "existing typeclass instances"
+14:41:46 <Gurkenglas> athan, a class defining "forall a. Iso' (f a) a"?
+14:41:52 <lyxia> that, and we don't tend to define things isomorphic to other things that exist
+14:42:10 <athan> Gurkenglas: !! I think that's it, but I stated it wrong regardless
+14:42:12 <Gurkenglas> (Or have the iso as your function argument if you dont want to define a class)
+14:42:30 <athan> lyxia: ahh hm
+14:42:54 <athan> me want excessive vocabulary
+14:43:16 <Gurkenglas> lyxia, sometimes we define things that are more general than another thing up to isomorphism, see Cofree vs Tree
+14:44:06 <lyxia> right. I probably meant something different
+14:46:05 <lyxia> One day naming things won't be a problem anymore. We'll just send each other neural patterns.
+14:47:22 <athan> but... how do you abbreviate them? :D
+14:47:37 <mojjo> hi.. one can say, that each element in a list has a successor, except the last one. With this in mind, one can create a type `Map a [a]` which maps from each distinct element of the input list to a list of possible successors. My problem is now: 
+14:48:14 <mojjo> How can I make sure that the Map stays circular in the way that every item in the value lists is a key hof the Map. It looks to me, taht this is only problematic for the last element, but could not find a good approach to solve this yet...
+14:49:37 <Tuplanolla> > fmap (head &&& tail) (tails [1 .. 4]) -- You mean this problem, mojjo?
+14:49:39 <lambdabot>  [(1,[2,3,4]),(2,[3,4]),(3,[4]),(4,[]),(*Exception: Prelude.head: empty list
+14:51:20 <Tuplanolla> > (M.fromAscList . init . fmap (head &&& tail) . tails) [1 .. 4] -- You can make use of laziness.
+14:51:21 <mojjo> Tuplanolla: no.. this one not.. I'll provide a naive implementation in a sec...
+14:51:22 <lambdabot>  fromList [(1,[2,3,4]),(2,[3,4]),(3,[4]),(4,[])]
+14:51:35 <drdo> EvanR: Is there an easy way to find out if a parser failed because input ended or because there were "real errors"?
+14:51:48 <hpc> if someday variable names are neural patterns, i am definitely sabotaging all of my code by naming things variations of "i'm hungry" :D
+14:51:53 <EvanR> your parser can require input ended or didnt end
+14:51:59 <EvanR> eof :: Parser ()
+14:52:31 <EvanR> if input ends at the right time, no error
+14:52:45 <fryguybob> EvanR: I saw you asked about a read-only TVar.  What do you have in mind?
+14:53:12 <EvanR> well i gave up on that, but the idea is one part of the program is allowed to modify it and another part is not
+14:53:13 <drdo> EvanR: What I want to do is run the same parser an arbitrary number of times
+14:53:25 <drdo> (independently)
+14:54:02 <fryguybob> EvanR: And you want to statically enforce that?
+14:54:26 <EvanR> yes, rather than whoever-is-working-on-the-read-only-part's-memory-enforces-it
+14:55:00 <EvanR> actually
+14:55:12 <EvanR> the proper type for that would be, STM a 
+14:55:28 <fryguybob> Right
+14:55:55 <EvanR> makeReadOnly :: TVar a -> STM a; makeReadOnly = readTVar
+14:56:10 <EvanR> haha
+14:56:16 <fryguybob> :D
+14:57:18 * fryguybob goes back to getting burned by unsafeCoerce#...
+14:58:20 * EvanR shuts the 10-ft steel door to hell on fryguybob 
+15:01:19 <athan> lyxia: hmm... what do you think about an associated... lens?
+15:01:24 <athan> into StT / StM
+15:02:38 * hackage atlassian-connect-core 0.7.1.0 - Atlassian Connect snaplet for the Snap Framework and helper code.  https://hackage.haskell.org/package/atlassian-connect-core-0.7.1.0 (RobertMassaioli)
+15:02:41 <athan> & associated traversals & prisms for others
+15:02:43 <athan> hm...
+15:02:52 * lyxia shrugs.
+15:07:38 * hackage time 1.8.0.2 - A time library  https://hackage.haskell.org/package/time-1.8.0.2 (AshleyYakeley)
+15:07:56 <EvanR> dang an update to time o_O
+15:08:01 <Gurkenglas> mojjo, do you want to also connect the last element to the first one? Do you want a subtype of Map a [a] that has as an invariant that all elements of a value are a key?
+15:08:08 <EvanR> so new the docs dont work
+15:09:07 <thang1> https://monad.cat/posts/2016-05-10-barbed-wire.html was there ever a part 2 to this?
+15:10:21 <EvanR> looks like some built details and a change to the %Q format specifier
+15:11:50 <ADG> what ide/editor do you use?
+15:12:00 <monochrom> I use Emacs.
+15:12:03 <ADG> I use atom now and I am thinking of something better?
+15:12:24 <kneit> ?src find
+15:12:25 <lambdabot> find p = listToMaybe . filter p
+15:12:28 <monochrom> I haven't tried Atom. Don't know how to compare.
+15:12:48 <thang1> ADG: why do you need abetter editor?
+15:12:58 <ADG> autocomplete
+15:13:09 <thang1> atom is fine then, it uses intero
+15:13:34 <thang1> https://atom.io/packages/ide-haskell you're using this package, yes?
+15:13:40 <Gurkenglas> There's intero for atom? Why have I been using emacs for a weeks then :s
+15:13:40 <ADG> yes
+15:13:44 <Gurkenglas> -s
+15:14:06 <thang1> https://atom.io/packages/autocomplete-haskell You also need to use this for autocomplete
+15:14:14 <ADG> I use haskell-ghc-mod, ide-haskell and language-haskell
+15:14:23 <thang1> Gurkenglas: intero /is/ the backend of IDE-haskell
+15:14:58 <thang1> ADG: you need to have autocomplete-haskell installed as well. ide-haskell used to have it but they pulled it into its own package
+15:15:22 <monochrom> Aw, people really like to split packages.
+15:15:43 <thang1> at least, I think it is...
+15:16:04 <ADG> also can anyone tell how to solve management of my project using cabal [here](https://softwareengineering.stackexchange.com/questions/348908/how-to-properly-maintain-compilation-makefile-for-haskell-project-not-using-s)
+15:16:06 <athan> lyxia: can't make a lensy class, unfortunately. The `StT` type makes things ambiguous
+15:16:14 <ADG> no markdown :(
+15:16:26 <thang1> Anyway, Atom is one of the best editors for IDE like autocompletion once you get all the packages installed
+15:16:41 <lyxia> athan: you can always make things unambiguous with a Proxy
+15:17:17 <athan> http://lpaste.net/355488
+15:17:47 <EvanR> yesss seems like i destablized sdl2 bindings with my use of threads
+15:17:58 <athan> for some reason, `t` is ambiguous
+15:18:05 <lyxia> stTLens :: Proxy t -> Lens' (St t a) a
+15:18:21 <xcmw> What does "installed package info from too old version of Cabal (key field does not match id field)" mean? I get this when running "cabal build" in a nix shell. I am trying to run the example in https://github.com/dalaing/websockets-reflex
+15:18:22 <athan> hmm
+15:18:25 <lyxia> The reason is that St is a type synonym family
+15:18:38 * hackage pipes-lzma 0.1.1.1 - LZMA compressors and decompressors for the Pipes package  https://hackage.haskell.org/package/pipes-lzma-0.1.1.1 (BenGamari)
+15:19:14 <EvanR> videogame: schedule: re-entered unsafely.\n\tPerhaps a 'foreign import unsafe' should be 'safe'?
+15:19:26 <athan> ooooohh wait I get it
+15:19:34 <athan> or I could just make it an operation inside `t` or something
+15:19:41 <athan> but that would be restrictive
+15:19:48 <slack1256> on -cafe, should I just reply to the list or also to CC the sender?
+15:20:56 <Gurkenglas> Does some site provide a reddit-like read/write interface to mailing lists?
+15:20:57 <torstein> is it possible to do case pattern matching on a record field inside a Just? something like this: case mmaybe of Just( Rec { var } ) 
+15:21:36 <geekosaur> did you try it?
+15:21:59 <torstein> yeah I'm getting loads of errors
+15:22:21 <thang1> I stand corrected, Atom doesn't seem to use Intero. However, it still has plenty of good haskell packages so it shouldn't be too bad.
+15:22:23 <geekosaur> without an extension you need to say what to bind the field to
+15:22:30 <ReinH> ADG:  start with cabal init, the.
+15:22:40 <geekosaur> Just (Rec {field = binding})
+15:22:42 <ReinH> Then read the users guide https://www.haskell.org/cabal/users-guide/developing-packages.html#using-cabal-init
+15:22:55 <ADG> Just made from it
+15:22:56 <geekosaur> or with NamedFieldPuns you can just say the field and a binding with the same name will be generated
+15:23:06 <slack1256> Gurkenglas: just for reading, any mailing list archive will have hierarchy and good mails should just respond to a quoting context
+15:23:07 <hexagoxel> torstein: might need (Just Rec { var }) instead
+15:23:10 <ADG> but how to dynamically add all files from src/
+15:23:17 <lyxia> slack1256: reply the sender (main recipient), cc the list (people might be interested)
+15:23:19 <slack1256> but for writing, you have to send a mail
+15:23:31 <ReinH> ADG: just add them.
+15:24:27 <ADG> I think adding 140 executables is not practical (ideally it would become 540 soon)
+15:24:29 <hexagoxel> depending on the context at least. the inner parens are optional, the outer might not be.
+15:24:53 <ReinH> 140 executables?
+15:25:31 <ReinH> You might have some luck using hpack, which generates a cabal confit from yaml.
+15:25:37 <ADG> Yes I make x.hs for each project euler problem
+15:25:46 <ReinH> You could generate the yaml more easily.
+15:25:49 <ADG> there are 500-ish peroblem
+15:27:02 <geekosaur> > let Just (Foou {baar = bar}) = Just (Foou "z" 1) in bar
+15:27:04 <lambdabot>  "z"
+15:27:46 <ReinH> still seems like you only need one executable. You could pass the problem number as an arg.
+15:28:02 <hexagoxel> ^
+15:28:09 <ReinH> Anyway, cabal doesn't have such a feature.
+15:28:23 <monochrom> That just shovels the length elsewhere.
+15:28:29 <ReinH> But you can use hpack and generate the yaml somehow.
+15:28:54 <jordan33> function = [x | x <- [1,2..], x `mod` 2 == 1, x `mod` 7 == 0, x `quot` 9 == 3]
+15:29:04 <fryguybob> EvanR: This is fine. :P
+15:29:08 <jordan33> main = print(take 6 aufgabeA)
+15:29:13 <jordan33> why doesnt my program terminate?
+15:29:26 <monochrom> what is aufgabeA?
+15:29:27 <jordan33> print(take 6 function)
+15:29:29 <jordan33> sry
+15:29:55 <geekosaur> because it still has to scan the whole list
+15:29:58 <geekosaur> laziness is not magic
+15:30:00 <monochrom> > take 6 [x | x <- [1,2..], x `mod` 2 == 1, x `mod` 7 == 0, x `quot` 9 == 3]
+15:30:06 <lambdabot>  mueval-core: Time limit exceeded
+15:30:18 <monochrom> quot? mod?
+15:30:40 <jordan33> division and modulo
+15:30:49 <EvanR> 
+15:31:02 <jordan33> i thought take 6 makes it possible to do what im doing
+15:31:09 <thang1> Pretty sure monochrom knows what quot and mod are :p
+15:31:11 <monochrom> Yes yes. I am asking you to confirm: Do you really really want x `quot` 9 as opposed to x `mod` 9?
+15:31:22 <edwardk> call it quotRem or divMod, dont cross the streams :)
+15:31:29 <geekosaur> eew
+15:32:07 <jordan33> ohh
+15:32:08 <jordan33> no sry
+15:32:10 <jordan33> 1 sec
+15:32:54 <ReinH> jordan33: how many such xs are there?
+15:33:02 <jordan33> > take 6 [x | x <- [1,2..], x `mod` 2 == 1, x `mod` 7 == 0, x `mod` 9 == 3]
+15:33:04 <lambdabot>  [21,147,273,399,525,651]
+15:33:05 <jordan33> it works now
+15:33:10 <jordan33> i didnt want to use quot
+15:33:14 <AlexRussia> Hi! I'm noobie & looking in this code https://github.com/aurapm/aura/blob/master/aura/src/Aura/Dependencies.hs#L48 I'd like to pass pkg argument down to findPkg call, as I understood, I need somehow zip (pkgDepsOf pkg) & pkg but can't figure out the syntax. Could somebody help me with it?
+15:33:16 <jordan33> thanks a lot ^
+15:33:39 <ReinH> jordan33: do you understand why it didn't work?
+15:33:51 <thang1> I feel like there's a better way to do that...
+15:33:53 <edwardk> with quot you have a very narrow range of such possible xs and ran out before you got 6
+15:34:27 <jordan33> yes because it couldnt find any x which actually have these properties
+15:35:08 * hackage atlassian-connect-core 0.7.2.0 - Atlassian Connect snaplet for the Snap Framework and helper code.  https://hackage.haskell.org/package/atlassian-connect-core-0.7.2.0 (RobertMassaioli)
+15:35:30 <EvanR> doh, not using -threaded strikes again
+15:35:47 <EvanR> no -threaded + sdl audio does not mix
+15:36:52 <ReinH> AlexRussia: can't you add it as an argument to addDep?
+15:38:31 <AlexRussia> ReinH: see, as I understood, the `traverse_` is an iterator which takes a function & a list and applies function to each element of the list. If so, as I understood, I must modify list, so addDep could take 2 arguments instead of one. I'm wrong?
+15:38:36 <jordan33> aufgabeB = take 10 [a*a + b*b + c*c | a <- [1,3,5..],  b <- [2,4,6..], c <- [1,2..], c > b > a]
+15:38:52 <jordan33> apparently haskell doesnt understand a <- [1,3,5..] ?
+15:39:05 <monochrom> It doesn't.
+15:39:10 <jordan33> should i just say  a <- [1,2..] and then use mod?
+15:39:14 <lyxia> > [1,3..]
+15:39:16 <lambdabot>  [1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53...
+15:39:31 <jordan33> mhm thats weird
+15:39:36 <EvanR> > [3,1..]
+15:39:38 <lambdabot>  [3,1,-1,-3,-5,-7,-9,-11,-13,-15,-17,-19,-21,-23,-25,-27,-29,-31,-33,-35,-37,...
+15:39:40 <athan> Can I use type quantification in... constraints?
+15:39:44 <EvanR> > [3,1..] :: [Natural]
+15:39:46 <lambdabot>  []
+15:39:49 <monochrom> It is not like you can say [1, 2, 4..] and the computer suddenly guesses that you want the powers of 2.
+15:39:49 <EvanR> o_O
+15:40:14 <athan> foo :: (Foo q, Bar p, ..., forall a. SomethingCrazy f a, ...) => ... 
+15:40:15 <Cale> @oeis 1, 2, 4
+15:40:15 <ReinH> AlexRussia: why not traveree_ (addDep pkg)  (pkgDepsOf pkg)
+15:40:16 <edwardk> evanr it computes a delta as a natural i guess
+15:40:24 <EvanR> > [5,4..] :: [Natural]
+15:40:24 <ReinH> Er, traverse_
+15:40:26 <edwardk> that should be overridden.
+15:40:26 <lambdabot>  []
+15:40:27 <lambdabot>  https://oeis.org/A000079 Powers of 2: a(n) = 2^n.
+15:40:27 <lambdabot>  [1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,131072,2...
+15:40:32 <AlexRussia> ReinH: wow
+15:40:34 * edwardk sends up the hvr signal
+15:40:35 <EvanR> > 4 - 5 :: Natural
+15:40:36 <lambdabot>  *Exception: Natural: (-)
+15:40:46 <EvanR> does it mask exceptions?
+15:41:11 <ReinH> AlexRussia: partial application is useful
+15:41:17 <athan> doodad :: (forall a. t b a ~ m a) => m a -> t b a
+15:41:19 <edwardk> not sure how the instance is written
+15:41:20 <athan> doodad = id
+15:41:33 <monochrom> OK! It is not like any Haskell compiler is going to send a web request to OEIS during compilation!
+15:41:39 <edwardk> but it should allow negative deltas and stop at 0
+15:41:40 <Cale> hahaha
+15:41:47 <athan> (I should have that as `forall a. m a -> t b a`)
+15:41:54 <geekosaur> until someone tosses TH into the mix >.>
+15:41:57 <AlexRussia> ReinH: wow, that really works, app has successful build with my changes
+15:42:03 <edwardk> monochrom: we just need to get oeis to add mandatory haskell snippets
+15:42:03 <AlexRussia> ReinH: cool tip, thank you
+15:42:05 <EvanR> > [5,(6 `div` 0)..] :: [Natural]
+15:42:08 <Cale> monochrom: If only we had Haskell entries on OEIS for more things...
+15:42:09 <ReinH> np
+15:42:09 <jordan33> ok now this is interesting:
+15:42:11 <lambdabot>  mueval-core: Time limit exceeded
+15:42:20 <jordan33> > take 10 [a*a + b*b + c*c | a <- [1,3..],  b <- [2,4..], c <- [1,2..], c > b, b > a]
+15:42:22 <lambdabot>  [14,21,30,41,54,69,86,105,126,149]
+15:42:26 <jordan33> but this doesnt work:
+15:42:27 <EvanR> what in the
+15:42:31 <jordan33> take 10 [a*a + b*b + c*c | a <- [1,3,5..],  b <- [2,4..], c <- [1,2..], c > b, b > a]
+15:42:43 <AlexRussia> ReinH: also, can you explain, why some function definitions use '->' to explain arguments, and others just separate arguments by spaces?
+15:42:50 <AlexRussia> please
+15:42:52 <monochrom> Again, there is no [1,3,5..].
+15:42:52 <jordan33> > take 10 [a*a + b*b + c*c | a <- [1,3..],  b <- [2,4..], c <- [1,2..], c > b, b > a]
+15:42:54 <lambdabot>  [14,21,30,41,54,69,86,105,126,149]
+15:43:01 <jordan33> yes but i dont understand why
+15:43:06 <ReinH> AlexRussia: I'm not sure what you mean. Can you give me an example?
+15:43:09 <geekosaur> because it's not a general syntax
+15:43:10 <edwardk> or to use somehing like the "Extended Rate, more gfun" paper to solve recurrences
+15:43:19 <Cale> I actually think it would be kind of cool if [a,b,c,d...] etc would do Lagrange interpolation.
+15:43:21 <AlexRussia> ReinH: if in terms of the code, resolveDeps & addPkg functions
+15:43:40 <edwardk> cale: i'd love to see the extended rate approach
+15:43:56 <monochrom> I don't like Lagrange interpolation. OEIS is more sensible.
+15:43:57 <geekosaur> [x..] is enumFrom. [x..y] is enumFromTo. [x,y..] is enumFromThen. [x,y..z] is enumFromThenTo. other things have no functions to translate to
+15:44:01 <AlexRussia> ReinH: oh, or definition of arguments types is just optional?
+15:44:05 <edwardk> https://arxiv.org/abs/math/0702086
+15:44:20 <athan> does the existence of an `f a -> a` function imply that `f` is a functor, where it's instance is just like the Identity functor?
+15:44:23 <ReinH> AlexRussia: I'm still not sure what you mean. What is an example of separating arguments by spaces?
+15:44:24 <Boomerang> jordan33: 3 numbers in a row is overspecification, with 2 numbers you can always find the arithmetic series, with there are impossible cases. For example, what should [1,2,5..] do?
+15:44:29 <edwardk> jacques carette made me care about that approach way back when
+15:44:51 <jordan33> Boomerang thats a good point
+15:45:04 <Tuplanolla> How about `1 : [2, 5 ..]`, Boomerang?
+15:45:11 <jordan33> but i thought if the assumed pattern keeps working haskell would accept it
+15:45:19 <Cale> athan: It doesn't imply that f is a functor, and even if f is a functor, it doesn't imply that it's Identity.
+15:45:19 <jordan33> apparently it doesnt
+15:45:22 <AlexRussia> ReinH: I mean, when in the code function resolveDeps is defined, first of all it describes types using tokens '::' and '->', but at the same time, function addPkg does nothing, just get arguments
+15:45:33 <AlexRussia> ReinH: is there any specific difference between them?
+15:45:41 <Boomerang> Tuplanolla: That should work, but you are simply prepending 1 to it
+15:45:41 <edwardk> athan: no, f could be something like data F a = F a (a -> IO ())
+15:45:43 <Cale> athan: Consider f = (,) e for instance
+15:45:47 <edwardk> that is t a functor
+15:46:04 <ReinH> :: is used to declare a type signature, it means "is of type" or "has type"
+15:46:08 <edwardk> er isnt
+15:46:08 <jordan33> > take 10 (1 : [2, 5 ..])
+15:46:10 <lambdabot>  [1,2,5,8,11,14,17,20,23,26]
+15:46:17 <ReinH> Type signatures are optional when types can be inferred.
+15:46:42 <ReinH> addPkg does not have type signature, it is inferred.
+15:47:08 <AlexRussia> ReinH: oh, okay, I guess I've got it
+15:47:12 <AlexRussia> ReinH: thanks
+15:48:01 <ReinH> AlexRussia: you could add above it addPkg :: Package -> whatever the rest of type is, I am not as good at inferring types as GHC is.
+15:48:41 <AlexRussia> ReinH: yeah, I understood
+15:48:47 <ReinH> (one handy trick is to say addPkg :: () and the compiler error will tell you what type GHC has inferred)
+15:49:03 <ReinH> AlexRussia: ok cool
+15:49:44 <geekosaur> if you have a new enough ghc that'd be :: _
+15:49:53 <ReinH> True.
+15:49:55 <thang1> geekosaur: is that any GHC past version 8.0?
+15:50:28 <geekosaur> 8.0 and on
+15:50:55 <geekosaur> you need an extension to tell ghc to run with the result, but not to get the inferred type out
+15:51:02 <Tuplanolla> We had `PartialTypeSignatures` in 7.10.
+15:51:04 <geekosaur> (PartialTypeSignatures)
+15:51:21 <AlexRussia> ReinH: I just got interesting problem now, lol. I needed pass the 'pkg' to make some debug-like info. See, aura is package manager for Arch Linux, which can install packages using binary repositories, or either take them from AUR. The function we've looking at implements resoling dependencies of packages. The joke is that if package exists and in AUR, and in binary repositories, first one is taken, ever if
+15:51:22 <AlexRussia> its dependencies is unresolvable :D
+15:51:34 <geekosaur> thought that was just typed holes, which isn't actually an extension
+15:51:58 <monochrom> @quote monochrom _
+15:51:58 <lambdabot> monochrom says: <mreh> type T = T T <monochrom> type T = T_T
+15:53:06 <monochrom> Aw, the saying I was looking for is something along the line of "your code writes itself starting from _ :: _"
+15:53:33 <AlexRussia> ReinH: problem for me as user were that error message was...a litte _too_ simple(containing only dependency name, not of package it's needed for), so now with your help I've got it and understood the problem I've described, thanks
+15:53:34 <Tuplanolla> @quote monochrom ::
+15:53:34 <lambdabot> monochrom says: I use safeFromJust :: Maybe a -> Maybe a
+15:54:18 <ReinH> That's a good quote.
+15:54:56 <ReinH> monochrom: in Agda, code writes you!
+15:55:25 <EvanR> right it highlights what kind of safety Maybe implies
+15:55:33 <EvanR> or begs the question
+15:56:17 <monochrom> For the evil twin quote:
+15:56:28 <monochrom> @quote monochrom unsafeCoerce
+15:56:29 <lambdabot> monochrom says: isTrue = (unsafeCoerce :: Either a b -> Bool) . (unsafeCoerce :: Maybe c -> Either a b) . (unsafeCoerce :: Bool -> Maybe c)
+15:57:59 <Eduard_Munteanu> :t spoon
+15:58:00 <lambdabot> error: Variable not in scope: spoon
+15:58:14 <Eduard_Munteanu> @hoogle spoon
+15:58:14 <lambdabot> package spoon
+15:58:15 <lambdabot> Control.Spoon spoon :: NFData a => a -> Maybe a
+15:58:15 <lambdabot> module Control.Spoon
+16:00:32 * Eduard_Munteanu wonders where copumpkin is these days
+16:00:54 <EvanR> saw him in another channel, not telling which
+16:01:08 <EvanR> contrapumpkin
+16:02:46 <Eduard_Munteanu> Oh, ok, so he didn't change nick into one of the ^co things in here.
+16:27:52 <EvanR> if no one is reading from a TChan, and something gets written to it, does it pile up in memory?
+16:28:35 <EvanR> i guess it cant know that you yourself may never read from it
+16:29:08 * hackage jenga 0.1.1.0 - Generate a cabal freeze file from a stack.yaml  https://hackage.haskell.org/package/jenga-0.1.1.0 (ErikDeCastroLopo)
+16:29:16 <Eduard_Munteanu> EvanR, there's a TBChan
+16:30:49 <EvanR> TBQueue ?
+16:31:09 <Eduard_Munteanu> Oh, that. I haven't looked at this in a while.
+16:33:04 <monochrom> Yes, TChan will pile up in memory.
+16:35:36 <Eduard_Munteanu> I'm not exactly sure when you'd use a TChan rather than a TMVar. If readers are slow on average, you run the risk of piling up much like a memory leak.
+16:36:36 <Eduard_Munteanu> Contention, on the other hand, seems a better outcome.
+16:37:32 <Eduard_Munteanu> And if the readers are just slow at times, then you could do better with a TBQueue.
+16:41:05 <xcmw> What does "installed package info from too old version of Cabal (key"
+16:41:06 <xcmw> field does not match id field)
+16:41:14 <xcmw> mean?
+16:41:35 <glguy> Sounds like you installed a package using a version of Cabal that was too old
+16:42:13 <EvanR> Eduard_Munteanu: consider if you will the read is a dsp callback which runs maybe once per 10ms and takes as much as is in the Chan then continues generating sound
+16:43:13 <Eduard_Munteanu> You might still want some bound on that, though.
+16:43:18 <EvanR> if it was an MVar then it would only ever be able to do one command per buffer period. meanwhile the threads generating sound are blocked and may miss conditions that would be nice to play sound because of
+16:44:12 <EvanR> if thats the worst case scenario, just missing sound, yeah bound might be a good idea
+16:44:32 <EvanR> but in that case theres bigger problems if the audio callback is too slow
+16:45:16 * EvanR solves problems by showing the problem would involve a bigger problem
+16:45:20 <EvanR> would imply
+16:46:07 <ReinH> Reads and writes aren't always correlated.
+16:46:19 <ReinH> There are applications where both vary over time.
+16:46:38 * hackage tmapchan 0.0.2 - An insert-ordered multimap (indexed FIFO) which consumes values as you lookup  https://hackage.haskell.org/package/tmapchan-0.0.2 (athanclark)
+16:46:41 <ReinH> If they are correlated, a TMVar might be nice.f
+16:47:11 <ReinH> If not, a channel might be nice but then you also need to consider whether that channel is likely to overflow based on how frequently you read and write, etc.
+16:48:06 <EvanR> Eduard_Munteanu: consider a loop that checks for pending events and also is rendering/waiting for vsync (which sucks, but thats SDL)... if the port to dump the events were an MVar that is blocking, then the main loop is blocked on rendering graphics
+16:48:24 <EvanR> blocked NOt rendering graphics
+16:48:44 <ReinH> You're only considering use cases where reads are correlated with writes. There are other use cases.
+16:49:00 <EvanR> i dont know what you mean
+16:49:00 <ReinH> Like EvanR's examples.
+16:49:03 <EvanR> oh
+16:49:37 <EvanR> and if you dont render graphics, theres a side effect on OSX that the window doesnt really respond, mucking up events
+16:49:41 <ReinH> Was talking to Eduard_Munteanu
+16:49:42 <Eduard_Munteanu> I'm sure TMVar is pretty bad in some cases, but why would you use an unbounded channel instead of a bounded one?
+16:50:08 <EvanR> is this kind of like why do you use a list and not a bounded list?
+16:50:30 <EvanR> or Integer and not 64-bit integer
+16:50:47 <Tuplanolla> Stop inspiring me to question everything.
+16:51:41 <ReinH> Sometimes you just care that usaeg patterns provide a practical upper bound
+16:52:07 <ReinH> Same reason you use Int instead of integer
+16:52:21 <ReinH> You are confident it won't overflow.
+16:52:23 <EvanR> i use Int because its what the prelude prefers
+16:52:30 <ertes> in this case there is also the aspect of safety
+16:52:31 <EvanR> i never really know if it will overflow
+16:52:40 <EvanR> which is why i made longSleep :: Integer -> IO ()
+16:53:18 <EvanR> if Int clamped at intMax thatd be another story
+16:53:24 <ReinH> it can be hard to know what a reasonable upper bound would be.
+16:53:40 <EvanR> yes i was asking what a reasonable upper bound for the score would be
+16:53:44 <ertes> in many cases it's not too important to select a good upper bound, but merely to have one
+16:53:47 <EvanR> assuming Integer and imposing a bound
+16:54:17 <ertes> if you think that a typical load will use 10 items, perhaps set the bound to 1000 or 10000
+16:54:19 <EvanR> ertes: sounds kind of like CEO speak, just make a decision immediately
+16:54:23 <EvanR> doesnt matter what it is
+16:54:59 <EvanR> i actually dont care as long as the failure mode is understandable and acceptable
+16:55:07 <ertes> EvanR: it depends on *why* you're using a bounded channel…  for example you might use it to prevent denial of service attacks
+16:55:35 <Eduard_Munteanu> The bound on Integer/Int is usually much more difficult to hit if you're careful. A TChan on the other hand seems to run the risk of using up all memory in a few minutes, hours or days, depending on the task.
+16:55:53 <ertes> in which case it's not too important what the bound is, as long as there is one that can be reached
+16:56:27 <EvanR> thats a good point, if you dont expect to have pretty much anything piling up in memory, a bounded channel that crashes everything would at least indicate your bugs
+16:56:47 <EvanR> er performance bugs
+16:57:28 <hpc> clearly this is what was meant by "640kb of ram is enough for anyone"
+16:58:08 * hackage zip-stream 0.1 - ZIP archive streaming using conduits  https://hackage.haskell.org/package/zip-stream-0.1 (DylanSimon)
+16:58:22 <EvanR> on a related note. if i am waiting on a list of asyncs, and one crashes, how can i tell which one?
+16:58:28 <EvanR> i get an Async a back... but...
+16:58:37 <EvanR> Eq ?
+16:58:53 <ertes> EvanR: there is waitCatch
+16:59:14 <ertes> or rather waitCatchSTM in this cae
+16:59:16 <ertes> case
+16:59:16 <EvanR> talking abou waitAnyCatchCancel
+16:59:38 <ertes> you can use waitCatchSTM with (<|>)
+16:59:40 <EvanR> the exception probably wont indicate where its from
+17:00:39 <ertes> @let import Control.Concurrent.Async
+17:00:39 <Eduard_Munteanu> If you're constructing the exception handler when you're creating the async, then you pretty much have everything at hand.
+17:00:40 <lambdabot>  .L.hs:49:1: error:
+17:00:40 <lambdabot>      Control.Concurrent.Async: Can't be safely imported!
+17:00:40 <lambdabot>      The package (async-2.1.1) the module resides in isn't trusted.
+17:01:14 <EvanR> Eduard_Munteanu: so do Eq tests against all the asyncs... ok
+17:01:46 <Eduard_Munteanu> EvanR, no, I mean if there's some data associated with an async, it can probably be associated with an exception handler too
+17:01:53 <ReinH> EvanR: this is yet another use case for the (a,) traversable!
+17:01:55 <EvanR> i dont see how
+17:02:13 <ReinH> Tag your async with a label and then traverse
+17:02:38 <EvanR> how does traverse factor into this
+17:02:43 <EvanR> waitAnyCancel :: [Async a] -> IO (Async a, a)
+17:02:51 <EvanR> waitAnyCatchCancel :: [Async a] -> IO (Async a, Either SomeException a)
+17:03:13 <Eduard_Munteanu> Waiting on multiple asyncs is probably just a traversal over the list of asyncs.
+17:03:33 <EvanR> i uh...
+17:03:39 <Eduard_Munteanu> Oh, wait, no, it's wait*Any*
+17:06:05 <ertes> :t asum . zipWith (\k c -> (,) k <$> Control.Concurrent.Async.waitCatchSTM c) [0..]
+17:06:07 <lambdabot> (Enum a, Num a) => [Control.Concurrent.Async.Async a1] -> GHC.Conc.Sync.STM (a, Either SomeException a1)
+17:06:09 <ReinH> Async (String, a)
+17:06:19 <ertes> EvanR: ^ some inspiration
+17:06:32 <EvanR> Async (String,a), it wont tell you the String if it crashes
+17:07:28 <EvanR> trying to see if the STM makes sense
+17:07:33 <ReinH> You end up with an IO Async(String, Either
+17:07:37 <ReinH> Er sorry
+17:08:08 <ertes> EvanR: and yes, i'm basically doing the ((,) a) traversal there =)
+17:08:42 <ertes> :t asum . zipWith (\k c -> traverse (k, Control.Concurrent.Async.waitCatchSTM c)) [0..]
+17:08:43 <lambdabot> error:
+17:08:43 <lambdabot>     • Couldn't match expected type ‘a -> f b’
+17:08:43 <lambdabot>                   with actual type ‘(Integer,
+17:08:59 <ertes> :t asum . zipWith (\k c -> sequence (k, Control.Concurrent.Async.waitCatchSTM c)) [0..]
+17:09:00 <lambdabot> (Enum t, Num t) => [Control.Concurrent.Async.Async a] -> GHC.Conc.Sync.STM (t, Either SomeException a)
+17:09:08 <glguy> you'd need to pair up a label with each Async, and then wait on them individually so you could tell which ones specifically failed
+17:09:54 <ReinH> You end up with a (label, Either SomeException a)
+17:10:17 <EvanR> oh you do the wait in another async
+17:10:23 <EvanR> or many
+17:10:23 <ReinH> Which tells you either which succeeded or which failed.
+17:10:32 <ertes> that's what this code is doing:  takes a list of asyncs, assigns each a unique index, then returns the first one that is stopped, along with its index…  of course in practice you probably have your own data structure with indices, so the zipWith would turn into an fmap
+17:10:52 <EvanR> i get it
+17:11:17 <ReinH> Sorry I couldn't be more helpful, I don't have GHC on this iPad.
+17:11:36 <Eduard_Munteanu> How about.....    forM_ xs $ \x -> async $ handle (\(_ :: SomeException) -> return (Left x)) (action x)
+17:11:42 <ReinH> "I left my GHC in my other pants"
+17:12:03 <ertes> Eduard_Munteanu: uh, don't do that…
+17:12:35 <Eduard_Munteanu> Nevermind, that won't work, there's no failure anymore.
+17:14:08 * hackage pinch 0.3.1.0 - An alternative implementation of Thrift for Haskell.  https://hackage.haskell.org/package/pinch-0.3.1.0 (abhinav)
+17:14:26 <ertes> a few years ago i had the pleasure to work on a PHP project, where the original author had written a database abstraction based on PDO…  he had turned on exceptions, and all queries were done using one particular function…  i ran into some really weird bugs that were impossible to explain, so i looked into his abstraction
+17:14:41 <Eduard_Munteanu> Hmm... there's an Ord instance for Async.
+17:14:56 <ertes> turns out he was catching all exceptions and turning them into 'null' returns
+17:15:42 <EvanR> nice
+17:15:55 <ertes> Eduard_Munteanu's example reminded me of that experience =)
+17:16:00 <EvanR> i wonder if theres a way in PHP to mask all crappy features ;)
+17:17:34 <ertes> you know, on the rare occasion that PHP actually does do the right thing (using exceptions instead of null), programmers go out of their way to restore stupid
+17:20:17 <ertes> Eduard_Munteanu: i wish more of those things had Ord instances
+17:20:24 <ertes> IORef in particular
+17:20:37 <ertes> but i do realise that it's difficult to have that
+17:23:11 <Eduard_Munteanu> I wonder if that Cloud Haskell project is still alive.
+17:23:20 * Eduard_Munteanu looks
+17:23:44 <Eduard_Munteanu> They wanted a ton of stuff on serializing internal things like IORefs and such.
+17:24:29 <ertes> they are still releasing libraries…  last network-transport release is from february
+17:26:18 <ertes> but i think RPC is a misguided approach to distributed concurrency, at least as the low-level abstraction
+17:27:31 <Eduard_Munteanu> In that, ideally, code should be able to move around just like data?
+17:27:47 <ertes> in that code shouldn't move around at all
+17:28:19 <ReinH> I never understood why they went with that approach
+17:28:25 <Eduard_Munteanu> Hm.
+17:28:35 <ReinH> Not only is it impossible, it wouldn't be good if it were possible.
+17:28:37 <ertes> why not just pass JSON/BSON values around?
+17:28:53 <ertes> a simple message-passing architecture
+17:29:08 <Eduard_Munteanu> Well, you can already do that in Haskell.
+17:29:31 <ReinH> Maybe a typed protocol would be good, but yes.
+17:29:36 <ertes> yes, but you still need support libraries, and they actually provide one:  network-transport
+17:29:58 <ertes> distributed concurrency is not as much about communication as it is about discovery and failure tolerance
+17:30:08 <ReinH> What you need for distributed systems are primitives like consensus and failure detection.
+17:30:40 <ertes> yeah…  cloud haskell seems to be focussing on the wrong things
+17:30:44 <ReinH> Or gossip, etc.
+17:30:58 <ertes> RPC is utterly hard to program, and in the end it's perhaps the least interesting component
+17:31:17 <ReinH> There are a variety of cool things that could be implemented, lego blocks for building distsys
+17:31:20 <Eduard_Munteanu> I don't think abstracting away machine boundaries is all useless.
+17:31:48 <ertes> Eduard_Munteanu: but it is, because you have failure
+17:31:50 <ReinH> Instead they chose to attack an intractable problem that wasn't even the right problem.
+17:32:33 <ertes> Eduard_Munteanu: you *have to* think of RPC calls as glorified message passing anyway, because you can never assume that an RPC call actually went through
+17:32:40 <ReinH> Something like riak-core is a much better approach
+17:34:46 <ReinH> I mean, links are one of the basic concepts in distsys, but *networks* are not.
+17:35:26 <Eduard_Munteanu> For example, I think it would be nice if you could replace a DBMS having a query language with something that was able to answer queries written in a native language. Submit code, wait for completion, retrieve results.
+17:35:32 <ReinH> it's just links
+17:35:49 <ertes> Eduard_Munteanu: use a DSL
+17:36:12 <mekeor> what is this called?: "instance FooClass BarType where data FooType BarType = ..."
+17:36:22 <ertes> mekeor: an associated type
+17:36:47 <Eduard_Munteanu> Or associated data family.
+17:36:52 <mekeor> and what is this called?: "someFunction SomeConstructor{..} = ..."
+17:37:04 <Eduard_Munteanu> Record wildcard.
+17:37:45 <ertes> and what is this called?  "let 2 + 2 = 5 in 2 + 2"
+17:38:26 <mekeor> #LearningVocabulary
+17:38:46 <ReinH> A mistake.
+17:40:53 <monochrom> user-definable (+)
+17:41:36 <Eduard_Munteanu> ertes, using a DSL isn't much of an abstraction after all, and at least theoretically, serializing some closures should be tractable, so why not?
+17:41:39 <ertes> DING DING DING!  weeeeee have aye winneeeeeeeeeeeeeeeeeeer!
+17:42:00 <EvanR> im using STM in anger add features to the program by adding more threads. without even getting the game going, i have 4 threads. with more to come. now i am paranoid that any particular thread involved with the outside world will crash
+17:42:14 <EvanR> in order to add *
+17:42:51 <ertes> Eduard_Munteanu: because it's difficult to separate those "some closures" from the rest in a reasonably convenient way =)
+17:43:50 <ertes> Eduard_Munteanu: have you tried to use distributed-process?  it's pure magic, worse than anything yesod has ever thrown at me in the past
+17:44:02 <Eduard_Munteanu> Nope, I should try it.
+17:44:49 <EvanR> actually 6
+17:45:38 <Eduard_Munteanu> Make every bullet a thread!
+17:46:17 <ertes> EvanR: perhaps you're looking for a more controlled approach: coroutines instead of preemptive threads
+17:46:54 <Eduard_Munteanu> Resolve to run on an embarassingly-parallel computer. Buy one. Realize it's much more worth mining bitcoins with it. Get rich!
+17:54:12 <EvanR> ertes: im exploiting shared variables, TVars and the autokilling of threads when a sibling dies, async
+17:54:27 <EvanR> is there something like that using pure coroutines
+17:54:59 <EvanR> Eduard_Munteanu: every bullet a thread... now that would be marketing gold
+17:55:25 <ertes> EvanR: well, there is the good old automaton arrow =)
+17:55:40 <EvanR> yeah i just went through 5 kinds of things like that
+17:56:03 <EvanR> not sure if any are exactly like automaton
+17:56:19 <ertes> one thread for each bullet would actually be a reasonable approach with that approach
+17:56:24 <EvanR> but M i o = M (i -> (o, M i o)) kind of stuff ended up being so much more work
+17:56:33 <ertes> wow…  that sounds terrible
+17:56:41 <ertes> one thread for each bullet would actually be a reasonable approach with that abstraction
+17:57:30 <ertes> well, the "threads" in M are actually just M-actions
+17:58:04 <ertes> communication between threads is done via (.) and the Applicative/Arrow combinators
+17:58:08 * hackage postgrest-ws 0.3.0.0 - PostgREST extension to map LISTEN/NOTIFY messages to Websockets  https://hackage.haskell.org/package/postgrest-ws-0.3.0.0 (diogob)
+17:58:29 <EvanR> and the steps would need to be very numerous to get responsiveness
+17:58:41 <EvanR> and most of the time they do nothing, except allocating more of the same 
+17:59:11 <EvanR> ertes: pretty skeptical
+18:00:03 <ertes> i think you can also have a simple Free-based approach to voluntary scheduling
+18:00:25 * ertes goes to experiment
+18:00:38 <EvanR> you can create M's from monads or whatever
+18:01:03 <EvanR> not going to save any up front work or make it more efficient
+18:01:43 <EvanR> i found 99% of my work was working on the communication technolo, the pipes and the messages themselves
+18:01:53 <EvanR> rather than the actual program
+18:04:07 <EvanR> like, even if the abstractions were already made  for me with a lib
+18:04:23 <ertes> a Free-based voluntary-scheduling approach would be much more efficient and more predictable than haskell threads
+18:04:46 <EvanR> voluntary scheduling? 
+18:04:57 <EvanR> now it sounds like i am doing 99% of my work writing an OS
+18:05:42 <EvanR> i do plan to make the gameplay predictable, certain stuff does not need to be deterministic, because it cant be anyway because real life
+18:05:48 <EvanR> the stuff near IO
+18:06:19 <EvanR> your programs scheduling by the OS is not predictable
+18:07:15 <Cale> It is nice if you can make it deterministic beyond a given point though -- i.e. the output you get will be a pure function of the sequence of timestamped input events.
+18:08:10 <EvanR> thought about that, but then, what real input events you getare at commpletely unpreditable times
+18:09:42 <thang1> EvanR: what input events are you getting? Reading up on the convo it sounds like this is a game or something?
+18:09:49 <EvanR> yes i went through the cool reactive pure lazy streams of timestamped occurrences
+18:10:10 <EvanR> and it wasnt coming even close to helping me get this thing done
+18:10:58 <ertes> EvanR: it's a form of concurrency, where each thread is in control until it 'yield's…  there is no actual scheduler, but control is passed explicitly
+18:11:02 <thang1> What if rather than timestamping things absolutely, things were timestamped relatively? (assuming this is user input?)
+18:11:26 <EvanR> ertes: right.. so then im figuring out how to arrange my stuff to run with each other
+18:11:38 <EvanR> i need to be thinking how everything else is using the processor
+18:12:18 <EvanR> thang1: yes youd need many levels of this for it to make any sense at all
+18:12:34 <EvanR> otherwise youre worrying about a global clock
+18:13:21 <EvanR> and you really need to be able to write code for features independent of how everything else will work
+18:13:49 <thang1> Right. I'm just thinking about fourier transforms at the moment, which is what prompted that; if you could somehow get every separate thing to behave where the timestamps are relative, you can pick out the global pattern with a FT and be able to figure out where everything connects.
+18:13:58 <thang1> I'm not sure that's even remotely applicable to your application, however
+18:14:38 <EvanR> example, a large number of parts wont care about time at all, so having to deal with it everywhere would be a drag
+18:15:22 <ertes> EvanR: i'll have an example ready in a few minutes
+18:15:28 <thang1> and the benefits would be likely negligible if you had to include all that overhead everywhere, wouldn't it?
+18:15:41 <EvanR> thang1: input events http://lpaste.net/355491
+18:16:08 * hackage tmapchan 0.0.3 - An insert-ordered multimap (indexed FIFO) which consumes values as you lookup  https://hackage.haskell.org/package/tmapchan-0.0.3 (athanclark)
+18:16:33 <thang1> EvanR: and the point of async input events is to have true multiplayer working correctly, right? Without blocking the entire application to process things?
+18:16:49 <EvanR> thats not really an issue
+18:16:59 <EvanR> the whole thing would not be blocked in any case
+18:17:13 <thang1> Oh, okay. What's the main goal behind adding the concurrency in, then?
+18:18:07 <EvanR> well, you already have concurrency because of the audio callback, so its not like you can remove it completely if you watned
+18:19:07 <thang1> Right, so basically having to deal with concurrency in one part of the program, you want to see if you can seamlessly add it in other places as well?
+18:20:01 <EvanR> theres a lot to say about this, but im finding that its easy to add more features and components, and control lifetime of objects if they are just other threads
+18:20:21 <EvanR> and each one can be using whatever framework it wants 
+18:20:40 <EvanR> automaton, a dumb loop, FRP, whatever
+18:21:14 <thang1> Makes sense. Probably a very similar motivation to why game studios always end up rolling their own libraries and engines for everything :p
+18:21:25 <EvanR> each part doesnt need to figure out how to fit into the latest experimental framework, and perhaps need to modify the framework to work
+18:23:12 <EvanR> the total amount of code collapsed in the process...
+18:23:32 <EvanR> i still want to compare my old ways with what ertes is cooking up
+18:25:14 <EvanR> for the piece which plays the actual game, replayable input would be nice. but thats one of like 8 screens
+18:53:02 <istvan> I have an list of "assembly" Instructions which I want to map to a bit array. Each instruction's bit array is 128 bits long. What is the best datatype to represent it?
+18:53:40 <Lokathor> i wanna be an open source contributer
+18:53:48 <Lokathor> but i also wanna eat cheesy popcorn
+18:54:01 <EvanR> Word128 and a Bits instance probably
+18:54:51 <ertes> EvanR: https://gist.github.com/esoeylemez/bb2c9c69770516d8b2b229c59074212f
+18:55:02 <EvanR> istvan: maybe https://hackage.haskell.org/package/largeword
+18:55:47 <ertes> EvanR: this includes only the bare essentials, but you can easily add communication and management (e.g. killing) abstractions on top of this
+18:56:36 <ertes> EvanR: for communication all you really need is (Coroutine (StateT MyChannels m))
+18:56:57 <EvanR> how do you manage the lifetime of channels
+18:57:15 <ertes> one way would be to bind channels to threads
+18:57:34 <EvanR> and bind thread life time to each other, as in unix
+18:57:55 <EvanR> so a couple of container metaphors
+18:58:16 <istvan> EvanR, how do I use Bits and LargeWord?
+18:58:30 <EvanR> istvan: theres a type in there Word128
+18:58:40 <EvanR> look in Data.Bits docs for what you can do 
+18:58:52 <EvanR> bitwise ops
+18:59:05 <istvan> so I can use Data.Bits to manipulate the Word128?
+18:59:09 <EvanR> yes
+18:59:14 <istvan> ah, perfect. Thanks!
+18:59:23 <EvanR> ertes: and the data and indices for this is in a bunch of IntMaps ?
+18:59:51 <EvanR> and the type safety is provided with some phantom types and ghc is convinced with unsafeCoerce?
+19:00:51 <EvanR> does Hugs have some kind of cooperative version of its concurrency?
+19:03:43 <ertes> EvanR: sorry, got disconnected…  the execution is split into frames, and every frame consists of running a step of the main thread, then running a step of each subthread (there is no hierarchy, just one main thread and many subthreads)
+19:04:12 <EvanR> did you see my last questions before i ask more
+19:04:21 <ertes> an IntMap of all threads goes into the frame, and out comes a new IntMap with updated threads
+19:04:54 <ertes> with dead threads removed, new threads added, etc.
+19:05:07 <EvanR> and you run this how fast?
+19:05:20 <EvanR> sample rate is 44100 samples per second
+19:05:23 <ertes> that's up to you
+19:05:56 <EvanR> im having a hard time thinking this is more efficient than ghc threads
+19:06:03 <ertes> i'd expect the main bottleneck of this to be the IntMap
+19:06:24 <ertes> let me check
+19:06:29 <EvanR> also much time would be spent sleeping between vsyncs
+19:06:54 <EvanR> unless you are ticking time at something like 1 frame per millisecond to get responsiveness
+19:07:00 <EvanR> mostly wasting cpu
+19:07:39 <EvanR> with just this there doesnt seem to be much room for getting sleep
+19:14:02 <ertes> yes, this is cooperative multi-threading…  you can't really wake up threads in response to events, although that could certainly be added as a feature
+19:14:23 <ertes> the main feature of this approach is that communication can go via StateT, which is fast and predictable
+19:14:37 <EvanR> its fast?
+19:15:03 <EvanR> not sure im understand "going through StateT"
+19:15:22 <ertes> so i just created a little fork bomb using this:  recursively spawn 2^20 threads that each subtract 1 from the current state, while the main thread waits for the state to become 0
+19:17:14 <EvanR> uh. any?
+19:17:21 <EvanR> er, and?
+19:17:59 <ertes> real 2.758  user 2.665  krnl 0.086  cpu% 99%  mem 157m  ./test
+19:18:16 <ertes> now let me try the same with MVar and haskell threads
+19:18:43 <EvanR> with that number of threads, it seems like were getting into some interesting and unrealistic problems
+19:18:54 <EvanR> like with 100 threads, you wouldnt care about
+19:21:48 <EvanR> there are a lot of missing features here, but i invite you to do all this engineering! ;)
+19:21:58 <EvanR> i could use it as part of my program perhaps
+19:23:55 <ertes>   real 12.751  user 9.543  krnl 4.143  cpu% 107%  mem 2642m  ./test2
+19:23:56 <ertes>   real 6.882  user 15.886  krnl 3.498  cpu% 281%  mem 2076m  ./test2 +RTS -N4
+19:24:09 <ertes> EvanR: ^ RTS-based version
+19:24:22 <EvanR> right a totally different situation
+19:24:27 <MarcelineVQ> there's a 1m thread benchmark somewhere around here..
+19:24:39 <MarcelineVQ> skynet
+19:24:50 <ertes> i'm pleasantly surprised that the parallel version was actually faster…  i did not expect that =)
+19:24:52 <MarcelineVQ> 6s is about right
+19:25:15 <MarcelineVQ> oh for their first test, I wonder which one matches up with what you're doing
+19:25:23 <thang1> The math on how 15.9 seconds + 4 seconds maps into 6.9 seconds makes my brain hurt slightly
+19:27:24 <ertes> BTW, i deliberately went with a fork bomb in both variants, because threads spawing other threads all over the place is the behaviour you would expect to see in something as dynamic as a video game =)
+19:27:40 <ertes> forker 0 = modifyMVar_ var (pure . pred)
+19:27:41 <ertes> forker n = replicateM_ 2 (forkIO (forker (n - 1)))
+19:27:45 <EvanR> i am not planning on doing as much
+19:27:59 <EvanR> at most 100 things for managing all the moving parts
+19:28:07 <EvanR> at a time
+19:28:16 <ertes> and in the cooperative variant:
+19:28:16 <EvanR> with extended lifetimes
+19:28:23 <ertes> forker 0 = modify pred
+19:28:23 <ertes> forker n = replicateM_ 2 (fork (forker (n - 1)))
+19:28:32 <ertes> same thing, except using StateT for communication instead of an MVar
+19:28:54 <EvanR> this is not the one-thread-per-bullet or one thread per mobile thing
+19:29:04 <ertes> also no need to care about things like atomicity in a cooperative setting
+19:29:48 <ertes> actually now i'm curious how well an IORef would do =)
+19:31:35 <ertes>   real 5.406  user 4.827  krnl 0.584  cpu% 100%  mem 2725m  ./test
+19:31:41 <ertes>   real 6.558  user 16.710  krnl 3.277  cpu% 304%  mem 2560m  ./test2 +RTS -N
+19:32:07 <ertes> still much worse memory, but CPU isn't looking too bad
+19:32:35 <EvanR> i dont even know if were on the same page
+19:32:42 <EvanR> the goal is to NOT use cpu
+19:32:55 <ertes> EvanR: i'm just playing around
+19:32:56 <EvanR> and be mostly sleeping waiting for the next event
+19:33:16 <EvanR> and to be able to write code for stuff
+19:34:03 <ertes> EvanR: one advantage of this approach compared to the automaton-based one is that it's actually possible to wake up certain threads in response to certain events in logarithmic time
+19:34:25 <ertes> e.g. run until all threads are sleeping, but keep track of *why* they are sleeping
+19:34:43 <ertes> then wait for events and wake up the relevant threads
+19:35:13 <EvanR> another note, STM doesnt just provide the isolation from race conditions, it also lets you sleep until something you were looking at changes
+19:35:28 <EvanR> thats one of two things i was saying is making this code much smaller
+19:35:38 <EvanR> the other one being auto thread killing
+19:35:51 <EvanR> (and then var/chan garbage collection)
+19:36:25 <EvanR> and i implemented a pure version of that once, basically STM
+19:36:33 <EvanR> lots of code, and IntMaps
+19:36:36 <ertes> GC is possible with this one, but you can't use StateT in that case…  you would have to use an IORef
+19:37:00 <ertes> i would expect this to be much faster than STM, while providing the same features
+19:37:24 <ertes> caveat: you need to yield, and you can't take advantage of multiple cores
+19:37:30 * EvanR looks at the tower of things ertes suggested 
+19:38:00 <c_wraith> it would be interesting to have a pessimistic version of STM available.  Even more interesting if it could switch dynamically depending on contention..
+19:38:20 <ertes> not saying you should do any of this, but if you did, i would expect the result to be quite decent in terms of both performance and efficiency
+19:39:19 <EvanR> of the handful of issues i brough up, i serious dont think you addressed some of them
+19:39:44 <ertes> EvanR: unless i missed some i think i did
+19:40:07 <EvanR> ill just bring up some more then
+19:40:28 <EvanR> can you do IO ?
+19:40:33 <Lokathor> when mixing STM and IO, the answer is to have STM produce an IO action as a result of the transaction that you then immediately run, right?
+19:40:47 <ertes> EvanR: the example i linked has IO =)
+19:41:05 <EvanR> so it yields waiting for that particular IO to come back
+19:41:11 <ertes> Lokathor: at least that's the most convenient approach i have found
+19:41:16 <ertes> :t join . atomically
+19:41:18 <lambdabot> error:
+19:41:18 <lambdabot>     Variable not in scope: atomically :: a1 -> m (m a)
+19:41:25 <ertes> :t join . Control.Monad.STM.atomically
+19:41:26 <lambdabot> GHC.Conc.Sync.STM (IO a) -> IO a
+19:41:41 <ertes> EvanR: no, it just runs the IO action
+19:41:53 <EvanR> blocking everything?
+19:42:00 <ertes> EvanR: yes
+19:42:03 <EvanR> oh its StateT over IO
+19:42:13 <ertes> yeah, basically
+19:42:13 <EvanR> that settles it, i hate this
+19:42:16 <ertes> not even that
+19:42:19 <ertes> it's just IO
+19:42:32 <ertes> StateT is already optional
+19:43:21 <ertes> EvanR: think of conduit, iteratees, machines, pipes, etc. as special cases of this…  it's just coroutines, hence the name
+19:43:55 * EvanR looks at the acre of graveyard of not-IO controlled Os-like runtimes which resulted from trying to come up with an engine
+19:44:04 <EvanR> and this is all that, even more, plus IO
+19:44:13 <ertes> the IO is optional, too
+19:44:41 <EvanR> this is like the most possible work you could possibly do for a haskell program, unless someone already wrote it, and if they did, id love to see the haddock introduction explaining why
+19:44:52 <ertes> Coroutine (State Integer)  -- multiple threads acting on a shared state of type Integer
+19:47:00 <ertes> this particular monad has no IO anywhere…  the result is a pure value
+19:48:00 <EvanR> i should make a list of all the things in IO that i would want
+19:49:45 <EvanR> and then you say by reimplementing them all in pure code it will be faster
+19:49:56 <EvanR> they should just get rid of IO ;)
+19:51:31 <ertes> i would put it this way:  in some applications it would be really great if you could use threading, but you probably don't want to use preemptive threading
+19:52:16 <ertes> and haskell is the kind of language that makes it super-easy to create a cooperative threading framework =)
+19:53:20 <thang1> Do you think someone could make a generic library for this sort of thing?
+19:54:05 <thang1> Because it would be great to have easy access to different types of threading, concurrency, and parllelism strategies and the more strategies that are given in nice libraries...
+19:54:25 <thang1> Or is your sort of solution too hardwired into how EvanR's game is designed, ertes?
+19:54:27 <magiccat> hi
+19:54:39 <magiccat> i am in a difficult situation
+19:54:41 <magiccat> http://prntscr.com/f7kt3w 
+19:54:42 <ertes> thang1: sure…  just copy/paste my code =)
+19:54:52 <ertes> thang1: the only feature i would add is wake-up code
+19:54:56 <magiccat> it's looked like this for almost a month and i need help
+19:55:15 <ertes> thang1: so you can have event-based thread wake-ups instead of waking everyone up every time
+19:55:15 <MarcelineVQ> magiccat: while I find that hilarious, it's not appropriate here :(
+19:55:27 <MarcelineVQ> @ops
+19:55:27 <lambdabot> Maybe you meant: pl oeis docs
+19:55:30 <MarcelineVQ> lol
+19:55:34 <thang1> What joke is that supposed to be anyway?
+19:56:24 <MarcelineVQ> magiccat: Did you have a question related to the Haskell programming language?
+19:56:56 <Xnuk> @ where ops
+19:57:09 <ertes> qwhere ops
+19:57:30 <thang1> (\q -> op q)
+19:58:10 <EvanR> thang1: the code there, plus "wake up" is not nearly enough for my application. but coroutines is widely applicable to many other programs im sure
+19:58:41 <EvanR> any free monad is really just kind of coroutine
+20:00:01 <EvanR> and i may not have made this point completely, something like -cooperative at the linker stage which magically made "yield" in Control.Concurrent do anything, instead of writing a towering IO replacement in pure code would make way more sense
+20:00:27 <EvanR> i mean, link to a cooperative rts instead of the usual one
+20:00:58 <EvanR> not that that makes things any more deterministic
+20:01:25 <EvanR> see javascript
+20:03:59 <magiccat> hi all
+20:06:14 <magiccat> Hi are any of you freenode staff?
+20:06:31 <magiccat> there is this guy lorax that has been making sexual threats toward me
+20:07:37 <glguy> magiccat: No, this is the wrong channel for that
+20:08:44 <magiccat> what is the right channel?
+20:08:52 <glguy> I don't know, but it's not this one
+20:09:05 <pharaun> there should be an ops/support channel of sorts
+20:09:09 <pharaun> maybe check freenode's website
+20:09:17 <pharaun> it outta indicate then you can go there
+20:09:34 <magiccat> ok thank you pharaun thank you very much
+20:12:32 <magiccat> there is a man that is touching me in my naughty places when i go to soccer practice and i don't know what to do. It feels bad but i like it and i am confused, his name is lorax on this server 
+20:12:50 --- mode: ChanServ set +o glguy
+20:12:51 --- mode: glguy set +b *!*@104.129.28.10
+20:12:51 --- kick: magiccat was kicked by glguy (offtopic)
+20:12:55 <MarcelineVQ> you need to switch the gambit when the play doens't happen
+20:21:17 <Lokathor> how often should one worry about StablePtr vs Ptr?
+20:23:26 <glguy> Lokathor: These two solve different problems
+20:24:29 <Lokathor> Foreign.StablePtr says that a normal Ptr can be moved around during garbage collection? What's that about?
+20:25:43 <glguy> No, it isn't comparing itself to a normal Ptr
+20:25:47 <glguy> where Ptr is from Foreign.Ptr
+20:26:07 <Lokathor> oh
+20:26:32 <glguy> The point is that garbage collection will move Haskell values around in memory, so it wouldn't be appropriate to ask for the memory location of any particular Haskell value
+20:26:57 <glguy> but perhaps you wanted to pass an opaque reference to a Haskell value out to some C code via the FFI?
+20:27:20 <glguy> You can use a StablePtr to give you something that looks like a C void*
+20:27:58 <glguy> and then assuming you statically know what type the value was later related to one of these StablePtrs, you can dereference it and get the Haskell value again
+20:28:35 <glguy> Ptr is useful for refering to C things from Haskell, StablePtr is useful for refering to Haskell things in from C
+20:30:08 * hackage yaml 0.8.22.1 - Support for parsing and rendering YAML documents.  https://hackage.haskell.org/package/yaml-0.8.22.1 (MichaelSnoyman)
+20:30:23 --- mode: glguy set -o glguy
+20:30:47 <Lokathor> glguy, hmm. Well at the moment all the pointers i need are to send Haskell data off to C, but then the C code copies it and doesn't keep the pointer
+20:31:08 <glguy> StablePtrs are opaque to C, so they won't help with that
+20:31:31 <Lokathor> yeah the gl library uses Ptr anyway
+20:31:42 <Lokathor> but i was mostly wondering what was up with the Stable variant
+20:32:21 <c_wraith> Ptr is mostly appropriate for marshalling.  StablePtr is for passing something to C that will be sent to a Haskell callback.
+20:32:22 <EvanR> here is what i eventually came up with for the "spawn a bunch of asyncs with labels and tell me who crashed later" http://lpaste.net/355495
+20:32:48 <EvanR> since i didnt understand anyones slick traversals
+20:32:49 <ertes> Lokathor: i more interesting question with gl is Ptr vs. storable vectors
+20:34:05 <Lokathor> ertes, well, a storable vector can give you a Ptr to its values
+20:34:11 <Lokathor> at least, one of those many vector types can do that
+20:35:03 <Lokathor> the C "GLM" library doesn't seem to have a Haskell version directly, but i was pointed at the "linear" package, which seems to do similar things
+20:36:16 <EvanR> works...
+20:36:20 <ertes> Lokathor: yes, i'd use 'linear'
+20:36:40 <EvanR> one day ill figure out how/why the sdl audio thread can raise an exception in the main thread, but at least it does
+20:36:41 <MarcelineVQ> consider also `linear`
+20:37:35 <thang1> has anyone mentioned >>linear<< yet?
+20:38:41 <EvanR> `linear` 'linear' ′linear′ 'linear'
+20:39:12 <c_wraith> > cycle "linear "
+20:39:14 <lambdabot>  "linear linear linear linear linear linear linear linear linear linear linea...
+20:39:26 <Lokathor> c_wraith, that doesn't perpetuate the joke though
+20:39:39 <Lokathor> gotta quote it differently each time :P
+20:39:42 <MarcelineVQ> without knowing quite what you're after, consider hmatrix too
+20:40:51 <Lokathor> GLM is "openGL Math", it just does matrix and vector stuff, with names somewhat oriented to things you'd want to do in graphics
+20:41:01 <Lokathor> so any of the matrix and vector things should be okay
+20:46:09 <thang1> Yeah. If it's just matrix and vector stuff you can do it all by hand, the names of the functions will just be different
+20:50:37 <Lokathor> go go aggressive inlining and name aliasing!
+20:56:33 <ertes> glm is also conveniently imperative, and makes it makes you pay for actual C function calls
+21:05:27 <wolfsif> question regarding foreign functions and unsafePerformIO:
+21:06:14 <wolfsif> let's say you want to use some foreign function f that relies on external state
+21:08:00 <wolfsif> would it be bad practice to write a function that initializes the state, executes the call, and then cleans up the state
+21:08:20 <wolfsif> and then use unsafePerformIO to provide a pure interface
+21:08:39 <geekosaur> it's acceptable if the state will not be needed later
+21:09:04 <geekosaur> it's probaby going to lead to core dumps if you need to preserve that state for the next call (and use of unsafePerformIO will exacerbate the issue)
+21:09:40 <wolfsif> yeah, I'm assuming the state can doesn't need to be kept around
+21:25:38 * hackage cabal-info 0.2.1 - Read information from cabal files  https://hackage.haskell.org/package/cabal-info-0.2.1 (barrucadu)
+21:26:02 <barrucadu> Ooh, hackagebot is back
+21:26:46 <EvanR> different moniker though
+21:42:08 * hackage hookup 0.1.1.0 - Abstraction over creating network connections with SOCKS5 and TLS  https://hackage.haskell.org/package/hookup-0.1.1.0 (EricMertens)
+21:45:08 * hackage irc-core 2.2.1 - IRC core library for glirc  https://hackage.haskell.org/package/irc-core-2.2.1 (EricMertens)
+21:58:43 <Lokathor> i wish vs code's haskell highlight plugin was smart enough to read quasiquote sections and then apply the correct highlighting for the quasiquoted bit
+22:00:27 <Lokathor> wolfsif, you will probably be safe with the unsafePerformIO there, but you probably want to warn people in the docs what's going on
+22:01:07 <Lokathor> for example, if it's not actually safe to run two similar computations in parallel becaue the foreign side of things somehow clashes if you're running another copy at the same time
+22:02:10 <monochrom> Yeah, it will be unsafe for threads.
+22:02:59 <monochrom> But nothing you can do. It is unsafe for threads even in C or assembly.
+22:04:51 <geekosaur> actually, in the kind of situation where the extra storage area isn't providing persistent state, it is very likely providing local thread state
+22:05:20 <geekosaur> (in place of internal static variables like pre-threads C code used to use so much)
+22:06:03 <geekosaur> which should mean it's fine here
+22:06:41 <monochrom> Thread-local state is actually worse because that "thread" means OS thread and how Haskell thread /= OS thread.
+22:06:43 <thang1> whoever safe is, they're gonna get so many pings lol
+22:06:50 <geekosaur> no, this is not TLS
+22:07:09 <geekosaur> this relates to TLS about the same way ST relates to state
+22:07:25 <geekosaur> er, to State
+22:07:57 <geekosaur> you are not relying on OS thread magical storage areas, you are explicitly providing a storage area and managing it yourself in true C fashion
+22:08:44 <ongy> well, https://aur.archlinux.org/packages/cabal-install-git/ totally didn't take way to long to set up...
+22:08:48 <monochrom> OK, that would be a happy ending indeeed.
+22:08:50 <geekosaur> if that's not clear, go compare a libc function without _r to on with
+22:08:54 <geekosaur> *one with
+22:09:37 <geekosaur> e.g. ctime to ctime_r
+22:14:47 <thang1> ongy: what's that for?
+22:16:14 <ongy> thang1: allows you to easily install cabal-install from current git HEAD on archlinux
+22:16:29 <thang1> nice
+22:16:31 <cocreature> by messing with your globally installed packages :/
+22:16:42 <ongy> cocreature: nope :)
+22:16:51 <thang1> I use stack right now but if I ever want to fuck with cabal manually ever again, I'll give it a shot :p
+22:16:54 <cocreature> ongy: oh? do you just include the final binaries?
+22:17:29 <ongy> no, I set it up in a sandbox and use a local config file + package cache. Even the cabal update doesn't touch anything (I ran it as nobody in my test-chroot)
+22:19:32 <cocreature> I’ll stick wtih just building from the git repo myself :)
+22:21:40 <ongy> *shrug* this works, I made this primarily for myself, but I like the idea to do things "right" and give others access
+22:30:36 --- mode: ChanServ set +o glguy
+22:30:37 --- mode: glguy set -bbbo *!*@*138.68.182.181 *!*@75-133-226-247.dhcp.aldl.mi.charter.com *!*@gateway/web/freenode/ip.98.194.16.219 glguy
+22:31:34 <codygman> Using lens-aeson I can easily update existing keys, but I can't figure out any way to do an "upsert" type operation. Would that break some lens law by any chance?
+22:32:29 <cocreature> codygman: what’s an upsert operation?
+22:33:09 <codygman> update if key exists otherwise insert and set
+22:33:16 <codygman> value
+22:34:13 --- mode: ChanServ set +o glguy
+22:34:14 --- mode: glguy set -bbbb *!*plant@146.247.2.221 *!*@112.50.148.146.bc.googleusercontent.com *!b115f95e@gateway/web/freenode/ip.177.21.249.94 *!~ircap@80.30.151.134nil
+22:34:14 --- mode: glguy set -bbbb *!~Shuttlewo@177.68.179.50 *!*@86.99.23.247 *!*@188.53.225.158 *!*rallyone@200.79.251.*
+22:34:14 --- mode: glguy set -bbbb *!~net@79.98.158.170 *!*net@79.98.158.* *!*yk@197.123.76.* *!*LLKCKfan@67.213.25.*
+22:34:14 --- mode: glguy set -bbbb *!*Xochipill@187.153.54.* *!*@gateway/web/freenode/ip.50.117.80.189 *!c1961afd@gateway/web/freenode/ip.193.150.26.253 *!~AjoCeboll@200.79.253.35nil
+22:34:15 --- mode: glguy set -bbbb $r:208.20.21.190 *!*@26-45-77-204.ar.cc.mn.us *!~Marlene21@95.141.28.117 *!*jhhhgfgh@hst-171-103.balticservers.com
+22:34:16 --- mode: glguy set -bbbb *!*bb93a254@*.187.147.162.84 *!*AngryBeer@200.79.253.* *!*cheissels@204.12.223.* *!*@05415a00.skybroadband.com
+22:34:17 --- mode: glguy set -bbbb *!~khuram_la@182.177.55.184 *!~Minnie@cpe-142-129-50-121.socal.res.rr.com *!*@gateway/web/cgi-irc/kiwiirc.com/ip.119.157.169.230 *!*bc817ebe@*.bstnma.fios.verizon.net
+22:34:19 --- mode: glguy set -bbbb *!~Lola21@95.141.27.41 *!*elaineben@78.164.217.* *!*@204.77.41.208 *!*labiaclit@104.254.215.84
+22:34:19 --- mode: glguy set -bbbb *!*41192543@*.com/ip.65.25.37.67 *!*@c-76-108-169-140.hsd1.fl.comcast.net *!43d5da4a@gateway/web/freenode/ip.67.213.218.74 *!*u931732@*.nationalcablenetworks.ru
+22:34:21 --- mode: glguy set -bbbb *!*50f68805@*.com/ip.80.246.136.5 *!*@ool-457ca46c.dyn.optonline.net *!*@*176.24.235.136 *!*322f5c1b@*.50.47.92.27
+22:34:22 --- mode: glguy set -bbo *!*@75.115.64.76 *!*@118.99.80.48 glguy
+22:41:22 <cocreature> > "{}" & _Object . at "key" %~ (\c -> case c of Nothing -> Just "newval"; Just existing -> Just (existing & _String %~ (<> "modified")))
+22:41:24 <lambdabot>  error:
+22:41:25 <lambdabot>      • Found hole:
+22:41:25 <lambdabot>          _Object :: (m0 -> Identity m0) -> [Char] -> Identity b
+22:41:33 <cocreature> @let import Data.Aeson.Lens
+22:41:34 <lambdabot>  .L.hs:66:1: error:
+22:41:34 <lambdabot>      Failed to load interface for ‘Data.Aeson.Lens’
+22:41:34 <lambdabot>      Perhaps you meant
+22:41:46 <cocreature> well lambdabot doesn’t like me
+22:41:52 <cocreature> codygman: anyway I think that does what you want
+22:42:24 <glguy> over (key "thekey") (maybe defaultVal updateFun)
+22:42:36 <cocreature> eh yeah that’s a lot better :)
+22:42:38 <glguy> over (key "thekey") (Just . maybe defaultVal updateFun) -- to always set
+22:43:13 <cocreature> I’m not sure why lens-aeson doesn’t include an At instance for Value. seems just as reasonable as the Ixed instance
+22:43:26 <codygman> cocreature, glguy: Okay, thanks I'll try them.
+22:43:41 <cocreature> ah no it isn’t
+22:43:46 <cocreature> you can’t set if it’s not an object
+23:00:58 <atavistic> Hi, I have  data Channel = Email | Message | Push
+23:01:14 <atavistic> trying to write a FromJSON instance for this
+23:01:31 <atavistic> my failed attempt:
+23:01:42 <atavistic> instance FromJSON Channel where  
+23:01:50 <atavistic>   parseJSON (String v) = case v of
+23:01:56 <atavistic>                           "email" -> Email
+23:02:01 <atavistic>                           "message" -> Message
+23:02:05 <atavistic>                           "push" -> Push
+23:04:53 <atavistic> How do I wrap the return type into Parser a type
+23:06:24 <Xnuk> :t return
+23:06:26 <lambdabot> Monad m => a -> m a
+23:06:39 <Xnuk> use this
+23:07:34 <Xnuk> parseJSON (String v) = return $ case v of ...
+23:08:38 <glguy> yes, except that you'll want to not use return in the case that it's none of the three listed above
+23:20:02 <orion> Does anyone know if there is a better workaround for the ApplicativeDo problem?
+23:20:59 <orion> Specifically, I can't silently ignore the result of functions which return (). I must write "_ <- foo"
+23:21:19 <orion> Otherwise, GHC thinks it's a Monad (instead of an Applicative)
+23:22:27 <mniip> you mean it uses >> instead of *>
+23:24:01 <Cale> Don't... don't use ApplicativeDo?
+23:24:03 <Cale> :)
+23:24:49 <orion> Yes.
+23:25:16 <EvanR> that does seem kind of wonky
+23:25:37 <atavistic> Thanks Xnuk
+23:25:45 <Cale> I don't care much for that extension anyway, since it's too hard to guess what the translation will be in a consistent fashion.
+23:25:53 <orion> I see.
+23:29:37 <glguy> the extension is so limited in what it accepts that I haven't found it tricky to make sense of
+23:30:31 <glguy> too limited regarding the _ <- requirement, but still limited
+23:32:02 <glguy> and too convenient to dismiss outright
+23:33:47 <glguy> recent example https://github.com/glguy/irc-core/blob/v2/src/Client/Configuration.hs#L241-L278
+23:45:33 <ongy> but why did it become 'do' aswell and not something like 'doA' ?
+23:47:41 <cocreature> ongy: because that allows you to mix applicative and monadic operations and hopefully end up with something that makes as much use of the applicative operations as possible
+23:55:44 <EvanR> heh
+23:55:45 <EvanR> fetchAddIntArray# = let x = x in x
+23:55:55 <EvanR> fake source code for ghc prim ops
+23:56:52 <cocreature> EvanR: let’s hope this is not the real source code :P
+23:57:05 <EvanR> does this operation work properly on rpi ?
+23:57:18 <EvanR> is the question whose answer i was looking for
+23:59:25 <ongy> looking up primops can be depressing

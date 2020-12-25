@@ -1,0 +1,801 @@
+00:02:00 <fen> % @let z = undefined :: (forall b. (a -> b -> b) -> b) 
+00:02:00 <yahb> fen: ; <interactive>:49:1: error: parse error on input `@'
+00:02:06 <fen> % let z = undefined :: (forall b. (a -> b -> b) -> b) 
+00:02:06 <yahb> fen: 
+00:02:39 <fen> % :t z (:)
+00:02:39 <yahb> fen: [a]
+00:02:59 <fen> (thats like build, but with the [] partially applied already)
+00:03:07 <fen> % :t build
+00:03:07 <yahb> fen: (forall b. (a -> b -> b) -> b -> b) -> [a]
+00:03:18 <c_wraith> fen: you can do a *lot* of different things https://hackage.haskell.org/package/tree-traversals-0.1.0.0/docs/Control-Applicative-Phases.html
+00:03:25 <fen> % :t build (:)
+00:03:25 <yahb> fen: ; <interactive>:1:7: error:; * Occurs check: cannot construct the infinite type: b ~ [a -> b -> b]; Expected type: (a -> b -> b) -> b -> b; Actual type: (a -> b -> b) -> [a -> b -> b] -> [a -> b -> b]; * In the first argument of `build', namely `(:)'; In the expression: build (:)
+00:03:36 <fen> oops
+00:03:59 <fen> anyway
+00:04:07 <c_wraith> % :t build foldr
+00:04:07 <yahb> c_wraith: ; <interactive>:1:7: error:; * Occurs check: cannot construct the infinite type: b ~ [a] -> b; Expected type: (a -> b -> b) -> b -> b; Actual type: (a -> b -> b) -> b -> [a] -> b; * In the first argument of `build', namely `foldr'; In the expression: build foldr
+00:04:16 <fen> % :t z (g (:))
+00:04:16 <yahb> fen: Applicative f => f [a]
+00:04:21 <c_wraith> heh, yeah, that wasn't gonna work.
+00:04:24 <fen> % :t z (g (g (:)))
+00:04:24 <yahb> fen: (Applicative f1, Applicative f2) => f1 (f2 [a])
+00:04:28 <fen> see
+00:05:30 <fen> c_wraith: its for fusion. 
+00:05:40 <c_wraith> Yes, I know
+00:05:42 <fen> like, if traverse was a fold, it would fuse
+00:06:15 <c_wraith> if the thing generating the list passed to it was also a build
+00:07:05 <fen> but unfold is only possible because list is "state like" in that its constructor can be pattern matched over. these things like lists but with (:) replaced by `g` cant be matched over, so i dont know how to fold them 
+00:08:03 <remexre> why does newtype Foo a = Foo (Lens' a Bar) claim to need Rank2Types/RankNTypes?
+00:08:13 <fen> after having replaced the constructor with a function (on folding) it means it cant be folded again...
+00:08:14 <asthma[m]> is haskell suitable for a callback / event heavy application?
+00:08:15 <dminuoso> remexre: Because Lens' is a type alias involving a forall quantifier.
+00:08:16 <c_wraith> remexre: because Lens' is polymorphic.
+00:08:28 <remexre> oh :/
+00:09:00 <dminuoso> remexre: Lens' s a ~ forall f . Functor f => (a -> f a) -> s -> f s
+00:09:23 <remexre> Oh, I forgot the functor part
+00:09:31 <dminuoso> remexre: It's not the functor part, its the forall part.
+00:10:19 <remexre> er yeah, I was thinking of lenses as type Lens' a b = (a -> b, b -> a -> a)
+00:10:31 <remexre> and forgot that a functor was involved in the definition
+00:11:01 <dminuoso> remexre: Like I said, its not about the functor part. :)
+00:11:20 <remexre> yeah
+00:11:31 <dminuoso> shachaf: Who actually came up with that exact encoding of polymorphic lenses?
+00:11:35 <fen> build fold fusion says you can just replace the folding function used to create the list from an unfolded state. but we dont want to just replace (:), we want to build up successive applicatives
+00:12:14 <dminuoso> remexre: The usefulness of this encoding is that is seamlessly composes with other optics in a nice fashion.
+00:13:16 <remexre> ReifiedLens' a Bar is "what I want," right?
+00:13:42 <remexre> and compose in a (.) sense?
+00:13:48 <dminuoso> remexre: Yes.
+00:13:50 <fen> maybe it would be traverse fusion or something
+00:16:11 <fen> cant really see a way to do it without leaving the values in a list, and pairing the to-be-applied functions alongside each value
+00:16:33 <fen> this way allowing the lazyness of list to allow truncation of the sequence 
+00:17:24 <fen> otherwise the applicative seems to fire and commute all the applicatives to the far left...
+00:18:13 <fen> that is, as soon as we go from datatype constructors to functions. basically, the church encoding cant be used as a state
+00:21:34 <fen> maybe there is a rewrite rule that can be used instead of replacing the folding function like build, but instead, composes them all together. like pure.pure.pure ... 
+00:22:48 <fen> so that this gathering up of all the traversals into one action then can be used with just one fold to replace all the (:)
+00:24:24 <fen> where traverse f = "replace all the (:) with g f = (<*>) . (fmap f) . pure"
+00:25:24 <fen> % :t foldr (g (:)) (pure [])
+00:25:24 <yahb> fen: (Foldable t, Applicative f) => t a -> f [a]
+00:25:54 <fen> % :t foldr (g(g (:))) (pure (pure []))
+00:25:54 <yahb> fen: (Foldable t, Applicative f1, Applicative f2) => t a -> f1 (f2 [a])
+00:26:11 <fen> seems to work...
+00:26:19 <dminuoso> % :t \get set f s -> set s <$> f (get s)
+00:26:19 <yahb> dminuoso: Functor f => (t1 -> t2) -> (t1 -> a -> b) -> (t2 -> f a) -> t1 -> f b
+00:26:33 <dminuoso> remexre: ^-
+00:27:10 <dminuoso> remexre: If you fix (t2 ~ a) and (t1 ~ b) you have your monomorphic lens. The quantifier is just floated as far right as possible.
+00:27:32 <remexre> huh, ok
+00:29:05 <fen> % :t \f b -> foldr (g(g f)) (pure (pure b))
+00:29:05 <yahb> fen: (Foldable t, Applicative f1, Applicative f2) => (a1 -> a2 -> a2) -> a2 -> t a1 -> f1 (f2 a2)
+00:30:08 <fen> % :t \f -> [g f,g (g f)]
+00:30:08 <yahb> fen: ; <interactive>:1:12: error:; * Occurs check: cannot construct the infinite type: a2 ~ f0 a2; Expected type: a1 -> f a2 -> f b; Actual type: a1 -> f (f0 a2) -> f (f0 b); * In the expression: g (g f); In the expression: [g f, g (g f)]; In the expression: \ f -> [g f, g (g f)]; * Relevant bindings include f :: a1 -> a2 -> b (bound at <interactive>:1:2)
+00:30:13 <fen> :-(
+00:31:35 <fen> the problem is that get and set are expensive
+00:31:49 <fen> while pattern matching is not
+00:32:05 <fen> so we want everything to use fold
+00:32:08 <fen> and fusion
+00:33:24 <fen> eg consider traversing a tree, its just traverse recusing over each level of nested lists of branches. the "shape" is implicitly handled. but if you do get and set, then the shape must be explicitly retained, and determined! which is expensive
+00:34:22 <fen> thats fine if you need that shape for something, like navigating a carried pointer for a comonad instance, but otherwise, explicitly getting the shape is needlessly expensive, since it could just be handled by recursion
+00:35:16 <fen> so we just want to use pattern matching, to avoid calculation of the shape, thats why this is being phrased in terms of fold, which is implemented using this pattern matching, and not get and set, which determine the shape parameter
+00:37:13 <fen> that is, since the church encoding cannot be used as a state (it has no get instance) - basically we cant get from the list once its had its (:) replaced by functions - so we delay the fold until the last possible moment, and just build up the functions we want to replace the (:) with...
+00:39:11 <fen> the thing which is puzzling is that these composed applicative things to replace (:) how can they be lazy? like, if one of the "folds we wish to compose" is take, then how is the commuting of the nested applicatives somehow doing that take to avoid the rest of the fold? 
+00:46:05 <fen> % :t \f b -> foldr (g f)  (pure b)
+00:46:05 <yahb> fen: (Foldable t, Applicative f) => (a1 -> a2 -> a2) -> a2 -> t a1 -> f a2
+00:46:26 <fen> % :t \f b -> foldr (g (:))  (pure [])
+00:46:26 <yahb> fen: (Foldable t, Applicative f) => p1 -> p2 -> t a -> f [a]
+00:46:26 <shachaf> dminuoso: Which thing do you mean?
+00:46:40 <fen> % :t foldr (g (:))  (pure [])
+00:46:40 <yahb> fen: (Foldable t, Applicative f) => t a -> f [a]
+00:47:12 <fen> we can only write fold in terms of traverse because list has "get and set"
+00:47:36 <fen> though these are never used to unfold and refold the list, but only via pattern matching
+00:48:21 <fen> foldable is a superclass of traversable because something might have get and not set
+00:49:05 <fen> but if they have both, we can write traverse using fold, and then use build fold fusion
+00:52:13 <fen> if it still seems like pattern matching on (:) is as expensive as get and set, the point is that the foldable instance does the recursive nesting of foldr in its implementation, handling the shape, so eg the foldable instance of Tree = Free [] uses the foldable instance of [] and hides the shape of the tree
+00:53:26 <fen> because the foldr implementation can get at the innards of the tree, its layers of branches which are lists, it is much better than trying to "get" from the whole tree, which *is* a valid way to implement traverse, but is much slower
+00:55:00 <fen> i know lenses compose, and can have Traversal's which can be recursive, but is there something like build fold fusion that would result from the direct implementation of traverse via foldr?
+01:05:04 <dminuoso> shachaf: type Lens s t a b = forall f . Functor f => (a -> f b) -> s -> f t
+01:07:12 <dminuoso> shachaf: It seems that Twan van Laarhoven came up with the monomorphic encoding and Russell O'Connor made the tweak to support polymorphic lenses, is this about right?
+01:08:27 <c_wraith> that is what history tells us
+01:12:11 <c_wraith> and by history, I mean russell's blog post introducing polymorphic lenses
+01:13:09 <shachaf> dminuoso: That sounds right.
+01:14:07 <shachaf> I only started to work on lenses and things after that, though.
+01:15:04 <shachaf> Also, to be clear, you can make polymorphic (type-changing) lenses independently of this encoding. Lens s t a b = s -> (a, b -> t) and so on.
+01:21:30 <fen> argh! how do you write take using foldr or traverse?
+01:21:59 <fen> does take have to be the outer layer of the composed things because it cant be written by fold?
+01:22:46 <fen> so it couldnt go in the middle of the applicatives and so doesnt "commute with fusion" (sorry still confused by that idea)
+01:22:53 <fen> !?
+01:25:22 <c_wraith> :t \n xs -> foldr (\x k c -> if c <= 0 then [] else x : k (c - 1)) (const []) xs n
+01:25:24 <lambdabot> (Num t2, Ord t2, Foldable t1) => t2 -> t1 a -> [a]
+01:25:36 <fen> ie. these traversals in terms of fold that result in composed folding functions, by the fact that traversable preserves length, cant have the required lazyness?
+01:29:33 <fen> :t (\x k c -> if c <= 0 then [] else x : k (c - 1))
+01:29:34 <lambdabot> (Num t, Ord t) => a -> (t -> [a]) -> t -> [a]
+01:29:59 <fen> ok
+01:31:27 <fen> well now instead of just wondering how to compose together folding functions (a -> b -> b) they have an extra argument!
+01:31:41 <fen> or thats just another type of b...
+01:32:06 <c_wraith> yep.  it's just something else that unifies with b
+01:32:22 <fen> a -> (t -> [a]) -> (t -> [a]) === a -> b -> b
+01:32:30 <fen> ok
+01:33:00 <fen> so how do we compose these things together? does it require b is foldable?
+01:33:52 <fen> foldr f . foldr g =? foldr (f . g)
+01:33:57 <fen> doesnt seem likely 
+01:37:10 <fen> :t \f b -> foldr (g(g f)) (pure (pure b))
+01:37:11 <lambdabot> error:
+01:37:11 <lambdabot>     • Could not deduce (Show t0) arising from a use of ‘g’
+01:37:11 <lambdabot>       from the context: (Applicative f1, Applicative f,
+01:37:26 <fen> this doesnt seem to work because there is only one function changing the type of the value
+01:37:34 <fen> % :t \f b -> foldr (g(g f)) (pure (pure b))
+01:37:34 <yahb> fen: (Foldable t, Applicative f1, Applicative f2) => (a1 -> a2 -> a2) -> a2 -> t a1 -> f1 (f2 a2)
+01:37:39 <fr33domlover> Hi! In my web app, following some POST from a user, I'd like to perform a potentially large number of HTTP requests, in the background, asynchronously, not care about their results (status, body etc.) There seem to be so many thread/pool related packages - can anyone recommend a package? My intuition says I could use resource-pool to manage a thread pool that grows and shrinks dynamically based on usage, but
+01:37:40 <fr33domlover> I suppose it's easier to use some existing thing
+01:38:53 <fr33domlover> (Also, it seems most thread pool packages are concerned with limiting contention; I just want to do some HTTP POSTs, enjoy concurrency while requests wait for responses, not care about the number of capabilities etc.)
+01:41:05 <Ariakenom> fr33domlover: maybe mapConcurrently_? https://hackage.haskell.org/package/async-2.2.1/docs/Control-Concurrent-Async.html#v:mapConcurrently_
+01:42:51 <fen> the whole idea of nesting applicatives from multiple traversables to fold at the end seems complicated by the idea of const. it should be able to kind of truncate the nesting of applicatives if it discards the input... not sure what the compiler would do, if it just retains the whole nesting even though some of them will be unused
+01:44:55 <fr33domlover> Ariakenom, "If any of the actions throw an exception, then all other actions are cancelled and the exception is re-thrown.
+01:45:17 <fr33domlover> Ariakenom, I don't want that behavior, also wondering if I could use a thread pool to reuse threads
+01:45:49 <fr33domlover> I don't care about optimizing, just wondering, if a thread pool package exists I can use it and it will just scale
+01:47:35 <Ariakenom> fr33domlover: I have no knowledge of thread pool packages, sry. I wouldn't worry about reusing threads though.
+01:47:45 <MarcelineVQ> If you don't care about the results how do you determine when you're done with a request? Or put another way, what metric do you have in mind to decide the size of your thread pool?
+01:48:34 <Ariakenom> fr33domlover: connections for the requests is probably the more important resource
+01:51:52 <fr33domlover> Ariakenom, hmm I guess I'll just traverse (forkIO . httpLBS ...) etc. and http-client will take care of connections, and all threads will be short-lived. I never used thread pools, didn't assume they're necessary, Haskell docs do generally say threads are lightweight so maybe I shouldn't worry about spawning many tiny threads, one for each HTTP request
+01:52:19 <Ariakenom> threads are cheap. it's not os-threads and I think they take about 1kB memory
+01:54:10 <Ariakenom> fr33domlover: I know you said you didn't care about errors in the threads but it is bugging me :p Why not?
+01:58:01 <fr33domlover> Ariakenom, because these requests do message passing that is usuallly processed concurrently - I get status 200 even if later the server rejects what I sent
+01:58:27 <fr33domlover> s/concurrently/asynchronously oops
+01:58:54 <fr33domlover> So I can check the status, but, most of the time I get 200 either way
+02:00:17 <Ariakenom> ah ok. so error handling is done "higher up". and a network error is ok down here too?
+02:02:09 <fr33domlover> Ariakenom, hmmm generally I think errors are silently ignored, but in my implementation I'd love to catch them and at least log them if nothing else. But I can do that using some try and catch and logWarn in the threads that do the requests
+02:02:41 <fr33domlover> *try or catch ^_^
+02:03:00 <Ariakenom> I feel at easy, thanks :)
+02:03:05 <Ariakenom> *ease
+02:05:34 <fr33domlover> Ariakenom, thanks for asking :) I guess maybe the reason there aren't clear choices for thread pools is simply that they aren't needed much in Haskell? Even in cases of contention, you can use STM or semaphores instead of keeping a thread pool
+02:06:13 <Ariakenom> that makes sense to me
+02:06:29 <Ariakenom> I just have strong feelings about programs silently failing. heh
+02:07:53 <fr33domlover> Ariakenom, ideally I'll keep in the DB a record of the last time my requests reached each target server, and when the record is old enough, assume the server is just dead and stop trying to contact it. But for now, I'll just do logging to debug my code etc.
+02:10:11 <fen> % let i g f = (<*>) . (fmap g) . f
+02:10:11 <yahb> fen: 
+02:10:20 <fen> % :t i
+02:10:20 <yahb> fen: Applicative f => (a1 -> a2 -> b) -> (a3 -> f a1) -> a3 -> f a2 -> f b
+02:10:34 <fen> % let ii g f h c = i (i g f) h c 
+02:10:34 <yahb> fen: 
+02:10:37 <fen> % :t ii
+02:10:37 <yahb> fen: (Applicative f1, Applicative f2) => (a1 -> a2 -> b) -> (a4 -> f2 a1) -> (a5 -> f1 a4) -> a5 -> f1 (f2 a2) -> f1 (f2 b)
+02:13:58 <fen> :t foldr (ii (:) pure pure)
+02:13:59 <lambdabot> error:
+02:13:59 <lambdabot>     • Variable not in scope:
+02:13:59 <lambdabot>         ii
+02:14:04 <fen> % :t foldr (ii (:) pure pure)
+02:14:04 <yahb> fen: (Foldable t, Applicative f1, Applicative f2) => f1 (f2 [a]) -> t a -> f1 (f2 [a])
+02:14:21 <fen> % :t foldr (ii (:) pure pure) (pure (pure []))
+02:14:21 <yahb> fen: (Foldable t, Applicative f1, Applicative f2) => t a -> f1 (f2 [a])
+02:14:39 <fen> seems like a double traverse to me
+02:15:19 <fen> % :t \f g -> foldr (ii (:) f g) (pure (pure []))
+02:15:19 <yahb> fen: (Foldable t, Applicative f1, Applicative f2) => (a4 -> f2 a) -> (a5 -> f1 a4) -> t a5 -> f1 (f2 [a])
+02:16:15 <fen> t ~ []
+02:19:47 <delYsid> I have a function like f sumType = Vector.generate ...;  How do I make sure the various vectors are initialized only once and not generated every time I call that function with a particular constructor?
+02:20:34 <delYsid> data Dir = N | E | S | W; f N = Vector.generate ...; f E = Vector.generate ..; ...
+02:20:47 <delYsid> Or does Haskell handle that already automatically for me?
+02:23:01 <fen> it will cache any (let bound?) variable you call repeatedly
+02:23:11 <delYsid> Or, how do I verify that what actually happens?
+02:23:31 <fen> what, like counting the number of calls to some function?
+02:23:40 <fen> there might be a good way to do that
+02:23:49 <fen> a bad way to do that uses unsafePerformIO
+02:24:40 <delYsid> fen: You mean I just need a toplevel binding? Like fN = Vector.generate ...; f N = fN?
+02:25:45 <fen> yeah, I think its really difficult not to get GHC to reuse things. like criterion has some way to ensure things are recalculated for benchmarking
+02:26:58 <fen> not sure if you did like, repeatedly n f, and repeatedly m f, where m/=n if it would be able to reuse the intermidiate points and pick the best one
+02:27:36 <fen> maybe if it doesnt that would be because it isnt "bound" anywhere with a variable that can be referenced
+02:27:42 <Ariakenom> delYsid: you can put it in a Map
+02:27:59 <fen> maybe a good rule of thumb is, if its a variable you can reference, its likely chached 
+02:29:01 <delYsid> Ariakenom: I just have 8 entries in that Map, question is, what is faster, pattern matching or runtime lookup in a Map with 8 entries?
+02:29:50 <fen> probably if you only need one value a map is always faster
+02:30:11 <delYsid> one value?
+02:30:25 <fen> Map is a "fast random access" container
+02:30:44 <fen> but it might not have as fast a functor instance as something else
+02:30:54 <fen> not sure
+02:30:58 <delYsid> fen: Yes, I know that.  However, I dont know how pattern matches are implemented under the hood.
+02:31:27 <fen> idk, maybe you could think of it like a partition tree
+02:32:03 <fen> not sure if it spends time rebalancing it as it grows or something
+02:33:23 <fen> like, if it had to sort the indexes into order and have a calculation for the malloced memory, maybe there are competing overheads
+02:33:43 <fen> no idea how it does this "lookup"...
+02:34:14 <fen> if it goes around comparing numbers i cant see how that would be fast
+02:34:49 <fen> "is it here, no, hmm, is it here" etc 
+02:34:58 <koz_> delYsid: SPJ's 'The Implementation of Functional Programming Languages' explains how pattern matching is done quite well.
+02:35:19 <__monty__> I think Map's implemented with a fingertree? Probably easier to find asymptotics for.
+02:35:35 <koz_> https://www.microsoft.com/en-us/research/wp-content/uploads/1987/01/slpj-book-1987-small.pdf <-- link
+02:35:36 <fen> even if it has a way to calculate where it is, thats still going to be costly, but then that might just be as costly as determining where a pattern matched cons list is stored in memory
+02:36:11 <koz_> (page 67)
+02:41:35 <delYsid> koz_: Thanks, but that paper is not accessible, as in, it doesnt translate to text, and I am blind.
+02:42:17 <koz_> delYsid: Sorry about that. I'd give you a synopsis, but I'm very tired.
+02:42:23 <koz_> I'm sure some of the nice folks here know.
+02:43:09 <delYsid> koz_: nevermind, I can try the Map approach once I can actually measure the performance.
+02:43:21 <koz_> For eight items?
+02:43:27 <delYsid> yes
+02:43:59 <delYsid> Right now, I go with pattern matching and toplevel bindings.
+02:44:07 <koz_> Why not just have a record?
+02:44:18 <koz_> What are your keys?
+02:44:20 <koz_> (in terms of type)
+02:44:22 <delYsid> a record?
+02:44:58 <delYsid> koz_: a simple sum type, like data Dir = N | NE | E | ...
+02:45:02 <fen> geussing its like, 8 lists of numbers that are globally accessible 
+02:45:11 <koz_> delYsid: Then why a Map?
+02:45:17 <koz_> A Map is used for key-value mappings.
+02:45:36 <koz_> I don't know how a sum type translates to a Map exactly.
+02:45:43 <koz_> (maybe I missed something earlier)
+02:45:44 <fen> oh, you want to be able to add together your "directions" to get a global index
+02:45:44 <delYsid> koz_: I am "mapping" from Dir to Vector.generate.
+02:45:55 <delYsid> no.
+02:46:10 <delYsid> I have a Vector for each Dir.
+02:46:18 <fen> ah
+02:46:27 <koz_> And Dir is what again?
+02:46:38 <fen> a sum type of 8 values
+02:47:10 <koz_> http://hackage.haskell.org/package/EnumMap-0.0.2/docs/Data-EnumMap.html <-- maybe this?
+02:47:50 <fen> what, do deriving Enum and then EnumFromTo? bounded as well? why not use Ix and range?
+02:47:56 <delYsid> data Dir = N | NE | E | SE | ...; dataN = Vector.generate ...; dataNE = Vector.generate ...; data N = dataN; data NE = dataNE; ...
+02:49:04 <delYsid> er, f not data gah.
+02:49:14 <fen> you could type level fmap a HList...
+02:49:20 <delYsid> f N = dataN; f NE = dataNE; ...
+02:50:49 <fen> whats on the far right?
+02:52:51 <fen> oh its like a compas? is it some sort of convolution
+02:53:02 <fen> i have had more than enough of those!
+02:53:03 <delYsid> koz_: EnumMap looks interesting, but lookup is O(n), so I guess a plain pattern match is more or less equal.
+02:53:14 <merijn> 10 dollar says it's a MUD :p
+02:53:32 <delYsid> yes, its a compass, and no, its not a MUD.
+02:53:39 <merijn> Ah, rats :p
+02:53:42 <MarcelineVQ> Well a MUCK then..
+02:53:50 <koz_> Maybe a MUSH?
+02:54:06 <delYsid> sliding piece directions, chess.
+02:54:18 <fen> game of life?
+02:56:13 <delYsid> Well, much more important is, that I discovered countTrailingZeros :-)
+03:28:49 <akr> anyone knows if there is some conversion implemented somewhere between types from `xml` and `xml-types`?
+03:29:57 <akr> alternatively, recommend me a package for encoding stuff from xml-types
+03:40:59 <cocreature> akr: https://packdeps.haskellers.com/reverse/xml-types shoul dgive you some ideas
+03:54:37 <cocreature> xml-conduit would be my recommendation
+04:13:24 <akr> cocreature: thanks, that's the page I was looking for :)
+04:18:28 <akersof> hi all, i am still a haskell newbee. As i often code with non blocking io in mainstream language i was curious to check quickly how i can write a really little haskell sample demonstrating non blocking io
+04:18:40 <akersof> https://gist.github.com/akersof/74294a83d10f5c795a0ff147aa799cb0
+04:19:11 <akersof> in my previous snippet we see that line 10 is blocking, so line 11 can't be executed
+04:20:02 <akersof> I am just curious to see how you can tweak this code for executing the line 11
+04:21:22 <akersof> i have to learn about this yet, but i am too impatient to see how i can write little code in a nonblocking io manner
+04:21:57 <hpc> without knowing any other design constraints, i'd probably just use forkIO
+04:23:48 <akersof> hpc: forkIO create a new thread? i mean a real OS thread?
+04:24:31 <cocreature> no, a lightweight Haskell thread
+04:25:29 <cocreature> one of the great things about Haskell is that you can spawn a ton of lightweight threads and pretend you’re doing blocking IO instead of having to manually do nonblocking IO
+04:26:17 <hpc> "tons" meaning if you make threads that do nothing, you're pretty much limited by RAM on how many you can make
+04:26:51 <akersof> ok.. but if you know i am curious to know what these haskell thread are?
+04:27:22 <akersof> if haskell threads are not "real OS thread" so it is an implementation of non blocking IO in fact?
+04:28:47 <cocreature> yes, the Haskell RTS maps all the standard IO functions to non-blocking implementations under the hood
+04:28:49 <hpc> iirc, in ghc, all IO is non-blocking and then remade into blocking by wrapping it
+04:29:02 <akersof> sweet! 
+04:29:07 <cocreature> but it provides you with an interface that lets you pretedn you’re doing blocking IO
+04:29:17 <hpc> so then lightweight threads on top of that is simple context-switching
+04:29:34 <hpc> even though you're coding as if it's blocking, the other threads are free to do other things
+04:31:35 <akr> cocreature: any recommendations for use without conduits?
+04:32:21 <akersof> cocreature and hpc thx a lot
+04:34:02 <akr> cocreature: oh ok, xml-conduit it doesn't actually force you to use conduits, nevermind
+04:37:39 <tdammers> akersof: if you want more background on the general concept, "green threads" is the magical google incantation
+04:38:04 <akersof> tdammers: thx lol i was lost on google indeed
+04:38:31 <tdammers> although technically at least GHC's threaded runtime implements something slightly more advanced - it dispatches "soft" or "green" threads onto multiple "hard" or "OS" threads
+04:38:51 <akr> also, any idea why intero often displays just "forall t. t" instead of the actual type in the emacs status bar?
+04:43:11 <akr> argh, what the hell
+04:43:19 <akr> xml-conduit has a dependency on xml-types
+04:43:37 <akr> but it proceeds to define it's own version of Element anyway https://stackage.org/haddock/lts-13.13/xml-conduit-1.8.0.1/Text-XML.html#t:Element
+04:44:02 <akersof> humm another crazy question, the main design arch of a game is an infinite loop waiting for game over to stop
+04:44:15 <akersof> how can i design this in haskell?
+04:44:34 <akr> at least it has conversion functions
+04:45:17 <akersof> as far as i understand haskell loops are made by recursion
+04:45:22 <Entroacceptor> yup
+04:48:16 <Entroacceptor> @src forever
+04:48:16 <lambdabot> forever a = let a' = a >> a' in a'
+04:51:35 <akr> how exactly is that different to `forever a = a >> forever a`, by the way?
+04:51:43 <akr> my version is tail-recursive as well, right?
+04:51:56 <akr> hmm, maybe depends on the implementation of >> and/or join
+04:52:11 <hpc> it's called "tying the knot"
+04:52:33 <akr> oh okay, I know about that
+04:52:37 <akr> not sure why it's necessary here?
+04:52:48 <hpc> it's not terribly important, but might as well ;)
+04:52:57 <akr> ok :)
+04:55:02 <Entroacceptor> akersof: in short: just use recursion. 
+04:55:38 <akersof> Entroacceptor: ok :) and one of the terminal case should check for gameover 
+04:56:48 <Entroacceptor> akersof: maybe look at the second answer on https://stackoverflow.com/questions/19285691/how-do-i-write-a-game-loop-in-haskell
+04:58:10 <akersof> Entroacceptor: perfect
+04:58:16 <akersof> Entroacceptor: thx
+05:10:21 <mouse07410> Entroacceptor: out of curiosity: I used to think that recursive calls use up stack, and thus a game that may run for hours or maybe days would eat up all it's stack and crash. Why is it not a concern here?
+05:13:55 <hpc> haskell's memory model is different
+05:14:18 <hpc> the stack stores memory related to the current evaluation
+05:14:36 <hpc> so even if you're deep in some infinite recursion, as long as you're productive every step of the way the stack isn't ever going to get any bigger
+05:15:08 <hpc> > let ones = 1 : ones in (ones !! 10000) -- itty bitty stack
+05:15:10 <lambdabot>  1
+05:16:34 <hpc> because that definition is knot-tied, there's only two times the stack ever has more than "this is already evaluated" pushed to it
+05:16:51 <hpc> on the first "it's not this element" pattern in (!!) where (:) is evaluated
+05:16:58 <hpc> and at the end when "1" is shown, 1 is evaluated
+05:17:13 <hpc> and they aren't even on the evaluation stack at the same timme
+05:18:10 <hpc> ugh
+05:18:34 <hpc> it's hard to find a good link for it though, because the "stack" build tool pollutes my search results
+05:18:55 <Entroacceptor> https://wiki.haskell.org/Stack_overflow has some of it
+05:19:38 <hpc> the anatomy of a thunk would be informative as well
+05:20:04 <hpc> if you look at a thunk as a block of code that runs, then the evaluation stack starts to look more like a traditional call stack
+05:22:21 <zincy_> So does an unevaluated thunk not add a new frame to the stack?
+05:36:26 <tiny_lambda> hi, i am trying to install swagger2 using stack --stack-root C:\Users\IEUser\stack --resolver=lts-13.2 swagger2 under Windows 10 parallels VM (Microsoft Edge VM), but unfortunately the build never ends. It is stuck in generic-sop-4.0.1.0. I also tried to add another version to exta-deps section in global-project\stack.yaml but that looped endlessly, too. Any ideas how to build that package successfully?
+05:40:14 <mouse07410> Thank you guys, I understand this now much better (but still need to learn a lot :-)
+05:40:28 <fendor> tiny_lambda, that is ghc-8.6.3 right? That version is broken for windows, due to a TH bug, afaik. Uder newer or older
+05:40:37 <fendor> *use newer or older
+05:41:09 <tiny_lambda> ah ok, that makes sense
+05:41:18 <tiny_lambda> yes, ghc-8.6.3
+05:41:32 <fendor> latest lts should work fine, though
+05:41:39 <fendor> e.g. 13.13
+05:41:44 <tiny_lambda> but only under windows - on mac and linux, resolver uses ghc-8.6.4
+05:42:13 <tiny_lambda> is there a way to use ghc-8.6.4 in combination with resolver lts-13.2?
+05:42:36 <tiny_lambda> and, please, what is "a TH" bug?
+05:43:01 <tdammers> TH means Template Haskell
+05:44:32 <fendor> tiny_lambda, I think the flag `--compiler` can be used
+05:44:59 <tdammers> Template Haskell is particularly notorious for throwing curveballs in scenarios involving intricate platform specifics (cross compiling and Windows, mainly)
+05:45:11 <fendor> e.g. `stack --stack-root C:\Users\IEUser\stack --resolver=lts-13.2 --compiler ghc-8.6.4 install swagger`
+05:50:17 <Phyx-> to be more accurate, the bug isn't a TH bug, it's a runtime linker bug, TH just happens to also use the runtime linker. just using GHCi with e.g. -fobject-code would hit the same issue
+05:53:34 <tiny_lambda> fendor andn Phyx, ah ok, that makes it clear ;-) --- but why does resolver / stack use another ghc version for mac / linux  and windows?
+05:53:51 <fendor> uhm, imo it shouldnt
+05:54:06 <fendor> maybe it is configured differently somewhere
+05:54:41 <tiny_lambda> well it does - however, i am not sure that it is always the same stack version
+05:56:01 <tiny_lambda> i am specifying the same resolver across the platforms
+05:56:49 <tiny_lambda> on windows ghc-8.6.3 is being used, on debian 9 ghc-8.6.4 is being used
+05:57:03 <tiny_lambda> ditto mac os x
+05:57:25 <fendor> with lts 13.2? weird, it should not do that imo
+05:57:41 <tiny_lambda> yes with resolver=lts-13.2
+05:57:56 <tiny_lambda> i can send logs if you don't believe :)
+06:05:28 <tiny_lambda> fendor, eehm - sorry, i just restarted a build and now i am seeing that ghc-8.6.3 is also being used on linux
+06:05:48 <tiny_lambda> fendor, i will check jenkins logs to see more details
+06:06:59 <fendor> tiny_lambda, if you are sure that different ghc versions are being downloaded, you can probably open a ticket
+06:11:08 <tiny_lambda> fendor, yes, thanks, will do, but i checked jenkins logs, and situation is that a compile error for lzma occurred and thereafter the resolver had been switched to 13.13 (for reasons that i don't know and which is a bug on my side) and the newer resolver then installed the newer ghc-8.6.4 
+06:15:48 <tiny_lambda> https://pastebin.com/wJ1DMwfq
+06:16:16 <tiny_lambda> should i open a ticket?
+06:17:06 <fendor> tiny_lambda, looks like the right ghc version
+06:17:18 <fendor> your build fails because stack cannot find the library zma
+06:17:33 <fendor> did you make sure that jenkins installs it?
+06:18:13 <tiny_lambda> fendor, ah ok, i will check
+06:19:37 * hackage wai-lambda 0.1.0.0 - Haskell Webapps on AWS Lambda  https://hackage.haskell.org/package/wai-lambda-0.1.0.0 (nmattia)
+06:20:18 <tiny_lambda> fendor, the windows command succeeded: stack --stack-root C:\Users\IEUser\stack --resolver=lts-13.2 --compiler=ghc-8.6.4 install -j4 swagger2
+06:21:09 <fendor> tiny_lambda, thats great!
+06:21:11 <tiny_lambda> so i will probably swith to ghc-8.6.4 on any of the platforms
+06:21:30 <tiny_lambda> fendor, yes, thank you!
+06:22:22 <fendor> tiny_lambda, you're welcome!
+06:52:30 <akr> hmm why isn't -freduction-depth documented here? https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/flags.html
+06:52:37 * hackage distributed-closure 0.4.1.1 - Serializable closures for distributed programming.  https://hackage.haskell.org/package/distributed-closure-0.4.1.1 (MathieuBoespflug)
+07:05:29 <cocreature> akr: because people are bad at documenting things :) Make a PR!
+07:06:20 <Vulfe> is there a standard name for the adjoint comonad of the state monad?
+07:06:22 <akr> cocreature: on the gitlab instance?
+07:08:08 <cocreature> yes
+07:09:27 <akr> hmm looks like the docs are generated
+07:10:10 <akr> this means I'll need to understand/do some programming
+07:10:18 * akr runs away in terror
+07:10:28 <reygoch> With CPP language extension it is possible to detect the compiler with which the file is being compiled. Is it possible to detect a target? Something like `#ifdef exe:MyExecutable`?
+07:18:24 <phadej> reygoch: https://cabal.readthedocs.io/en/latest/developing-packages.html#pkg-field-cpp-options
+07:19:44 <reygoch> phadej: so I can set a flag there? If I do cpp-options: ClientExe then I can use it in code like $ifdef ClientExe?
+07:20:00 <phadej> -DClientExe but yes
+07:20:13 <reygoch> Ok, much obliged!
+07:20:41 <phadej> you're welcome
+07:21:38 <phadej> (that way you can propagate flag selection too, e.g.: if flag(myflag)\n  cpp-options: -DFLAG_MYFLAG=1)
+08:25:39 <deathcap> Question: so I'm reading Learn You A Haskell and have performance questions about one of the examples
+08:26:43 <deathcap> but i guess the prelude question is: are all maps just a list of binary tuples, or is there a more detailed data structure
+08:26:50 <deathcap> err, specific, not detailed.
+08:28:00 <dmwit> Data.Map is a balanced search tree. Data.HashMap uses hash array mapped tries.
+08:28:29 * Solonarv wonders if there's a hashmap library backed by a flat array
+08:28:47 <dmwit> I think not currently.
+08:28:52 <deathcap> okay, well that gets to my other question:
+08:28:56 <Solonarv> Hm. You could also do a fingertree-based map, no?
+08:30:07 * hackage libraft 0.5.0.0 - Raft consensus algorithm  https://hackage.haskell.org/package/libraft-0.5.0.0 (sdiehl)
+08:30:28 <deathcap> in the findKey key ((k,v):xs) = if key == k then Just v else findKey key xs example, it traverses the list recursively until it finds the example and then returns.
+08:30:48 <monochrom> There is a hash table library using a mutable array, like IOArray. It turns out IOArray has too much overhead.
+08:30:51 <deathcap> the book then suggests that you replace it with the foldr implementation.
+08:31:16 <deathcap> findKey key = foldr (\(k,v) acc -> if key == k then Just v else acc) Nothing
+08:32:06 <deathcap> but in that case, isn't it just propagating the extracted value through the foldr and doing unnecessary computation? or do I have the wrong mental model of how foldr work
+08:32:24 <dmwit> I suspect the latter.
+08:32:35 <dmwit> The two definitions should behave almost exactly the same way.
+08:32:49 <dmwit> So if you don't object to the first one, but do object to the second one, then I think you have a wrong mental model.
+08:33:13 <dmwit> (However I make all these observations conditionally, because it is not yet clear to me whether you also object to the first one or not.)
+08:33:15 <monochrom> Indeed I refuse to teach students "you can use [(k,v)] for dictionary".  And I speak as one who say upfront "my course is more academic than practical, you'll see list examples all the time, doesn't mean you should use lists for real".
+08:33:36 <monochrom> In fact it is the students who use lists more than I do.
+08:33:45 <deathcap> i object to neither, I'm just trying to mentally map out the equivalences.
+08:34:24 <monochrom> OK you have the wrong mental model of how lazy evaluation works.
+08:34:55 <deathcap> hmmmm
+08:34:57 <monochrom> Consider this foldr on an infinite list.  foldr (&&) True (False : repeat True)
+08:35:07 <monochrom> Will it take infinite time or O(1) time?
+08:35:07 <deathcap> considering.
+08:35:14 <dmwit> > foldr (\(k,v) acc -> if "key" == k then Just v else acc) Nothing (("notkey",3):("key",4):undefined) -- proof that it does not inspect parts of the list that happen after the key is found
+08:35:17 <lambdabot>  Just 4
+08:35:18 <deathcap> 0(1) because it only evaluates as much as needed.
+08:35:23 <monochrom> > foldr (&&) True (False : repeat True)
+08:35:26 <lambdabot>  False
+08:35:32 <monochrom> So same for find.
+08:37:01 <deathcap> okay, i think i get it.
+08:37:12 <dmwit> deathcap: In the step where `key == k`, we have `acc`, which is the result of recursing over the rest of the list. But we take the `Just v` branch, and so don't look at `acc`, and so don't waste any time computing its actual value.
+08:37:46 <deathcap> ahhhhhhh okay.
+08:38:06 <deathcap> (stares at the "foldr" description in the book)
+08:38:19 <dmwit> Oh yes, this is definitely a staring moment.
+08:38:43 <dmwit> I have probably ten years of experience with Haskell now and I still often stop and stare long and hard at foldr invocations.
+08:38:52 <deathcap> ...i already like you guys more than the #java people
+08:39:35 <dmwit> \o/
+08:51:44 <deathcap> I think I figured out how to articular my confusion: when the accumulator is set to "Just k", why does it stop evaluating  there and return that? Because if it's recursively calling that key matching function and passing the accumulator through, i just don't see where it stops.
+08:52:02 <deathcap> i think it's the lack of a "return" signifier that's tripping me up.
+08:53:35 <glguy> deathcap: In your findKey definition 'acc' isn't the name of the fully evaluated result of searching the rest of the list, it's a "thunk", an unevaluated expression, for what it would be to findKey on the rest of the list
+08:53:59 <glguy> deathcap: So in the case that acc isn't used in result of the lambda expression, then the rest of the list isn't processed
+08:54:00 <avn> Folks, do you have any idea why `stack haddock` rebuilds everything, when I want just check my markup for correctness
+08:54:13 <deathcap> and so does it return Just k because it's actually evaluated right then and there?
+08:55:05 <Solonarv> deathcap: it returns 'Just v' and discards the 'acc' thunk, so it never ends up looking at the tail of the list
+08:56:13 <dmwit> deathcap: You ask, "if it's recursively calling that key matching function and passing the accumulator through, <question>".
+08:56:19 <glguy> foldr f z (x : xs)  ===  f x (foldr f z xs)
+08:56:31 <glguy> If 'f' doesn't use that second argument then the list processing stops
+08:56:31 <dmwit> deathcap: The problem here is that it's not recursively calling that key matching function, so the condition on your question is false.
+09:01:47 <WilliamHamilton[> I have a question on haddock generation: I want to host haddock for a package on github pages, but is there a way to generate the documentation so that the hyperlink point to the correct packages on hackage?
+09:05:38 <deathcap> okay, from the Haskell wiki: this is the part where I think it states what you're saying
+09:06:01 <deathcap> "f if is able to produce some part of its result without reference to the recursive case, and the rest of the result is never demanded, then the recursion will stop
+09:06:02 <deathcap> "
+09:06:23 <deathcap> which is what happens when the if statement branches to "just k" instead of "acc", right?
+09:06:29 <Solonarv> yep
+09:06:38 <deathcap> *light bulb*
+09:07:39 <Cale> @src foldr
+09:07:39 <lambdabot> foldr f z []     = z
+09:07:39 <lambdabot> foldr f z (x:xs) = f x (foldr f z xs)
+09:08:04 <Cale>                    ^ control is passed to f
+09:08:33 <Cale> That (foldr f z xs) isn't evaluated until f pattern matches on its second argument.
+09:09:58 <deathcap> and if "acc" isn't reached, then the pattern  matching on arg #2 doesn't happen.
+09:10:42 <Cale> right, if we discard the second argument altogether, there's no way it'll ever be matched on
+09:11:23 <deathcap> (i'm a part-time clojurist who's used to "destructuring" being the term for pattern matching and "acc" being a generic name i frequently use for vectors i'm recursively conj'ing to)
+09:11:23 <deathcap>  
+09:11:47 <Cale> It's actually funny to call it 'acc' here
+09:11:53 <Cale> because it's not an accumulator
+09:12:01 <deathcap> which is what i think is messing with me haha
+09:12:24 <Cale> Nothing has been accumulated at all, that's just an expression which represents the fold over the rest of the list, which hasn't happened yet.
+09:12:39 <deathcap> that's so counterintuitive.
+09:13:06 <Cale> It's important to keep in mind that lazy evaluation is outermost-first
+09:13:08 <deathcap> "so" being in bold for whatever reason makes my text read with a valley girl accent
+09:13:36 <Cale> So you can always figure out where the program is going just by reading from left to right :)
+09:14:04 <Cale> @src foldl
+09:14:04 <lambdabot> foldl f z []     = z
+09:14:04 <lambdabot> foldl f z (x:xs) = foldl f (f z x) xs
+09:14:09 <deathcap> outermost-first meaning the outermost function, right?
+09:14:12 <Cale> yeah
+09:14:24 <Cale> You can see here that foldl will never be able to stop early
+09:14:40 <Cale> because it greedily applies itself to new arguments until it makes its way to the end of the list
+09:14:41 <deathcap> which is why you can't use foldl on an infinite list?
+09:14:47 <Solonarv> deathcap: so is in bold because there's someone with the IRC name 'so' in this channel, and your client is highlighting it for that reason
+09:14:48 <Cale> yeah
+09:15:14 <deathcap> remind me to make an irc name of "is" or "and" or "the"
+09:15:20 <Cale> With an infinite list, that just never happens, and it just keeps applying itself to new arguments without being productive ever
+09:15:29 <deathcap> do you stack overflow in that case?
+09:15:38 <deathcap> or is there some kind of optimization that just keeps it going.
+09:16:07 <Cale> Well, there shouldn't be anything much going on the stack
+09:16:30 <Cale> The stack is mostly a stack of pattern matches waiting for their scrutinee to be sufficiently evaluated to match a pattern
+09:16:54 <Solonarv> if you use foldl on an infinite list your program just gets stuck, much like it would if you wrote 'while(True) { ... }' in some vaguely C-like language
+09:16:54 <Cale> so long as we're able to evaluate the list argument easily, the stack won't get very large here
+09:17:06 <deathcap> ahhhhhhhhhhh okay.
+09:17:11 <Cale> However, you *are* going to build a gigantic expression in the second argument of foldl
+09:17:23 <Cale> and so you will eventually run out of space
+09:17:36 <deathcap> so more likely an out of memory error.
+09:17:39 <Cale> yeah
+09:17:43 <deathcap> gotcha.
+09:18:15 <Cale> Now, GHC might be clever, and force the evaluation of the second argument, in which case, you're just in an ordinary infinite loop -- but that's not quite lazy evaluation :)
+09:18:30 <Solonarv> % foldl (+) 0 [1..] -- let's try it!
+09:18:31 <yahb> Solonarv: *** Exception: heap overflow
+09:18:36 <Cale> (if you turn on strictness analysis, things like that will tend to happen)
+09:18:53 <Cale> which is default with -O
+09:19:07 <Solonarv> % foldl' (+) 0 [1..] -- the strict version
+09:19:12 <yahb> Solonarv: [Timed out]
+09:19:19 <Cale> @src foldl'
+09:19:19 <lambdabot> foldl' f a []     = a
+09:19:20 <lambdabot> foldl' f a (x:xs) = let a' = f a x in a' `seq` foldl' f a' xs
+09:19:58 <Cale> foldl' is like foldl, but it includes a hint to the compiler that we want the accumulator to be evaluated prior to the result of the foldl' being available
+09:20:13 <Cale> so it will tend to evaluate that first
+09:21:15 <Cale> Now, what may get you a stack overflow is using foldr with a strict function like (+) that needs to evaluate both its arguments
+09:21:29 <Cale> foldr (+) 0 [1..] -> 1 + foldr (+) 0 [2..]
+09:21:59 <Cale> and then that outermost (+) pattern matches on its second argument, and that pattern match waits on the stack
+09:22:15 <Cale> % foldr (+) 0 [1..]
+09:22:17 <yahb> Cale: *** Exception: heap overflow
+09:22:26 <Cale> but it seems I get a heap overflow anyway :D
+09:24:14 <Cale> (the stack is probably large / dynamically growable)
+09:25:41 <deathcap> (in 2013 i tried to teach myself this and got stuck on the same chapter...i'm hanging on a bit better this go-round and i think it's due to just understanding FP a bit better)
+09:26:31 <deathcap> Thank you all for the explanations and examples!!
+09:29:08 <deathcap> when i get to monads you'll probably be hearing a lot from me. 
+09:37:20 <Cale> deathcap: Yeah, no problem :)
+09:41:57 <__monty__> deathcap: Don't set yourself up for failure by expecting too much from monads. Most people expect something groundbreaking, learn what they really are, then get paranoid and refuse to accept "that's it."
+09:55:58 <unicoder> Hi folks! I am curious about using putStrLn on Windows with Unicode characters. In the past, I have had trouble where many things outside of ASCII come out as jibberish. Does anyone have experience with this?
+09:56:42 <unicoder> I am distributing an executable that runs on lots of different people's computers, so even if I can fix it for myself, a lot of folks out there will just see it being broken.
+09:58:07 <Cale> unicoder: I think the problem may be that the windows console isn't set up for a full unicode encoding by default. Rather, it's CP-1251 or something like that.
+09:58:43 <Cale> er, that's not it
+09:58:44 <Cale> haha
+09:59:03 <Cale> 1252?
+09:59:22 <unicoder> Yeah, for a while we were telling folks to switch something in their setup, but I'd rather just not have to tell anyone anything
+09:59:24 <Cale> It's probably also dependent on which version of Windows you're using
+09:59:29 <unicoder> And have it just print the characters out.
+09:59:46 <unicoder> I remember looking into the libraries that get around this
+09:59:49 <Cale> Yeah, the trouble is, it certainly can't do that if the terminal itself doesn't support those characters
+09:59:51 <unicoder> I think haskeline is one of them
+10:00:25 <unicoder> Well, my understanding is that the default putStrLn is using a certain Windows binding, but there are later ones that support unicode.
+10:00:49 <Cale> putStrLn itself supports unicode
+10:01:14 <Cale> It will write text in whatever text encoding stdout is set to use.
+10:01:55 <Cale> The problem is, if you set that encoding to UTF-8, but the terminal doesn't support UTF-8, you get gibberish
+10:03:32 <Cale> Though I don't know, it sounds like there might be some windows-specific ways to force it to do the right thing even if the text encoding is set to a non-unicode one.
+10:03:55 <unicoder> Something like this https://www.python.org/dev/peps/pep-0528/
+10:05:29 <unicoder> I think it's about using Console instead of File in the C bindings in Windows
+10:08:14 <unicoder> I found the outline of the idea here: https://stackoverflow.com/questions/388490/how-to-use-unicode-characters-in-windows-command-line
+10:10:10 <geekosaur> chcp 65001
+10:13:20 <geekosaur> also there's a new I/O manager in the works for Windows which is supposed to do somewhat better, but it's basically got only one overloaded person working on it
+10:13:26 <unicoder> My impression is that functions like https://docs.microsoft.com/en-us/windows/console/writeconsole are currently not used in the putStrLn implementation, but I'm having trouble figuring out exactly how it works.
+10:14:34 <Phyx-> geekosaur: yup, but it's almost ready! only 2 failing tests! though nasty ones to debug :(
+10:14:54 <unicoder> geekosaur: oh, that is exciting!
+10:15:04 <Phyx-> unicoder: you can call https://docs.microsoft.com/en-us/windows/console/setconsolecp at startup
+10:15:19 <Phyx-> and then hSetEncoding on stdout/stdin/stderr
+10:15:24 <Phyx-> that should work
+10:15:55 <Phyx-> calling those with e.g. utf-8 I mean
+10:17:32 <unicoder> Phyx-: interesting! I'll write this down and see if someone can try it out. I have the most trouble with https://en.wikipedia.org/wiki/Box-drawing_character. Do you expect this to resolve those cases?
+10:18:34 <Cale> oh nice
+10:18:35 <unicoder> I am getting the impression that the code page stuff fixes up to U+FFFF, but after that the default font may not support the characters?
+10:19:03 <Cale> Well, most of the stuff you'd probably want to use is under U+FFFF
+10:19:35 <Cale> Box drawing stuff is at U+2500
+10:19:38 <unicoder> Cale, yeah, everything I need is under for now, but I want to make sure! :)
+10:19:55 <unicoder> Sometimes I am tempted to use faces in there, and neat characters.
+10:19:56 <Phyx-> unicoder: yeah, you do indeed need a font that supports it. Though I believe newer Windows versions do have a default font that does
+10:20:01 <Cale> It wouldn't surprise me if the font has bad coverage in places
+10:20:05 <Phyx-> due to the support for escape codes that were added
+10:21:50 <amf> does anyone have a working (compile + test) example for this https://www.parsonsmatt.org/2018/03/22/three_layer_haskell_cake.html ? 
+10:22:18 <unicoder> To use SetConsoleCP(65001), I'll need to add a C binding and the #if(mingw) stuff. Do you have any examples of that Phyx-?
+10:23:10 <unicoder> I have been trying to avoid needing C bindings for years now, but I think this project could be worth a try.
+10:23:16 <Phyx-> unicoder: use Win32 http://hackage.haskell.org/package/Win32-2.8.3.0/docs/System-Win32-Console.html
+10:23:52 <unicoder> Woah, great tip! :D
+10:25:07 <unicoder> I should hide that behind an #if though right? So it doesn't get called on other OSes?
+10:26:06 <unicoder> I'll play around with it and see what happens!
+10:26:16 <Phyx-> unicoder: in your cabal file you can hide it under an if (os(Windows)) check. and have a dummy package for other OSes if you need it
+10:26:22 <Phyx-> that way you don't need any CPP
+10:26:45 <unicoder> Thank you so much Phyx-! Exciting to hear about your work and learn your tricks :D
+10:27:24 <Phyx-> np :)
+10:29:16 <deathcap> __monty__ I'm sure they're simpler than I anticipate. I've just seen enough references to them tripping people up that they're slightly intimidating.
+10:34:42 <__monty__> deathcap: Get rid of the intimidation. It won't be an enlightening experience if you expect it to be.
+10:34:54 <__monty__> Kind of a paradox.
+10:41:45 <maerwald> well, it isn't enlightening at all
+10:44:29 <__monty__> It's enlightening the same way functor and applicative are. Not a single step to nirvana kind of enlightenment : )
+11:13:58 <Amras> I'm trying to work out how to represent an infinite series, in a computationally reasonable way
+11:14:40 <Amras> (my specific use case is a square wave as a sum of sines)
+11:15:24 <Amras> I am able to tell when an element of the series is too small to be representable (the frequency is too large, in this case)
+11:16:26 <Amras> what I was thinking of doing is data Wave = Sine Freq Amplitude | ConstantWave Amplitude | Sum Wave Wave
+11:17:10 <Amras> then I could have some sample :: SamplingParams -> Wave -> [Double]
+11:17:20 <Amras> sorry, Maybe [Double]
+11:18:40 <Amras> for high frequency Sines (more than half the sampling rate) I'd have sample return Nothing; and for Sum I'd have a left-preferential setup, so Sum Nothing (Just x) would sample to Nothing, and Sum (Just x) Nothing would sample to Just x
+11:19:02 <dmwit> Counter-proposal: data Wave = Wave { fundamental :: Freq, overtones :: [Amplitude] }
+11:19:28 <Solonarv> hm, I was thinking of something like:
+11:19:28 <Solonarv> data Waveform = Waveform { wfOffset :: Amplitude, wfWaves :: [SineWave] }
+11:19:28 <Solonarv> data SineWave = SineWave Freq Amplitude
+11:19:28 <Solonarv> with a rule that the frequencies must be strictly increasing
+11:19:45 <dmwit> (With the understanding that `overtones w !! n` is the amplitude of the nth multiple of the fundamental frequency.)
+11:20:06 <Solonarv> (also, how does this handle phase shifts?)
+11:20:15 <Amras> I'm simplifying, Solonarv
+11:20:43 <Amras> my actual scenario is a fourier, where (using denotational syntax) [[Fourier]] = Freq -> Complex
+11:21:24 <Amras> I'm trying to simultaneously handle discrete-sourced (audio file) waves and synthesized impulses
+11:21:32 <Amras> hence the weirdness with sampling
+11:22:51 <Amras> instead of Sine I have Dirac Freq Complex
+11:23:57 <dmwit> You might take a look at Euterpea.
+11:25:47 <Amras> taking
+11:25:49 <dmwit> http://hackage.haskell.org/package/Euterpea-2.0.6/docs/Euterpea-IO-Audio-BasicSigFuns.html but this documentation is hopelessly sparse
+11:26:23 <dmwit> http://euterpea.com/api/euterpea-api/signal-level-api/ may be a bit better
+11:28:13 <Amras> best I can tell Euterpea operates on discrete time audio samples?
+11:28:28 <Amras> (same data as you'd find in wav & friends)
+11:39:36 <Amras> dmwit's overtone suggestion sounds the most reasonable atm; sines can be represented by overtones=[] and I can cut off evaluation eventually
+11:46:06 <ski>   head (overtones w) = ?
+11:48:01 <Solonarv> dang off-by-one errors
+11:48:25 <Amras> I don't think it's a good idea to hold the initial value in head . overtones because the first value should be Complex (ie. have an offset) but overtones will never have a relative offset so they can be Real
+11:49:22 * ski isn't sure what "offset" means in this context
+11:50:07 <ski> (is it related to your `ConstantWave Amplitude' case ?)
+11:51:02 <Solonarv> ski: I think it's the phase
+11:51:05 <Amras> the output of a fourier transform is a mapping from a frequency space [ex. Hz] to a complex space, where abs(complex) represents the amplitude of the (co?)sine and angle(complex) represents the phase shift
+11:51:21 <Amras> angle and offset feel synonymous in my head but they probably mean different things
+11:52:03 <Amras> but yeah, the overtones of a sound won't be phase-shifted relative to the fundamental
+11:52:09 <ski> oh, phase
+12:23:37 <Amras> suppose I have a sequence of values (type T) with equidistant Real indices, and I want to treat them as a continuous (lerped) mapping. I could store them in a UArray Int and hold the distance between each sample seperately. Then lerping just requires working out the two Int indices. Is there a clean (and efficient) way to achieve this using UArray Double?
+12:24:49 <Amras> or to simplify: is there an O(1) way to work out which two indices of an IArray Double are the nearest to a given Double?
+12:25:06 <Cale> What do you mean by IArray Double?
+12:25:12 <Cale> That's... not a type
+12:25:35 <Amras> IArray Double T - indexed by Double, holding T
+12:25:48 <dmwit> :t M.splitLookup
+12:25:49 <lambdabot> Ord k => k -> M.Map k a -> (M.Map k a, Maybe a, M.Map k a)
+12:25:49 <Cale> Arrays can't be indexed by Double, it's not an instance of Ix
+12:25:54 <Amras> oh
+12:26:08 <Amras> ok, I must have misread the instances then
+12:26:17 <Amras> my bad
+12:26:26 <dmwit> Alternately,
+12:26:26 <Cale> You can have an unboxed array of Doubles
+12:26:41 <dmwit> :t \k m -> (M.lookupLT k m, M.lookupGT k m)
+12:26:42 <lambdabot> Ord k => k -> M.Map k v -> (Maybe (k, v), Maybe (k, v))
+12:26:44 <Cale> but it still needs to be indexed by some type which is an instance of Ix
+12:26:50 <Cale> (any instance of Ix will do)
+12:27:19 <Cale> The type class constraint  IArray a e  means that  a  is some type of immutable array for which  e  is a valid *element* type
+12:27:24 <Amras> thanks dmwit
+12:27:35 <Cale> For example, there's an instance  IArray UArray Double
+12:27:59 <Cale> because you can have a UArray (unboxed array) whose elements are Doubles
+12:28:40 <Amras> yup, I just misread the instances as a UArray whose indices are double
+12:28:47 <dmwit> Actually, it occurs to me that lookupLE and lookupGE are going to be more sensible choices for lepr.
+12:28:50 <dmwit> lerp.
+12:29:08 <Cale> Yeah, dmwit's suggestion is pretty much how I'd do this as well. Data.Map will be much nicer. It's not O(1) exactly, but it's O(log n) and is usually going to be good enough.
+12:29:27 <dmwit> You were going to get O(log n) from the Array anyway, since you had to binary-search to find the right index.
+12:29:39 <Cale> right
+12:29:45 <Amras> I don't think I did have to
+12:30:08 <dmwit> Oh?
+12:30:24 <Cale> well, depends on how you're using it -- if you're consuming the array completely from left to right, perhaps it's O(1) per index
+12:30:25 <Amras> the distance between each real value is constant and I know the minimum.
+12:30:32 <Cale> ahhh
+12:30:45 <dmwit> Oh, okay. Well, then just use `div'` to compute an `Int` index.
+12:30:47 <dmwit> :t div'
+12:30:48 <lambdabot> (Real a, Integral b) => a -> a -> b
+12:30:57 <dmwit> > div' 9 pi
+12:30:59 <lambdabot>  2
+12:31:03 <Amras> yeah, I was just trying to find a solution that'
+12:31:15 <Amras> that'd give me O(1) without having to store the interval seperately
+12:31:37 <dmwit> Why do you want to avoid storing the interval?
+12:31:47 <Amras> cleaner code >_>
+12:31:58 <dmwit> ???
+12:32:11 <monochrom> I don't even think there was any interval in the first place.
+12:32:42 <Amras> MyLerp Double (UArray Int T) is less legible than MyLerp (Map Double T)
+12:33:01 <dmwit> Why would it not just be MyLerp T?
+12:33:27 <Amras> data MyLerp T = MyLerp Double (UArray Int T)
+12:33:37 <dmwit> Oh.
+12:33:44 <dmwit> Well you're going to hide all that behind an abstraction boundary anyway.
+12:33:52 <Amras> I know
+12:33:52 <dmwit> So you only have to see the ugliness while working behind that boundary. ;-)
+12:34:03 <monochrom> Doesn't mean the implementation has to be ugly.
+12:34:23 <dmwit> I... don't really agree that MyLerp Double (UArray Int T) is ugly, though.
+12:34:45 <Amras> it's not immediately obvious what Double is supposed to mean, and what the Int is doing
+12:34:55 <Amras> Map Double T is immediately obvious
+12:34:55 <dmwit> Maybe name the fields or so, but otherwise looks fine. MyLerp { minimum :: Double, perElement :: Double, samples :: UArray Int T }
+12:35:27 <Amras> yup
+12:35:40 <monochrom> To be sure, it's always possible to add a comment.
+12:36:20 <dmwit> OR you could first create a type-level IEEE754 implementation, then make an Ix instance for a newtype wrapper around Doubles that reflects the interval between elements at the type level.
+12:36:30 <dmwit> This is my personal favorite for making the code clean and easy to read.
+12:36:40 <monochrom> I am indeed among a minority that disbelieves in making self-documenting code a religion.
+12:36:48 <Amras> that's just adding implicit behavior where it's not neccessary
+12:37:00 <Amras> my type currently has 22 loc and 11 of them or comments
+12:37:21 <Amras> so I'm definitely with you, monochrom, I'd just like my code to explain some of itself
+12:37:34 <dmwit> Um. I think from your last comment I haven't been as clear as I could have been about this: suggesting a type-level implementation of IEEE754 was very much a joke.
+12:39:17 <monochrom> Hell I prefer making conal's denotational design a religion.  The design of a data type is based on the denotational semantics of what you use it for; in particular the "no invalid value" principle.
+12:39:55 <Amras> that is the goal of this project yes
+12:40:14 <Solonarv> And suddenly we're not allowed to have e.g. efficient finger trees anymore, because we can't cache the summary
+12:40:16 <monochrom> So for example this says that Map Double T is bad because the actual keys you will have are not completely arbitrary uncontrained Doubles.
+12:42:26 <monochrom> Solonarv: Religions are inefficient, I know!
+12:43:03 <Solonarv> we'd have to outlaw all of 'container', in fact! :p
+12:44:14 <Solonarv> er, 'containers'
+12:49:14 <dmwit> I have a cunning plan. 1. Write down a data type that does pretty much what you want. 2. Modify your denotation to match the possible values in that type.
+12:49:42 <Solonarv> haha
+12:50:13 <monochrom> That's how mathematics is born.
+12:50:18 <Cale> Or just unsafeCoerce
+12:50:42 <monochrom> That's also how foundation of mathematics is born.
+12:50:50 <Cale> hahaha
+12:51:41 <ski> monochrom : hm, where is this "no invalid value" principle mentioned ?
+12:51:55 <monochrom> Like how the hell can "a tuple (a,b) is the set {{a}, {a,b}}" can make sense unless it's an unsafeCoerce.
+12:52:11 <monochrom> It's more commonly called "no junk".
+12:52:50 * ski . o O ( "no junk vs. no slack" )
+12:53:11 <Rembane> Are you talking about linear programming? 
+12:53:19 <monochrom> No.
+12:54:42 <Rembane> *phew*
+12:59:26 <nshepperd_> The foundation of mathematics is unityped. "Fix Set should be enough for anyone"
+13:00:36 <monochrom> Hey Russell found that it's more than enough! Free theorems for everyone!
+13:02:06 * hackage ats-pkg 3.2.5.10 - A build tool for ATS  https://hackage.haskell.org/package/ats-pkg-3.2.5.10 (vmchale)
+13:03:07 * hackage massiv-scheduler 0.1.0.0 - Work stealing scheduler for Massiv (Массив) and other parallel applications.  https://hackage.haskell.org/package/massiv-scheduler-0.1.0.0 (lehins)
+13:14:36 * hackage libarchive 1.0.0.0 - Haskell interface to libarchive  https://hackage.haskell.org/package/libarchive-1.0.0.0 (vmchale)
+13:23:07 * hackage libarchive 1.0.1.0 - Haskell interface to libarchive  https://hackage.haskell.org/package/libarchive-1.0.1.0 (vmchale)
+13:51:19 <remexre> is there any sort of "search by examples" tool?
+13:51:49 <remexre> e.g. If I do :examples f; f [1, 2, 3] = [3, 2, 1]; f [] = []; it can give me f = reverse ?
+13:56:24 <slack1256> Sometimes haddock generated documentation includes them as in the case of Data.Map.Lazy
+14:19:18 <akr> can I somehow escape haskell keyword in record field names, so that I can e.g. encode a JSON object with a field called "data"?
+14:19:34 <akr> or do I just need to write my own ToJSON instance
+14:19:54 <akr> (talking about Aeson here, just in case it's relevant anyhow)
+14:19:58 <Cale> Either write your own ToJSON instance, which I'd recommend because you care about the structure of the resulting JSON, or use a prefix
+14:20:13 <akr> Cale: got it, thanks :)
+14:21:22 <Cale> The TH way of deriving JSON instances can modify the field names by applying an arbitrary function
+14:22:12 <akr> so I could achieve this by writing some TH myself?
+14:22:35 <Cale> nah, you just need to pass an appropriate Options record to deriveJSON
+14:22:47 <akr> ah, interesting
+14:23:24 <akr> didn't know about that, could come useful
+14:41:15 <jle`> remexre: a lot of times you can get a decent result just by searching for the type
+14:41:30 <jle`> searching for an [a] -> [a], there are only so many results you'll find
+14:45:52 * ski . o O ( Inductive Functional Programming (would be a form of Machine Learning. programming-by-(example|demonstration)) )
+14:45:56 <ski> (cf. ILP)
+14:46:42 <remexre> jle`: Yeah, I'm familiar with Hoogle, I was just wondering if an example-based tool exists
+14:54:15 <Cale> remexre: ftp://ftp.sci.kun.nl/pub/Clean/papers/2006/koop2006-TFP06-SystematicSynthesisOfFunctions.pdf might be of interest
+14:54:31 <Cale> also https://pdfs.semanticscholar.org/c638/7f1fb8638b2a78dfbe5d9f4c31f541d19753.pdf
+14:55:07 * hackage libarchive 1.0.2.0 - Haskell interface to libarchive  https://hackage.haskell.org/package/libarchive-1.0.2.0 (vmchale)
+14:55:10 <ski> cool ! :
+14:55:13 <ski> :)
+14:58:21 <Solonarv> the "valid hole fits" mechanism might also be of interest
+14:59:58 <sjakobi> What does this bit from the Ord docs mean: " <= is customarily expected to implement a non-strict partial order". In particular, why isn't it expected to be total?
+15:01:02 <Cale> It is expected to be total, that's weird.
+15:01:53 <Cale> A partial order would break things like Set and Map
+15:02:06 <delYsid> @src foldl'
+15:02:07 <lambdabot> foldl' f a []     = a
+15:02:07 <lambdabot> foldl' f a (x:xs) = let a' = f a x in a' `seq` foldl' f a' xs
+15:04:46 <monochrom> Actually under "Note that the following operator interactions are expected to hold" points 4, 5, 6, 7, 8 forces a total order (trichotomy of < = >) unless you allow compare, min, max to be conditionally bottom.
+15:04:47 <jle`> that documentation might have been written before a lot of the ecosystem was established
+15:05:07 <jle`> because most of the ecosystem would fall apart if Ord was not total
+15:05:16 <monochrom> Or at least s/forces/expects/
+15:05:24 <jle`> well, i suppose it is partial in some situations dealing with infinite data
+15:05:29 <jle`> that might be what it is referring to
+15:05:34 <sjakobi> jle`: Actually these docs were added very recently
+15:05:44 <jle`> for example, repeat 1 <= repeat 1 is _|_
+15:05:50 <jle`> sjakobi: ah, interesting
+15:06:00 <monochrom> In fact even sort would fail, and sort is not new.
+15:06:09 <jle`> > repeat 1 <= repeat 1
+15:06:17 <lambdabot>  mueval: ExitFailure 1
+15:06:34 <Arahael> *purely out of interest*, do we have a .au haskell jobs posting board?
+15:06:48 <sjakobi> jle`: That's a good example
+15:07:01 <monochrom> I propose a conspiracy theory.  Someone had a hidden agenda and sabotaged the doc to say "partial order OK".
+15:07:05 <geekosaur> my guess is "partial order" is so that nobody mentions Double
+15:07:13 <jle`> ah
+15:07:13 <monochrom> Oh, haha
+15:07:29 <ski> > sort [[1 ..],[1 ..]]
+15:07:36 <lambdabot>  mueval-core: Time limit exceeded
+15:07:41 <ddellacosta> I'm trying to understand how to implement the ReaderT pattern per Michael Snoyman's blog post--is there any real difference between using an IORef vs. TVar for holding e.g. database connection, log handle, etc.? I'm not sure why I'd choose one over the other--seems like they both support atomic operations in a threadsafe fashion?
+15:07:43 <sjakobi> geekosaur: No the "customarily" bit is the hint at Float etc
+15:07:57 <monochrom> But 4,5,6,7,8 also break with floating point numbers.
+15:08:25 <sjakobi> See the docs on the Ord Float instance
+15:08:33 <ski> ddellacosta : if you want to be able to build larger atomic transactions involving more than a single mutable location, use `TVar'
+15:08:38 <Solonarv> ddellacosta: roughly speaking, IORef is easiest to get wrong
+15:09:02 <jle`> ddellacosta: IORef's "atomic" operations are really meant to be atomic "pure functions" (although that can get fuzzy), X -> Y
+15:09:02 <Solonarv> but any of the mutable cells (IORef, MVar, TVar, ...) will work for simple cases
+15:09:13 <jle`> ddellacosta: TVar is attomic w.r.t. IO actions, as well
+15:09:25 <jle`> so modifying with (X -> ST Y), for instance
+15:09:26 <ski> @hoogle atomicModifyIORef
+15:09:27 <lambdabot> Data.IORef atomicModifyIORef :: IORef a -> (a -> (a, b)) -> IO b
+15:09:27 <lambdabot> Data.IORef.Lifted atomicModifyIORef :: MonadBase IO m => IORef a -> (a -> (a, b)) -> m b
+15:09:27 <lambdabot> UnliftIO.IORef atomicModifyIORef :: MonadIO m => IORef a -> (a -> (a, b)) -> m b
+15:09:47 <geekosaur> you're sticking a Handle in it, it's not changing
+15:09:49 <jle`> * STM
+15:10:07 <geekosaur> the real question is, who *holds* the Handle at any given time. IORef doesn't help you with this
+15:10:11 <ddellacosta> ski, Solonarv, jle` thanks, that is all helpful!
+15:10:13 <ddellacosta> geekosaur: good point
+15:10:19 <geekosaur> MVar and TVar do, and TVar is easier to get right
+15:10:28 <jle`> sjakobi: STM allows you to roll back IO actions, which is a lot more complicated than rolling back pure functions
+15:10:37 <jle`> (limited IO actions)
+15:10:39 * ski . o O ( `TMVar' )
+15:10:52 * ddellacosta really needs to actually read Simon Marlow's Haskell Concurrency book :-/
+15:11:10 <jle`> this part is actually really only a chapter or two :) and msot of the chapters are standalone, too
+15:11:24 <ddellacosta> jle`: okay that does it, I have no excuse now, lol
+15:11:31 <ddellacosta> thanks everyone
+15:11:52 <jle`> sorry, the message earlier was directed at ddellacosta , not sjakobi 
+15:13:37 * Arahael twacks his head: stackoverflow jobs listing is probably the go-to platform these days.
+15:15:46 <ddellacosta> also, I should have kept reading because he actually addresses this. Whoops
+16:00:06 * hackage util 0.1.13.0 - Utilities  https://hackage.haskell.org/package/util-0.1.13.0 (MatthewFarkasDyck)
+16:01:37 * hackage hledger-lib 1.14.1 - Core data types, parsers and functionality for the hledger accounting tools  https://hackage.haskell.org/package/hledger-lib-1.14.1 (SimonMichael)
+16:02:37 * hackage hledger-web 1.14.1, hledger-ui 1.14.1, hledger 1.14.2 (SimonMichael): https://qbin.io/ph-fifty-qn3b
+16:46:06 * hackage viewprof 0.0.0.28 - Text-based interactive GHC .prof viewer  https://hackage.haskell.org/package/viewprof-0.0.0.28 (MitsutoshiAoe)
+16:57:16 <dyl> How does one get location information if using regex-applicative?...
+17:04:52 <delYsid> wow, one Bang, -5GB GC :-)
+17:20:07 <koz_> This is more an algorithm question that anything, but I'd want to do this in Haskell: suppose I have a collection of Texts ts and a Text x, and I want to return a list of Texts from ts sorted by ascending Levenshtein distance from x. What's the most efficient way to do this, assuming ts rarely changes?
+17:21:53 <Solonarv> koz_: 'sortOn (levenshteinDist x) ts' is my best guess
+17:22:11 <koz_> Solonarv: Yeah, but that's _very_ recompute-heavy.
+17:22:44 <koz_> I was wondering if there was some kind of data structure I could put every Text of ts into that might make it a bit less painful than that.
+17:22:58 <Solonarv> hmm...
+17:23:38 <Solonarv> perhaps there's something trie-like
+17:23:42 <Solonarv> idunno, not my forte
+17:25:00 <koz_> Solonarv: Mine neither, hence my asking here.
+17:25:06 <koz_> But thanks for the suggestion anyway.
+17:26:25 <Solonarv> I don't know anything about algorithms for computing levenshtein distances, but maybe there is some information which can be precomputed about one of the strings without knowing the other one
+17:26:53 <koz_> Solonarv: The standard Levenstein distance algorithm uses dynamic programming.
+17:27:23 <koz_> (basically compare increasingly longer prefixes and save the best options from each step)
+17:30:46 <Solonarv> might be worthy of a stackoverflow/stackexchange question, if one doesn't already exist
+17:31:38 <koz_> Solonarv: Yeah, could be. I'll do some searching and if not, might just ask it.
+17:33:38 <koz_> https://stackoverflow.com/questions/14845341/data-structure-for-retrieving-strings-that-are-close-by-levenshtein-distance
+17:33:41 <koz_> Go figure.
+17:38:42 <Solonarv> nice!
+17:42:10 <koz_> BK trees seem to be what I seek. Now time to dredge anything that cites that paper to see if there's been any clever developments in that area.
+17:49:06 * hackage hledger-ui 1.14.2 - Curses-style user interface for the hledger accounting tool  https://hackage.haskell.org/package/hledger-ui-1.14.2 (SimonMichael)
+19:41:39 <utdemir> Hey. I have a library I haven't published on Hackage yet. I want to put haddocks online. But the generated Haddocks have absolute paths pointing to random locations on my filesystem. What should I do to get self contained docs with Haddocks? Preferably not by using stack.
+19:49:46 <Solonarv> utdemir: you don't need to do anything, hackage will build haddocks on its own
+19:50:16 <utdemir> I don't want to put my library to Hackage yet, since it's evolving quite fast.
+19:50:32 <Solonarv> oooh I see
+20:06:22 <Shockk> I'm having trouble understanding something about attoparsec; I have the following code:   Atto.parse (many statementParser) input
+20:06:56 <Shockk> I have a lot of input and some of it fails to parse correctly, however, I don't get a parser failure due to remaining input
+20:07:23 <monochrom> many statementParser <* eof
+20:07:48 <monochrom> More explanatorily, you need to insist "no junk after".
+20:07:53 <Shockk> ah right I see
+20:08:53 <Shockk> I was hoping to get some context about the failure state, as I see in the case of failure, parse gives me (Fail remainder contexts errstr)
+20:10:07 <Shockk> I'm assuming eof would be the same as endOfInput, but when I used <* endOfInput it doesn't give me any useful contextual info at all
+20:11:33 <Shockk> is there a typical way that this is done? for example, if I have something like:  x = 5; $   then I'd like to have contextual info that the place it failed was the $
+20:14:02 <Shockk> for example, would it work better if I called (parse statementParser input) and then instead parsed each subsequent statement using (Partial continuation)?
+22:05:06 * hackage hw-ip 2.1.0.0 - Library for manipulating IP addresses and CIDR blocks  https://hackage.haskell.org/package/hw-ip-2.1.0.0 (haskellworks)
+22:19:35 <remexre> do fusion rules apply cross-module?
+22:23:26 <remexre> unrelatedly, is there something like AFL for Haskell? I'm aware of QuickCheck, but I'm testing a lexer (that has a few uses of (error "unreachable?")), so for things like string escapes I wanna have some seeds
+22:23:41 <remexre> and of course branch-coverage-finding behavior
+22:25:37 <geekosaur> it will do fusion if it can see the thing to fuse. this in practice may mean INLINABLE pragmas
+22:26:13 <remexre> okay
+23:36:07 * hackage elm-bridge 0.5.1 - Derive Elm types and Json code from Haskell types, using aeson's options  https://hackage.haskell.org/package/elm-bridge-0.5.1 (SimonMarechal)
+23:44:37 * hackage winery 1 - Sustainable serialisation library  https://hackage.haskell.org/package/winery-1 (FumiakiKinoshita)

@@ -1,0 +1,2137 @@
+00:36:25 <kamatsu> okay, so, there are alot of web frameworks now
+00:36:40 <kamatsu> what's a reasonably fast one that is production-ready? if any
+00:39:21 <n00p> A girl wants to skype and she doesn't know Haskell. What do I do?
+00:41:59 <medfly> teach her Haksell.
+00:42:02 <Baughn> n00p: Ignore her. She's clearly not worth your time.
+00:43:29 <dh__> why do you expect a girl know haskell ? 
+00:44:19 <n00p> Why do I eat, drink, breath, sleep and do other unpleasant, unspeakable things?
+00:48:48 <luite> hmm, how does the ghc rts determine when the garbage collector needs to be run? I have a program that allocates almost all data through ffi calls (managed using ForeignPtr and finalizerFree), but it doesn't look like it frees those things on time
+00:48:56 <dh__> because it's good for your health.
+00:49:14 <luite> it quickly runs out of memory
+00:50:29 <luite> perhaps relying on finalizers for large objects (~50MB) that get allocated often isn't a good idea?
+00:52:15 <luite> meh guess no-one is haskelling at this ungodly hour
+00:52:21 <luite> :)
+00:52:27 <_nickel> I'm attempting to install zeromq-haskell with cabal but it can't seem to find libmq.so which is in /usr/lib/local
+00:52:32 <_nickel> luite: not so!
+00:52:37 <m3ga> luite: its 5pm here. thats not an ungodly hour
+00:52:46 <Baughn> luite: The GC triggers whenever the haskell heap hits a certain size, simple. ;)
+00:52:52 <_nickel> luite: well, I hope to be haskelling once I get this package built and running
+00:52:53 <luite> ah you quickly proved me wrong 
+00:53:09 <Baughn> (And then the heap may or may not get enlarged, based on how much data turns out to be live. It's never reduced.)
+00:53:20 <m3ga> no matter what time of the day, there is always someone haskelling
+00:53:32 <Baughn> luite: And yeah, relying on finalizers in that scenario is not going to work.
+00:54:05 <luite> hmm, in that case I can forget my nice pure interface and have to move everything into IO :(
+00:54:15 <Baughn> Not necessarily
+00:55:10 <Baughn> Really, you just want to have the allocations managed as part of haskell's heap.
+00:55:19 <luite> I have a lot of items of type Polynomial = Polynomial (ForeignPtr CUInt) CInt
+00:55:57 <luite> the problem is that all those polynomial things are allocated using malloc, the operations are done in C, and you don't know beforehand how large the object is going to be
+00:56:36 <luite> it coult be copied afterwards to a haskell managed data structure, but that would be bad for performance
+00:57:04 <luite> and performance is the whole reason that I'm doing all these crazy ffi things
+00:57:13 <Baughn> Hmm.
+00:57:37 <Baughn> It's your own code on the other side of the FFI?
+00:57:57 <Baughn> Then, option two: Write C code that calls the haskell allocator. ;)
+00:58:24 <luite> yes, that's mine too :)
+00:58:31 <Baughn> (You can call back into haskell via the FFI, so there's no need to use silly RTS tricks)
+00:58:39 <_nickel> anyone have any idea where cabal expects object files to be when compiling a library that relies on FFI?
+00:58:40 <luite> hadn't thought of that
+01:00:53 <luite> Baughn: hmm, do you know an example for allocating haskell memory from C?
+01:01:04 <luite> it's not in the memory allocation section of the ghc users' guide
+01:01:49 <Baughn> luite: First, let me ask you - do you want mutable (after returning from C) memory, or immutable?
+01:01:59 <luite> immutable
+01:02:11 <Baughn> Then that makes it simple.
+01:02:32 <luite> oh I like simple :p
+01:03:13 <Baughn> ..assuming I can find an appropriate array type for Int. :P
+01:03:26 <luite> CUInt  -> unsigned int
+01:03:27 * Baughn basically doesn't do number-crunching in haskell. Give me a moment.
+01:04:04 <Baughn> http://hackage.haskell.org/packages/archive/carray/0.1.5/doc/html/Data-Array-CArray.html <- This looks promising
+01:04:12 <luite> I've been trying to do these things a few times, but library support is still lacking, unfortunately
+01:04:59 <Baughn> luite: Going by this, you just call createCArray with your C function. ;)
+01:05:11 <Baughn> No need to even 'foreign export' any allocators, as I was going to do
+01:05:12 <luite> so I keep having to resort to using the ffi...
+01:06:37 <Baughn> luite: Oh, sorry, that function requires you to know the array size in advance. :P
+01:06:57 <Baughn> luite: ..when /do/ you learn that size?
+01:07:29 <Baughn> Would it not work to split your FFI function in two?
+01:08:54 <Baughn> luite: At any rate, you can export createCArray, then pass in a continuation to it at the point you'd call malloc
+01:08:59 <luite> it could work, but that would be quite a bit uglier. for example when you multiply two polynomials, the size is only known after all multiplication is done (it depends on the number of terms in the polynomial), the next step is merely collecting the terms and converting them to the right format
+01:09:31 <luite> the C code keeps a huge associative data structure for the terms
+01:10:12 <Baughn> Option three: Use the standard Data.Array interface, grab a mutable array via foreign export, freeze it on return.
+01:10:16 <Baughn> That might be simplest.
+01:11:12 <Baughn> luite: Well, Data.Array.Storable to be exact.
+01:12:06 <luite> Baughn: the documentation does say that a storable array lives in the C heap though, wouldn't that be bad for garbage collection?
+01:12:52 <Baughn> luite: It might be. To be honest, this is the kind of thing that would see me reaching for GHC source code if I were to do it myself. :P
+01:14:18 <mauke> I'd look at how ByteString does it
+01:15:01 <luite> hmm, ByteString also has a Storable variant right?
+01:15:21 <Baughn> The /standard/ bytestring uses a foreignptr internally..
+01:15:35 <Baughn> Presumably not finalizer-based.
+01:16:47 <luite> fp <- newForeignPtr finalizerFree p'
+01:17:08 <luite> and allocated using reallocBytes
+01:17:19 <luite> from the hgetContents function
+01:17:35 <luite> that's the same finalizer as I use
+01:17:43 <Baughn> Oh dear.
+01:17:59 <Baughn> Hm, are you /sure/ your memory isn't getting freed, specifically because of using finalizers?
+01:19:27 <Baughn> luite: Oh, but using reallocBytes to allocate it.. that could explain it. It would still trigger the haskell GC, like that.
+01:19:36 <luite> I have unnecessary references somewhere or something like that
+01:19:40 <Baughn> luite: Try foreign export'ing reallocBytes. ;)
+01:19:43 <luite> hehe
+01:20:05 <luite> hmm, if that would work, that would be a really simple solution
+01:21:30 <luite> hmm, it looks like reallocBytes just ffi calls realloc
+01:29:50 <luite> I now have a performGC after each FFI call, but it still runs out of memory really quickly, so I'm going to look for other issues, maybe I need to add some strictness here and there
+01:42:20 <luite> hmm it might also be a bug somewhere in my program, it tries to multiply a polynomial with 43 million terms somewhere, that's more than it should be :)
+02:12:55 <chrisdon`> hi
+02:13:53 * ivanm waves idly in chrisdone's general direction
+02:14:24 * chrisdone vaguely acknowledges ivanm's acknowledgement
+02:14:39 <ivanm> good, glad we got that sorted
+02:15:40 <etpace> How would I write a type class/instance that depends on the first argument of the function? something like class forall b. Foo (a -> b) where foo :: (a -> b) -> (a -> b), so the foo would work the same for a certain value of a, but whatever value of b
+02:17:07 <Heffalump> I don't really understand what you mean there.
+02:17:08 <lambdabot> Heffalump: You have 1 new message. '/msg lambdabot @messages' to read it.
+02:17:14 <ivanm> neither do I
+02:17:18 <chrisdone> you mean a certain type of a?
+02:17:29 <ivanm> sounds like you want a type class specifically for the first bit
+02:17:51 <etpace> yeah, thats what I mean :p
+02:18:12 <etpace> so foo would be the same for (Bool -> Int) and (Bool -> Float) or whtaever
+02:18:16 <chrisdone> class Foo b where foo :: (Int -> b) -> (Int -> b)
+02:18:38 <etpace> I want an instance to be a certain type of a
+02:20:15 <chrisdone> class Foo a b where foo :: (a -> b) -> (a -> b)
+02:20:24 <chrisdone> instance Foo Int b where foo = ...
+02:20:42 <chrisdone> needs MultiParamTypeClasses and FlexibleInstances
+02:22:32 <chrisdone> e.g. instance Foo Int b where foo f n = f (n*2)
+02:23:55 <ivanm> huh, catch-all instances generated using something like "instance (Foo a) => Bar a where ..." aren't listed when doing ":info Baz" where Baz is an instance of Foo
+02:27:40 <ivanm> ugh, I hate it when some sites like tracs know that you came from google and highlight the terms you searched for
+02:27:53 <chrisdone> yeah. in bright green
+02:28:08 <ivanm> and yellow
+02:28:14 <Maxdamantus> Is there something that's the inverse of index?
+02:28:50 <Maxdamantus> So I give it a range and an index and it gives me a .. whatever it's called
+02:28:57 <Maxdamantus> position, perhaps
+02:29:11 <_nickel> hi all, getting the following when attempting to compile a toy ffi application https://gist.github.com/fa59e63dd7319e7c4a21
+02:29:18 <Heffalump> etpace/chrisdone: wy not class Foo a where foo :: (a -> b) -> (a -> b) ? No extensions required.
+02:29:32 <ivanm> Maxdamantus: so, for an example, calling it with a b value on Map a b it will return all a values that have that b value?
+02:29:46 <Maxdamantus> ivanm: no
+02:29:51 <_nickel> flag for ghc?
+02:29:53 <Maxdamantus> http://www.haskell.org/tutorial/arrays.html
+02:29:55 <Maxdamantus> index ((0,0),(1,2)) (1,1) => 4
+02:30:03 <ivanm> _nickel: --make rcv.hs
+02:30:07 <ivanm> I think you need the make first
+02:30:14 <Maxdamantus> Is there something that I can give ((0,0),(1,2)) and 4, and get (1,1)?
+02:30:26 <ivanm> @hoogle index
+02:30:27 <lambdabot> Data.ByteString index :: ByteString -> Int -> Word8
+02:30:27 <lambdabot> Data.Ix index :: Ix a => (a, a) -> a -> Int
+02:30:27 <lambdabot> Data.Sequence index :: Seq a -> Int -> a
+02:30:54 <Maxdamantus> Ah, should've been more specific then.. the Ix's index
+02:31:02 <ivanm> I can't seem to find an index function...
+02:31:14 <ivanm> oh, right, that's from Ix, not the array
+02:31:44 <ivanm> Maxdamantus: well, one way is soemthing like this:
+02:31:47 <_nickel> ivanm: same result
+02:31:54 <ivanm> > [(0,0)..(1,2)] !! 4
+02:31:55 <lambdabot>   No instance for (GHC.Enum.Enum (t, t1))
+02:31:55 <lambdabot>    arising from a use of `e_100124'...
+02:31:59 <ivanm> bah
+02:32:01 <ivanm> forgot about that
+02:32:14 <ivanm> > range ((0,0),(1,2)) !! 4
+02:32:15 <lambdabot>   (1,1)
+02:32:18 <ivanm> Maxdamantus: ^^
+02:32:21 <_nickel> ivanm: https://gist.github.com/fa59e63dd7319e7c4a21
+02:32:33 <Maxdamantus> Heh. Didn't think of that.
+02:32:36 <luite> not very efficient though
+02:32:42 <ivanm> no
+02:32:45 <Maxdamantus> Yeah, was wondering about the efficiency
+02:33:09 <ivanm> but there doesn't seem to be any extra stuff you can do with a generic Ix instance
+02:33:10 <Maxdamantus> It should be able to be figured out simply using lots of *s and +s
+02:33:20 <ivanm> Maxdamantus: huh?
+02:33:37 <ivanm> if you want a specific case for (Int,Int) then that should be easy enough
+02:33:37 <Maxdamantus> But that would be tedious to implement generally.. for the up-to-5tuples
+02:34:16 <ivanm> if you have (amax,bmax) then I think (a,b) is in index a+b*amax
+02:34:34 <ivanm> assuming (1,1) is the first one
+02:34:44 <ivanm> no, wait, I lie
+02:34:50 <ivanm> it'd be a + (b-1)*amax
+02:35:26 <Maxdamantus> eh, not * and +
+02:35:26 <ivanm> _nickel: do you have a .so file of that name anywhere?
+02:35:31 <Maxdamantus> mod and -
+02:35:38 <ivanm> Maxdamantus: right, to do the inverse
+02:35:44 <ivanm> note that you have to supply the max value as well
+02:36:08 <ivanm> _nickel: locate libzmq.so
+02:36:36 <ivanm> IIRC, GHC does dynamic linking to C libs, so it won't care at build time that the .so file doesn't exist
+02:36:40 * ivanm is quite probably wrong though
+02:48:39 <chrisdone> http://hpaste.org/fastcgi/hpaste.fcgi/view?id=29315#a29315
+02:49:31 <ivanm> wtf?
+02:49:55 <ivanm> I'm guessing that's meant to be a spoof of band groupies or some such?
+02:50:13 <tux_rocker> hi all
+02:50:27 * ivanm waves idly in tux_rocker's general direction
+02:51:43 <tux_rocker> is there anyone who can help with a cabal problem?
+02:51:45 <_nickel> ivanm: sorry for the slow reply, its in /usr/local/bin
+02:52:05 <ivanm> _nickel: why is a .so file in /usr/local/bin ?
+02:52:18 <tux_rocker> i can make a tarball of darcs with 'runghc Setup.lhs sdist', but not with 'cabal sdist'
+02:52:18 <_nickel> ivanm: ivanm sorry lib
+02:52:25 <ivanm> shouldn't it be in /usr/local/lib and have that directory in the LD_LOADPATH variable?
+02:52:25 <_nickel> ivanm: it works fine in ghci
+02:52:30 <ivanm> huh
+02:52:36 <tux_rocker> but using 'runghc Setup.lhs', i run into http://hackage.haskell.org/trac/hackage/ticket/627
+02:53:10 <ivanm> huh, I've never had that problem
+02:53:18 <tux_rocker> the problem with cabal sdist appears to be that 'cabal sdist' can't find the automatically generated files in dist/build/autogen
+02:53:33 <ivanm> do you do "cabal configure" first?
+02:53:39 <ivanm> cabal --version ?
+02:54:56 <tux_rocker> cabal --version says "cabal-install version 0.8.2 using version 1.8.0.4 of the Cabal library"
+02:55:07 <tux_rocker> and yes, i did 'cabal configure'
+02:55:26 <ivanm> huh
+02:55:29 <ivanm> preflex: seen dcoutts 
+02:55:29 <preflex>  dcoutts was last seen on #haskell 19 hours, 24 minutes and 48 seconds ago, saying: shapr: :-)
+02:55:34 <ivanm> ^^ the man you want to see ;-)
+02:55:42 <tux_rocker> by the way, i can make it work by adding dist/build/autogen to hs-source-dirs 
+02:55:50 <luite> ivanm: american psycho quote
+02:55:53 <ivanm> that shouldn't matter
+02:55:57 <ivanm> luite: ahhh
+02:55:57 <tux_rocker> but that feels like a terrible hack
+02:56:00 <luite> well, "quote" :)
+02:56:02 <tux_rocker> i'llsend dcoutts an email
+02:56:15 <ivanm> tux_rocker: this is explicitly a tarball of darcs?
+02:56:17 * ivanm goes off to try
+02:56:53 <tux_rocker> ivanm: darcs get http://darcs.net/releases/branch-2.5 && cabal configure && cabal build && cabal sdist
+02:57:15 <ivanm> well, I've got a darcs head repo that I'm just syncing now
+02:57:28 <ivanm> any particular reason for doing the build step? does it work without that?
+02:57:39 <ivanm> it might be due to some oddity of the darcs.cabal file...
+02:57:45 <_nickel> ivanm: same result after adding /usr/local/lib to LD_LOADPATH
+02:57:51 <ivanm> also, what files is it trying and failing to find in autogen?
+02:57:56 <ivanm> _nickel: *shrug* maybe try #ghc
+02:59:11 <tux_rocker> ivanm: a Haskell module Version.hs which contains information on the version of  darcs
+02:59:13 <ivanm> tux_rocker: is this the one with the cabal-version being set to >= 1.8 ?
+02:59:29 <tux_rocker> ivanm: which is generated during the build step afaik, from information gathered from Cabal and the darcs history of the repository
+02:59:45 <ivanm> hmmm.....
+02:59:54 <ivanm> why doens't darcs let you use parsec-3.1?
+03:00:07 <ivanm> I thought 3.1 was meant to be the almost-as-good-as-parsec-2 version
+03:00:11 <tux_rocker> ivanm: Cabal-Version >= 1.8 indeed
+03:00:48 <liuchong> hi
+03:00:55 <tux_rocker> ivanm: i don't know that much about our use of parsec. If you interested, ask lispy.
+03:01:00 * ivanm waves idly in liuchong's general direction
+03:01:05 <ivanm> tux_rocker: *nod*
+03:01:13 <liuchong> ...
+03:01:37 <liuchong> ivanm, ...
+03:01:52 <gdy> ...
+03:01:55 <ivanm> that is me saying hi back to you ;-)
+03:01:58 <chrisdone> liuchong: ivanm's a friendly guy. just don't look him directly in the eye
+03:02:09 <ivanm> chrisdone: damn it, stop warning them away!
+03:02:18 * ivanm reluctantly puts away the spell book
+03:02:20 <chrisdone> :p
+03:02:30 <gwern> don't you know? Cale can smell newbies' fear
+03:02:43 <liuchong> chrisdone, ...horrible
+03:03:07 <ivanm> gwern: but.... Cale isn't here right now...
+03:03:10 <luite> ivanm: doesn't it? I have 3.1 installed, unknowingly, so cabal-install must've downloaded it
+03:03:17 <gwern> ivanm: jes' saying
+03:03:25 <chrisdone> Cale never leaves, he waits
+03:03:34 <_nickel> ivanm: got my toy example working with 2 ghci session, and I'll try #ghc out tomorrow thanks for your help!
+03:03:37 <ivanm> luite: the actual line is: parsec >= 2.0 && <3.1
+03:03:56 <liuchong> Here it looks a nice place
+03:04:31 <ivanm> dammit, how many times is the prsec dep specified? :s
+03:05:21 <ivanm> @tell tux_rocker OK, it definitely doesn't work without a build
+03:05:21 <lambdabot> Consider it noted.
+03:06:07 <ivanm> luite: if you said anything to me after I said the "actual line" bit, then I didn't get it since I accidentally left the channel :s
+03:08:24 <luite> ivanm: ah sorry misssed that part. apparently the dependency was added in version 2.3.0 (july 23 2009) and has never been changed since
+03:10:23 <ivanm> oh, right, I forgot about that; we've patched darcs.cabal for gentoo a while back to get rid of that restriction and so I've never really thought about it before :s
+03:11:11 <gwern> tsk tsk
+03:11:20 <gwern> when downstream goes rogue!
+03:11:24 <ivanm> @tell tux_rocker huh, Path_foo.hs must be special case that cabal brings in...
+03:11:24 <lambdabot> Consider it noted.
+03:11:56 <ivanm> gwern: *shrug* we do that in a lot of cases where upstream hasn't made a new version with updated deps yet, etc.
+03:12:13 <ivanm> and we've done it for a while with pandoc & co
+03:12:37 <gwern> even naughtier!
+03:12:45 <gwern> you really should be talking to eric and john
+03:12:48 <gwern> they're pretty responsive
+03:14:59 <ivanm> oh, I know
+03:15:10 <Heffalump> to get rid of what restriction? parsec?
+03:15:11 <ivanm> but this was when John didn't want to let parsec-3 be used with pandoc
+03:15:16 <ivanm> Heffalump: yup
+03:15:30 <Heffalump> why does darcs even depend on parsec?
+03:15:34 <ivanm> gwern: John is rather conservative in his deps since he typically only uses those that have debian packages
+03:15:38 <ivanm> Heffalump: good question...
+03:16:20 <Heffalump> ah, date parsing. Oh dear.
+03:16:24 <gwern> Darcs/Patch/Match.lhs:import Text.ParserCombinators.Parsec.Expr
+03:16:25 <gwern> Darcs/Patch/OldDate.hs:import Text.ParserCombinators.Parsec
+03:16:25 <gwern> Darcs/Patch/OldDate.hs:-- |Case-insensitive variant of Parsec's 'char' function.
+03:16:28 <gwern> Darcs/Patch/OldDate.hs:-- |Case-insensitive variant of Parsec's 'string' function.
+03:16:36 <gwern> also for its --match minilanguage, it seems
+03:16:51 <gwern> (lord do I hate --match)
+03:22:22 <monadic_kid> does this sound a bit crazy, imagine a language that is small total functional langauge, subset of haskell say, this language you can use the same langauge for all levels, sorts, kinds, type, value programming. you could suport list comphrensions in type/kind functions
+03:33:11 <juhp> LazyC
+03:34:11 <juhp> oops
+03:41:56 <gurkoboy> i just installed haskell and im wondering if there is anything like IDLE (from python) that i can play around with. im using OSX and i know C and python (if thats any help)
+03:42:28 <bremner> there is leksah, you might check that out.
+03:42:42 <Zao> winghci might be fun too.
+03:43:57 <gurkoboy> thank you :)
+03:44:21 <gurkoboy> any tips/anything i should read before i jump into the documentation and start writing/learning Haskell? my background is mainly python and C
+03:44:40 <bremner> @where lyah
+03:44:40 <lambdabot> http://www.learnyouahaskell.com/
+03:44:43 <gurkoboy> im quite keen on learning it the 'proper' way and making sure i fit into the community model of how things are supposed to be done
+03:44:53 <bremner> @where rwh
+03:44:53 <lambdabot> http://www.realworldhaskell.org/blog/ http://book.realworldhaskell.org/read/
+03:45:03 <gurkoboy> thanks :)
+03:46:38 <bremner> lyah will be more familiar to a python programmer (list comprehensions and so on). rwh is much more in depth.  Actually the wikibook on Haskell is decent too, at least the sections I read.
+03:46:43 <ivanm> Zao: winghci? on OSX?
+03:46:47 <bremner> @where wikibook
+03:46:47 <lambdabot> http://en.wikibooks.org/wiki/Haskell
+03:47:39 <ivanm> gurkoboy: there is a tutorial on Haskell from a C programmers perspective, but I suggest you go straight to RWH (if you think you're a reasonable programmer already in Python and C; a lot of the extra stuff in LYAH IIRC is teaching you what programmign is)
+03:47:58 <gurkoboy> okay got it :) thank you
+03:48:02 <ivanm> bremner: RWH has a decent intro to Haskell if you've used other languages perspective IMHO
+03:48:29 <bremner> ivanm: some people seem to appreciate the conciseness of the wikibook in comparison to rwh
+03:48:50 <bremner> so maybe it complements rwh as a reference a bit.
+03:48:54 <ivanm> *nod*
+03:51:25 <Zao> ivanm: Uhm.. eeeeh. No :)
+04:16:29 <heiz> Hi! Maybe someone can help me. I'm looking for programming language witch is powerfull like haskell and flexible like lisp, because haskell boundage and discipline sometimes irritates me.
+04:16:47 <Zao> heiz: Have you've considered Haskell? I hear it's quite a lot like Haskell.
+04:18:00 <Maxdamantus> Powerful in what way?
+04:18:17 <heiz> functional? static typeed
+04:22:53 <Associat0r> Liskell maybe
+04:35:54 <Aune> Hello everybody. I have a problem with some code: http://hpaste.org/fastcgi/hpaste.fcgi/view?id=29316#a29316
+04:36:01 <Aune> Any help is appreciated
+04:36:20 <mauke> whoa, you've got a map inside a list comprehension?
+04:36:29 <Aune> yeah?
+04:36:33 <Aune> I take it thats bad
+04:36:36 <mauke> no
+04:36:43 <mauke> but your type declaration is wrong
+04:37:02 <mauke> [[Just [1, <-- clearly a list of lists (of maybe of list of int)
+04:37:15 <mauke> but line 3 claims gen returns a list of maybes
+04:40:23 <Aune> Aaaah, now I see
+04:44:26 <burp> haskell is not flexible? :O
+04:53:12 <Aune> Another question, how do I filter all the Nothings out of a [Maybe a] ?
+04:53:26 <dobblego> @type catMaybes
+04:53:27 <lambdabot> forall a. [Maybe a] -> [a]
+04:53:40 <Aune> thanks
+05:33:25 <ivanm> @protontorpedo
+05:33:25 <lambdabot> how does j2ee compare to haskell?
+05:34:47 <n00p> Isn't j2ee a platform?
+05:35:09 <n00p> heh, j2ee is an implementation
+05:35:10 <gdy> hello all
+05:35:14 <n00p> Haskell is a programming language.
+05:35:21 <n00p> They couldn't really be any different.
+05:35:22 <medfly> lambdabot has these quotes by people being silly
+05:35:30 <medfly> @keal
+05:35:30 <lambdabot> bot defective
+05:35:32 <medfly> @keal
+05:35:33 <lambdabot> T could perform expressions 600mb and bigger
+05:35:45 <medfly> s/by/of/
+05:35:49 <n00p> oic it's a bot. lol
+05:37:52 <gdy> if I want to make a filter function in the index.how to write in the controller?
+05:39:00 <Zao> gdy: Can you show on paste site what your code is, and what you want to do?
+05:40:56 <gdy> Zao: thanks for you help,I will paste it on web soon
+05:41:02 * ivanm bangs his head against the type system
+05:41:03 <burp> lol n00p 
+05:41:22 <burp> lambdabot is a bot ;-)
+05:41:31 <medfly> he got it
+05:42:05 <benmachine> I guess you could say the clue is in the name, but then I'm not a machine
+05:42:08 <benmachine> (so I claim anyway)
+05:42:57 <cch> tags
+05:47:07 <Philonous> benmachine: Well, you never know, "bot" could stand for "abbot", no?
+05:48:44 <benmachine> Philonous: you never know!
+05:49:40 <aristid> @vixen are you a bot?
+05:49:43 <lambdabot> no, how dare you ask if i'm a bot!
+05:49:48 <ivanm> Philonous: ugh, he's one of the candidates for PM here in today's election :s
+05:49:56 <mauke> preflex: are you a bot?
+05:49:56 <preflex>  yes.
+05:50:01 <benmachine> hah
+05:50:13 <benmachine> preflex: botsnack
+05:50:13 <preflex>  ツ
+05:51:07 * Phyx- drops a pin
+05:51:18 <ivanm> mauke: is that actually a built-in command to preflex, or are you doing that?
+05:52:00 <mauke> try it :-)
+05:54:13 <ivanm> but how do I know you aren't intercepting all responses by hand atm just to make us _think_ it's an actual command?
+05:54:15 <ivanm> :p
+05:54:38 <mauke> how do you know preflex is an actual bot?
+05:54:42 <mauke> also, does it matter?
+05:54:50 <ivanm> not really; just curious
+05:55:26 <ivanm> and I would say that preflex is a bot because it'd be a bit difficult for you to memorise when everyone was last in one of the channels preflex is on, and then spit it back out on command instantly
+05:55:33 <mauke> here's a secret: authentic bot replies start with a space
+05:55:47 <ivanm>  so does this make me a bot?
+05:55:48 <ivanm> :p
+05:56:12 <mauke> I'm talking about preflex :-)
+05:56:31 <preflex> I'm also talking through preflex
+05:56:53 <ivanm> yes, but you could prefix your responses via preflex with a space as well...
+05:57:02 * ivanm is trying to raise the paranoia level of #haskell
+05:57:06 <mauke> no, I can't
+05:57:11 <mauke> not with the current code
+05:57:11 <aristid> ivanm: are you a bot?
+05:57:25 <ivanm>  no.
+05:57:37 <aristid> oh.
+05:58:12 <ivanm>  >_>
+05:58:33 <mauke> preflex: quote
+05:58:40 <preflex>  <dino-> [in #xmonad] Ok, I feel like a dork for not using this wm sooner.
+06:00:03 <gdy__> Zao: when I post the code in hpaste.org,it say database lock
+06:00:12 <gdy__> Zao: do you know what happen?
+06:00:34 <ivanm> gdy__: hpaste is probably down again
+06:00:38 <ivanm> use dpaste or something
+06:00:51 <Zao> Or http://codepad.org/ or whatnot.
+06:03:25 <gdy__> Zao: I post it  http://codepad.org/UebGJdUl    
+06:03:46 <Zao> gdy__: This does not look like Haskell.
+06:03:51 <Zao> gdy__: Did you mean to join ##php?
+06:04:12 <ivanm> Zao: looks like hamlet stuff
+06:04:15 <Zao> Oh.
+06:04:20 <Zao> Smells like ruby, actually.
+06:04:22 <ivanm> kinda
+06:04:25 <Zao> With all the .each and whatnot.
+06:04:32 <ivanm> from what I've seen of michael snoyman's blog posts, anyway ;-)
+06:04:41 <Zao> I steer widely away from web dev :)
+06:04:43 <Polarina> That looks like ruby.
+06:05:00 <gdy__> what's the means of haskell?
+06:05:04 <ivanm> no, you're right, it's not haml
+06:05:09 <ivanm> gdy__: of what?
+06:05:09 <Zao> gdy__: Haskell is a programming language.
+06:05:17 <ivanm> Haskell is a purely functional programming language
+06:05:29 <ivanm> this isn't a general programming channel, if that's what you were after ;-)
+06:05:32 <Aune> Haskell is very diffrent from ruby
+06:05:34 <gdy__> it's a ruby on rails
+06:05:39 <Zao> gdy__: http://zh.wikipedia.org/zh/Haskell
+06:05:49 <ivanm> gdy__: #rubyonrails
+06:05:49 <jedai_> ivanm: does such a beast even exists ?
+06:05:50 <Zao> gdy__: You are in the wrong channel. Join a Ruby or Rails channel.
+06:06:00 <gdy__> ...sorry
+06:06:00 <ivanm> jedai_: don't think so
+06:06:18 <aristid> Zao: why did you give gdy__ a chinese link?
+06:06:28 <ivanm> aristid: he's joined to #ubuntu-cn...
+06:06:33 <aristid> hmmm
+06:06:34 <ivanm> that's the only reason I can think of
+06:06:41 <ivanm> (I was just about to ask Zao about that though :p)
+06:06:45 <Zao> aristid: Because he has a chinese host?
+06:06:49 <jedai_> ivanm: well #programming contains 100 nicks and advertise itself as such (more or less)
+06:07:02 <ivanm> Zao: /whois just gives me an IP address, not a resolved host
+06:07:09 <ivanm> jedai_: ooohhh
+06:07:18 <ivanm> IIRC, there's also #proggit or something like that...
+06:07:20 <Zao> ivanm: I feed those through ip2c to get a rough geoloc.
+06:07:51 <ivanm> ip2c?
+06:08:01 <Zao> http://firestats.cc/wiki/ip2c
+06:08:22 <Zao> There's databases that map IP blocks to assigned countries, ip2c is a tool to query those.
+06:08:35 <ivanm> ugh, it's a java app
+06:08:54 <Zao> Nothing stops you from writing one in Haskell, the databases are language agnostic.
+06:09:07 <ivanm> suppose
+06:09:24 <cncl> i just updated ghc and i guess i need to reinstall everything i had installed over cabal
+06:09:27 <cncl> is there a quick way to do that
+06:09:39 <gdy__> Zao: I am a chinese,you don't feel about that?
+06:09:49 <ivanm> cncl: nope
+06:09:53 <ivanm> have to do it all by hand
+06:09:56 <merijn> Those geo locations tools tend to screw up, though. I get served odd languages quite often
+06:09:57 <Zao> cncl: Check your packages.conf, install everything you don't recognize as part of core/HP?
+06:10:03 <cncl> :(
+06:10:10 <ivanm> since the only way cabal can tell what libraries you have installed is to ask ghc (well, ghc-pkg actually)
+06:10:13 <gdy__> Zao: my syntax or somethin else?
+06:10:19 <aristid> gdy__: your IP
+06:10:34 <Zao> merijn: It's awfully handy to decipher "bad" english, if you know the probable mother tongue.
+06:10:45 <cncl> cd'ing to .cabal/packages/hackage.haskell.org shows what i have installed though
+06:10:47 <Zao> 218.13.165.158 -> CN,CHN,CHINA
+06:10:52 <aristid> Zao: you know chinese well enough to do that?
+06:10:53 <cncl> i mean, just from the directories there
+06:11:00 <ivanm> yeah, that can give you a hint
+06:11:04 <Zao> aristid: No.
+06:11:35 <Zao> aristid: But take cases like German, Spanish, Russian, etc.
+06:11:52 <cncl> can i just like.. pipe the output of ls into cabal upgrade
+06:12:01 <aristid> Zao: germans can be found by the abundance of commas :D
+06:12:02 <ivanm> ummm.....
+06:12:03 <ivanm> no
+06:12:03 <Zao> xargs might help.
+06:12:09 <ivanm> you shouldn't touch "cabal upgrade" :p
+06:12:13 <Zao> Or just shovel stuff into a script and mangle it until it does what you want.
+06:12:17 <ivanm> "cabal install" though...
+06:12:21 <Zao> You probably want to cabal install.
+06:12:21 <cncl> ok, cabal install
+06:12:27 <ivanm> cncl: I would build alex, etc. first
+06:12:35 <Zao> As the packages from your old GHC are completely not there with your new GHC.
+06:12:39 <ivanm> since cabal-install can't do so automatically
+06:12:53 <ivanm> Zao: you _never_ want to "cabal upgrade"
+06:13:09 <Zao> ivanm: So I figured from past horror and the big warning it gives.
+06:13:11 <ivanm> (not until dcoutts, et. al. fix it, anyway)
+06:13:12 <mauke> aristid: and sometimes by smashing nouns together (or joining them with a hyphen)
+06:13:24 <ivanm> mauke: heh
+06:13:32 <Zao> ivanm: It's about as desirable as updating things like Win32 and directory :)
+06:13:36 <gdy__> aristid: what?
+06:13:46 <ivanm> aristid: and people from the former soviet union find YOU! :p
+06:13:52 <ivanm> Zao: yup ;-)
+06:14:45 <aristid> ivanm: people, from the formersovietunion?
+06:15:04 <ivanm> it was a feeble attempt at the Soviet Russia joke
+06:15:28 <aristid> it was a feeble attempt at a comma and noun smashing joke
+06:15:40 <ivanm> oh, right
+06:16:17 <mauke> "former sovietunion" since former is clearly not a noun
+06:16:47 <aristid> mauke: and even german wouldn't put a comma there, sure
+06:16:51 <ivanm> neither is "Soviet"
+06:16:59 <mauke> ivanm: since when?
+06:17:15 <ivanm> it's more an adjective
+06:17:22 <aristid> Sowjetunion _is_ the noun, so sovietunion is the translation :D
+06:18:13 <ivanm> actually, I lie, I got the translation wrong; apparently it was the term given for workers councils in pre-revolution russia
+06:19:11 <lantti> Oh. So the workers did get given something even in the pre-rev russia...
+06:19:18 <ivanm> it's been a while since I tried to translate the meaning of СССР by hand
+06:19:42 <ivanm> http://en.wikipedia.org/wiki/Soviet_%28council%29
+06:19:54 <lantti> The avisory council of socialistic republics?
+06:20:06 <ivanm> something like that, yes
+06:20:20 <ivanm> more like: council of the union of socialistic republics
+06:21:49 <lantti> But sovjet is advice, isn't it. I always though it reflects the fact that CCCP was open in the sence that nobody was forced to be a member and all decisions were to be advisory only and subject to local intepretaton...
+06:23:06 <lantti> Maybe in practice it didn't go exactly like that :)
+06:23:42 <lantti> Mut, true, sojuz should be translated as union somewhere there in between.
+06:25:33 <ivanm> совєт == council / counsel
+06:25:46 <ivanm> think of it as an advisory council kind of thing
+06:26:04 <ivanm> (IIUC from what wikipedia says; I don't speak Russian)
+06:39:08 <sm> morning all
+06:39:37 <ivanm> evening sm 
+06:39:43 * ivanm should probably hit the sack
+06:39:48 <sm> evening ivanm
+06:40:02 * sm has encoding issues
+06:40:46 <sm> using FileManipCompat, I got a file path that looks like this in ghci: "tests/unicode-\208\191\209\128\208\190\208\178\208\181\209\128\208\186\208\176.test". What can I say about this string ? Is it utf8-encoded ?
+06:41:05 <ivanm> is that by doing print?
+06:41:20 <ivanm> all Strings look like that in ghci
+06:41:31 <ivanm> internally, all Chars are Unicode code points
+06:41:37 <sm> no, just evaluating it at ghci prompt. If I putStr it, it looks like tests/unicode-Ð¿ÑÐ¾Ð²ÐµÑÐºÐ°
+06:41:38 <ivanm> do a putStrLn on that String and it should be fine
+06:42:04 <ivanm> OK, could be an encoding issue reading it in; that doesn't look recognisable to me
+06:42:16 <ivanm> but you'd expect all those octal numbers in ghci if you just evaluate the String
+06:42:21 <sm> but it does work if I readFile it
+06:42:55 * sm suspects FileManipCompat is not ghc 6.12/unicode-aware
+06:43:05 <ivanm> e.g. the String "галло" gets evaluated as "\1075\1072\1083\1083\1086" in GHCI
+06:43:08 <ivanm> *ghci
+06:43:28 <sm> those four-digit codes look better than my three-digit ones
+06:43:51 <sm> I was looking for a lib that would diagnose the encoding of a random string, but didn't find it
+06:43:55 <ivanm> well, it depends how the IO is done
+06:44:06 <ivanm> if it uses String-based IO, then it should do locale encoding/decoding
+06:44:16 <ivanm> sm: there isn't one really, because it isn't possible
+06:44:26 <ivanm> there are some C libraries and apps that guess, mainly for filenames
+06:44:34 <ivanm> but they're not always that great
+06:44:42 <ivanm> iconv, etc.
+06:45:53 <sm> thanks
+06:50:19 * sm wants a guesser in haskell for debugging
+06:53:11 <sm> hm, getDirectoryContents gives the same string
+06:53:55 <sm> LANG is en_US.UTF-8. ls renders the characters properly (unicode-проверка.test)
+06:54:08 <sm> wonder why haskell isn't printing it properly
+06:54:14 <dh__> > range ((0,0), (1,2))
+06:54:15 <lambdabot>   [(0,0),(0,1),(0,2),(1,0),(1,1),(1,2)]
+07:00:42 <burp> sm: it's not?
+07:00:49 <sm> those escape codes might be wrong.. eg \208 is four characters
+07:00:55 <burp> sm: how do you print it?
+07:01:30 <sm> burp: putStrLn "unicode-\208\191\209\128\208\190\208\178\208\181\209\128\208\186\208\176.test"
+07:01:30 <sm> unicode-Ð¿ÑÐ¾Ð²ÐµÑÐºÐ°.test
+07:02:15 <burp> yes, that's wrong
+07:02:23 <shapr> Gooood morning #Haskell! How's code?
+07:02:30 * shapr hugs sm
+07:02:38 <Zao> shapr: It type checks!
+07:02:39 * sm grins at shapr
+07:03:08 <shapr> Zao: That's awesome!
+07:03:20 <burp> > '�'
+07:03:21 <lambdabot>   '\65533'
+07:03:32 <burp> um 65533? o0
+07:03:56 <sm> > "unicode-проверка.test"
+07:03:57 <burp> > ord '�'
+07:03:57 <lambdabot>   "unicode-\1087\1088\1086\1074\1077\1088\1082\1072.test"
+07:03:58 <lambdabot>   65533
+07:04:13 <sm> that's what I should be getting from getDirectoryContents, no ?
+07:04:26 <sm> but gf is up, I gotta go I gotta go. Will be back, if anyone has any ideas...
+07:04:38 <burp> hm, seems it returns it somehow ascii-packed
+07:05:21 <sm> yes, weird. I wonder if it's to do with http://hackage.haskell.org/trac/ghc/ticket/3307
+07:05:27 <burp> \208\191 ← these two should correspond to \1087
+07:07:42 <burp> somehow it can be converted, but I don't remember
+07:12:21 <dh__> copumpkin, are you there?
+07:28:33 <copumpkin> dh__: sort of, just woke up
+07:29:13 <aRcatan> were you cosleeping
+07:29:23 <aRcatan> that was meant to be cowake :(
+07:32:26 <Phyx-> now he's coblocked
+07:37:25 <Bubbleboy> would a json to xml parser be hard to build in haskell? I mean, for a novice.
+07:38:57 <Maxdamantus> No.
+07:43:36 <Bubbleboy> I really dont wanna sound like a noob, but theres this class that's about functional programming, and we use haskell. we have to build a small project by the end of the semester, and while I think it's a fine language, I don't know if I'll be able to code it.
+07:43:54 <`Zerax`> Are you allowed to use Parsec?
+07:44:20 <Bubbleboy> what's that?
+07:44:39 <aristid> a parser construction library
+07:44:50 <Phyx-> is parsec beginner friendly?
+07:44:56 <Bubbleboy> I suppose yes.
+07:45:21 <Phyx-> He would need to know some grammar to use Parsec wouldn't he?
+07:45:59 <hpc> it should not take long to learn
+07:46:22 <Bubbleboy> grammar like grammars in compilers and automata?
+07:46:51 <Zao> Isn't JSON a bit vaguely specified?
+07:47:02 <Zao> Quoting of things like "true"/false, etc.
+07:47:10 <Maxdamantus> JSON is standardised
+07:47:15 <Maxdamantus> as a subset of JS
+07:47:17 <aristid> http://json.org
+07:47:25 <aristid> they have grammar diagrams :D
+07:47:30 <Maxdamantus> it's a reasonably simple language
+07:48:58 <Maxdamantus> and it's context free and all, should be fairly easy to implement in Haskell
+07:49:08 <Maxdamantus> context free in more than grammar
+07:49:17 <Bubbleboy> I see
+07:50:02 <Bubbleboy> do you have some interesting topic that's not so easy?
+07:50:03 <bihari> what does this channel do ?
+07:50:07 <Zao> bihari: It is.
+07:50:16 <Zao> The people in the channel on the other hand...
+07:50:46 <alar> What package does module Monad.Error live in?
+07:50:48 <Maxdamantus> What sort of a response is "it is"?
+07:50:52 <Maxdamantus> You mean "it bes"?
+07:51:00 <hpc> alar: base, likely
+07:51:08 <Zao> Maxdamantus: Possibly.
+07:51:13 <`Zerax`> @where Monad.Error
+07:51:14 <lambdabot> I know nothing about monad.error.
+07:51:21 <hpc> @hoogle Monad.Error
+07:51:22 <lambdabot> No results found
+07:51:32 <bihari> Zao, sory  i dont understand this ?
+07:51:33 <aRcatan> Bubbleboy: maybe an interpreter for a programming language?
+07:51:40 <alar> @hoogle control.Monad.Error
+07:51:41 <lambdabot> No results found
+07:51:41 <hpc> oh no, it's in mtl
+07:51:54 <alar> @hoogle Control.Monad.Error
+07:51:55 <lambdabot> module Control.Monad.Error
+07:51:55 <lambdabot> Control.Monad.Error.Class class Error a
+07:51:55 <lambdabot> Control.Monad.Error newtype ErrorT e m a
+07:52:05 <aRcatan> it's not too hard and at least some people think it's fun
+07:52:10 <hpc> http://hackage.haskell.org/packages/archive/mtl/1.1.0.2/doc/html/Control-Monad-Error.html
+07:52:11 <Zao> bihari: It is the channel for the programming language Haskell and the people who use it.
+07:52:16 <Bubbleboy> I see
+07:52:22 <Bubbleboy> that's a nice idea
+07:52:23 <alar> @karma+ hpc
+07:52:23 <lambdabot> hpc's karma raised to 2.
+07:52:30 <hpc> :D
+07:52:32 <bihari> haskell ?
+07:52:40 <Zao> bihari: Yes.
+07:52:45 <hpc> see topic
+07:52:51 <Bubbleboy> some orders of magnitude higher, but we are in 4 peeps
+07:52:56 <aRcatan> (that's the idea i always suggest when people are looking for something to code, heh)
+07:53:10 * alar tries to build code from dons' article: http://donsbot.wordpress.com/2010/08/17/practical-haskell/
+07:54:08 <bihari> i dont know i just come here by searching the channel list. i am just n00b
+07:54:26 <bihari> i think  i am not suppose to be here.
+07:57:31 <benmachine> Bubbleboy: there's a tutorial online somewhere for building a scheme interpreter in haskell, if I remember correctly
+07:59:31 <Maxdamantus> That seemed lame when I looked at it.. because it used Parsec
+07:59:54 <Maxdamantus> Seems simple enough to atleast parse Scheme without a parsing library
+08:00:19 <aruns> hi, i'm new to haskell and trying to learn it by programming. which of the GUI toolkits work best with haskell currently? gtk, wx , qt ?
+08:00:44 <alar> wx and GTK
+08:01:04 <Bubbleboy> hmm, ok.
+08:01:07 <Bubbleboy> thank you
+08:01:11 <aruns> alar: thanks
+08:01:13 <Phyx-> not in that order..
+08:01:31 <alar> wx has wxcore package which is just binding to C wx
+08:01:57 <alar> there is wx package on top of it, which is higher-level
+08:02:05 <aruns> so gtk2hs or whatever would be the best bet ?
+08:02:20 <alar> and there is reactive package on top of it, but it seems to be unstable
+08:02:43 * alar doesn't know what's the best
+08:02:47 <aruns> alar: whats a reactive package?
+08:03:39 <alar> reactive GUI toolkit, where input is the stream of events and controls react to it
+08:04:33 <alar> GUI code becomes pure functional, because UIelement::[(Time,Event)] -> [Reaction] -- see, no IO !
+08:05:08 <alar> don't know the exact name of reactive widget package
+08:05:36 <aruns> cool thanks, i'll have a look around
+08:05:51 <Zao> Something fruity, isn't it?
+08:13:51 <allbery_b> grapefruit?
+08:14:06 <Maxdamantus> kiwifruit?
+08:14:49 <`Zerax`> mango?
+08:35:52 <Maxdamantus> Could Haskell be said to be strictly non-strict?
+08:36:14 <Botje> maybe it's non-strictly strict!
+08:36:26 <Maxdamantus> But it's not strict O_o
+08:36:43 <Philonous> It's non-strict in every regard, even it's non-strictness 
+08:37:08 <Maxdamantus> So it's not strictly non-strict?
+08:37:15 <Philonous> Maxdamantus: You can make it as strict as you want. Liberally add bangs and/or seqs
+08:38:35 <chrisdone> ddarius: what do you call those sleeping back/tend combos?
+08:38:38 <chrisdone> er, tent
+08:39:27 <Maxdamantus> > let a = [if i < 5 then a !! (i + 5) else i | [0..10]] in a
+08:39:27 <lambdabot>   Couldn't match expected type `GHC.Bool.Bool'
+08:39:28 <lambdabot>         against inferred type ...
+08:40:14 <Philonous> > let a = [if i < 5 then a !! (i + 5) else i | i<- [0..10]] in a
+08:40:15 <lambdabot>   [5,6,7,8,9,5,6,7,8,9,10]
+08:40:43 <Maxdamantus> Mmm.. if it was strict then that wouldn't work
+08:45:13 <aruns> i'm trying to install gtk bindings using cabal. but when i run 'cabal install gtk' i get an error - setup.exe: gtk2hsC2hs is required but it could not be found. 'cabal install gtk2hs' says package not found, but cabal list shows gtk
+08:45:46 <hamishmack> aruns: cabal install gtk2hs-buildtools
+08:46:04 <hamishmack> aruns: then try again
+08:46:37 <aruns> thanks hamishmack
+08:46:58 <andrewsw> I know there's something equivalent to: reverse . take 4 . reverse, but I can't for the life of me think of it, and my google-fu is insufficient...
+08:47:39 <Philonous> andrewsw:If you know the length of the the list you can say drop (length - 4)
+08:48:53 <andrewsw> hmmm... yeah, I guess that works. thanks
+08:49:04 <andrewsw> I thought there was something that did it directly.
+08:50:20 <andrewsw> thanks Philonous 
+08:50:28 <Philonous> andrewsw: Even if there is a function that does what you want it cant behave much better than yours as it has to traverse the whole list anyway. 
+08:53:06 <Raghs> I keep getting "unknown package: haskell98" when trying to compile using ghc on Windows, installed the latest Haskell platform.. How do I fix this?
+08:54:08 <Mathnerd314> > ((+) $ 1 $ 2) 3
+08:54:09 <lambdabot>   4
+08:54:44 <Maxdamantus> O_o
+08:54:48 <Axman6> o.O
+08:54:57 <Axman6> wtf?
+08:55:03 <Mathnerd314> @instances Num
+08:55:04 <lambdabot> Double, Float, Int, Integer
+08:55:08 <Axman6> :t ((+) $ 1 $ 2)
+08:55:09 <lambdabot> forall b. (Num b) => b -> b
+08:55:10 <Philonous> (1$ 2) = 1
+08:55:21 <Axman6> :t ((+) $ 1)
+08:55:22 <lambdabot> forall a. (Num a) => a -> a
+08:55:30 <geheimdienst> > 1 2 3
+08:55:30 <lambdabot>   Ambiguous type variable `t' in the constraint:
+08:55:31 <lambdabot>    `GHC.Num.Num t' arising f...
+08:55:31 <Saizan> > 1 $ 2
+08:55:31 <lambdabot>   1
+08:55:38 <geheimdienst> > (1+1) 2 3 4
+08:55:39 <lambdabot>   2
+08:55:55 <geheimdienst> > (+) 2 3 4
+08:55:56 <lambdabot>   5
+08:56:02 <itsmonktastic> :t 1
+08:56:02 <geheimdienst> > (+) 2 3 "lolcat"
+08:56:03 <lambdabot> forall t. (Num t) => t
+08:56:03 <lambdabot>   5
+08:56:05 <Raghs>  I keep getting "unknown package: haskell98" when trying to compile using ghc on Windows, installed the latest Haskell platform.. How do I fix this?
+08:56:35 <Saizan> Raghs: what command are you running?
+08:56:48 <andrewsw> Philonous: yeah, that's what I was thinking. thanks
+08:56:53 <itsmonktastic> :t ($)
+08:56:54 <lambdabot> forall a b. (a -> b) -> a -> b
+08:57:06 <Raghs> ghc -o myexe mysrc.hs
+08:57:10 <Maxdamantus> Why doesn't that happen for me in ghci?
+08:57:15 <alar> @hoogle a-> IOExceptoin
+08:57:15 <lambdabot> Warning: Unknown type IOExceptoin
+08:57:15 <lambdabot> Prelude id :: a -> a
+08:57:16 <lambdabot> Data.Function id :: a -> a
+08:57:27 <alar> @hoogle a-> IOException
+08:57:27 <lambdabot> Prelude id :: a -> a
+08:57:27 <lambdabot> Data.Function id :: a -> a
+08:57:27 <lambdabot> Unsafe.Coerce unsafeCoerce :: a -> b
+08:57:30 <Saizan> Raghs: add --make 
+08:57:34 <Mathnerd314> @type 1 `asTypeOf` const 1
+08:57:35 <lambdabot> forall t b. (Num t) => b -> t
+08:57:38 <Maxdamantus> Prelude> (+) 2 3 4
+08:57:39 <Maxdamantus>     No instance for (Num (t -> t1))
+08:58:21 <Saizan> Maxdamantus: becuase in ghci you don't have the relevant instance imported
+08:58:37 <Maxdamantus> > 1 + 2 3
+08:58:38 <lambdabot>   3
+08:58:39 <Philonous> Maxdamantus: lambda has some nonstandard definitions imported
+08:58:48 <Philonous> @type (.) -- Maxdamantus
+08:58:49 <lambdabot> forall a b (f :: * -> *). (Functor f) => (a -> b) -> f a -> f b
+08:59:00 <Philonous> @type (++)
+08:59:01 <lambdabot> forall m. (Monoid m) => m -> m -> m
+08:59:22 <Mathnerd314> @unlet
+08:59:23 <lambdabot>  Defined.
+08:59:30 <Mathnerd314> @type ((+) $ 1 $ 2) 3
+08:59:31 <lambdabot> forall b. (Num b) => b
+09:00:12 <Raghs> Saizan: adding --make worked thanks..
+09:00:25 <Axman6> :t \x -> ((+) $ 1 $ 2) x
+09:00:25 <lambdabot> forall b. (Num b) => b -> b
+09:00:42 <Maxdamantus> (\a b c d -> a b c d) (+) 2 3 4
+09:00:49 <Maxdamantus> > (\a b c d -> a b c d) (+) 2 3 4
+09:00:49 <lambdabot>   5
+09:03:21 <Mathnerd314> Saizan: any idea where the instance is defined?
+09:04:29 <Saizan> Mathnerd314: iirc some package by conal about vectors
+09:05:36 <alar> @lusers
+09:05:36 <lambdabot> Unknown command, try @list
+09:05:42 <alar> @users
+09:05:42 <lambdabot> Unknown command, try @list
+09:05:52 <chrisdone> what ever happened to the @users command?
+09:05:53 <hape_> @list
+09:05:53 <lambdabot> http://code.haskell.org/lambdabot/COMMANDS
+09:06:12 <Axman6> chrisdone: space leak
+09:06:15 <dmwit> preflex: users
+09:06:19 <dmwit> ah, bummer
+09:06:28 <Axman6> preflex!
+09:06:28 <chrisdone> Axman6: in a Haskell program? omg r u series?
+09:07:12 <chrisdone> also the Title command buggered off too. did that leak too?
+09:07:19 <chrisdone> http://chrisdone.com/
+09:07:25 <chrisdone> :-(
+09:08:08 <Maxdamantus> @bf
+09:08:09 <lambdabot>  Done.
+09:09:07 <Maxdamantus> @yhjulwwiefzojcbxybbruweejw
+09:09:07 <lambdabot> Exception: <<loop>>
+09:09:46 <dmwit> ?bf +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++.
+09:09:46 <lambdabot>   E
+09:09:54 <Maxdamantus> Ah, right.
+09:10:06 <dmwit> @yhjulwwiefzojcbxybbruweejw
+09:10:06 <lambdabot> "\"\\\"\\\\\\\"\\\\\\\\\\\\\\\"\\\\\\\\\\"
+09:10:10 <dmwit> > fix show
+09:10:10 <lambdabot>   "\"\\\"\\\\\\\"\\\\\\\\\\\\\\\"\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"\\\\\\\\\\\\...
+09:10:36 <aristid> @yhj
+09:10:36 <lambdabot> Just 'J'
+09:10:39 <aristid> @yhj
+09:10:39 <lambdabot> "\"\\\"\\\\\\\"\\\\\\\\\\\\\\\"\\\\\\\\\\"
+09:10:44 <aristid> @yh
+09:10:44 <lambdabot> "\"\\\"\\\\\\\"\\\\\\\\\\\\\\\"\\\\\\\\\\"
+09:10:46 <aristid> @y
+09:10:46 <lambdabot> Maybe you meant: yarr yhjulwwiefzojcbxybbruweejw yow . ? @ v
+09:10:53 <aristid> @yh
+09:10:53 <lambdabot> "\"\\\"\\\\\\\"\\\\\\\\\\\\\\\"\\\\\\\\\\"
+09:11:05 <kmc> @yhjulwwiefzojcbxybbruweejw
+09:11:06 <lambdabot> "\"#$%&'()*+,\""
+09:11:24 <Maxdamantus> @bf ++++++++++[>++++>+++++++++>++++++>+++++<<<<-]>+++..........>+.>++.<<.......>>.<<..........>>.<<...........>>.<<...>>.<<............>>--.....>-----.<<++.>++.<<..>>>+.<.<<.>>>.<.>-..+..<<<...>>>.<.<<..>>>.<.>-.+.<--..>.<<<...>>>.-......+.<.>-.+.<++..<<.>>>.
+09:11:24 <lambdabot>   ++++++++++[>+++++++>++++++++++>+++++++++++>+++>++++++++++++<<<<<-]>++.>+.>-...
+09:11:32 <int80_h> yay bf!
+09:11:34 <Maxdamantus> @bf ++++++++++[>+++++++>++++++++++>+++++++++++>+++>++++++++++++<<<<<-]>++.>+.>-...
+09:11:34 <lambdabot>   Hemmm
+09:11:45 <Maxdamantus> :(
+09:12:17 <aristid> @bf +[+]
+09:12:18 <lambdabot>  Done.
+09:12:37 <Maxdamantus> @bf ,
+09:12:37 <lambdabot>  Done.
+09:12:42 <Maxdamantus> @bf ,. | a
+09:12:42 <lambdabot>  Done.
+09:12:45 <Maxdamantus> @bf ,. <- a
+09:12:46 <lambdabot>  Done.
+09:13:33 <chrisdone> sure is perl in here
+09:17:46 <Axman6> > zip<*>tail $ [1,2,3]
+09:17:46 <lambdabot>   [(1,2),(2,3)]
+09:19:51 <aristid> @hoogle (a,a) -> [a]
+09:19:51 <lambdabot> Data.Ix range :: Ix a => (a, a) -> [a]
+09:19:51 <lambdabot> System.Random randomRs :: (Random a, RandomGen g) => (a, a) -> g -> [a]
+09:19:52 <lambdabot> Prelude snd :: (a, b) -> b
+09:20:43 <lastk> @hoogle [a] -> a
+09:20:43 <lambdabot> Prelude head :: [a] -> a
+09:20:44 <lambdabot> Prelude last :: [a] -> a
+09:20:44 <lambdabot> Data.List head :: [a] -> a
+09:22:55 <alise> what's that haskell library that was extracted from coq? on hackage, some tree structure i tihnk
+09:22:56 <alise> *think
+09:23:34 <alise> ah, is it meldable-heap?
+09:50:10 <psnively> szeiger: Good morning, Stefan! Just FYI: It looks like some Java-6isms have crept back into scala-query. :-)
+09:53:00 <geheimdienst> peekCString gives me the haskell String "s\195\184ndag" (for "søndag"). note the ø is represented as two characters, which i'm quite sure is wrong
+09:53:45 <geheimdienst> what's going on? docs say peekCString uses a "locale-specified" encoding, which is utf8, but it's still wrong
+09:54:03 <kmc> hmm really?
+09:54:16 <kmc> if it were unicode-aware at all i'd expect it to use the CWchar type
+09:54:38 <kmc> "Currently these functions are identical to their CAString counterparts; eventually they will use an encoding determined by the current locale."
+09:55:38 <geheimdienst> oh right! thanks, i was snookered because they're in the section "Using a locale-dependent encoding"
+09:55:42 <kmc> right
+09:55:53 <kmc> perhaps it should say "Using a local-dependent encoding (in the distant future)"
+09:56:16 <geheimdienst> yes, the current situation is "Not using a locale-dependent encoding"
+09:56:18 <geheimdienst> ;-)
+09:56:55 <kmc> there are some unicode-decoding libraries that work with bytestrings
+09:57:31 <edwardk1> http://hackage.haskell.org/packages/archive/utf8-string/0.3/doc/html/Data-ByteString-UTF8.html
+09:57:51 <edwardk1> for that matter my rope lib uses bytestrings and utf-8 decodes ontop
+09:58:02 <geheimdienst> yeah, the "pack" stuff, i've used that once or twice. now lemme see if i can stuff in a CString ...
+09:58:14 <kmc> yeah the current situation is "any encoding you like so long as it's latin-1" ;)
+09:58:20 <edwardk> =)
+09:58:52 <kmc> it should be possible to turn a CString into a ByteString with no copy, at least if you're careful to let go of it quickly
+09:59:28 <edwardk> unsafePackString in Unsafe
+09:59:38 <edwardk> that takes O(n)
+09:59:43 <edwardk> but if you know the length
+09:59:47 <edwardk> unsafePackCStringLen
+09:59:49 <edwardk> is O(1)
+10:00:10 <geheimdienst> what about this guy? http://hackage.haskell.org/packages/archive/bytestring/0.9.1.4/doc/html/Data-ByteString.html#v%3ApackCString
+10:00:21 <geheimdienst> i'd rather not have ceiling cat watching me unsafe
+10:00:30 <edwardk> =)
+10:01:24 <edwardk> they are unsafe because if you tell them the wrong length it doesn't keep you from shooting yourself in the foot and the resulting bytestring isn't managed on the haskell heap (because it is a direct reference) and if the original cstring changes the haskell bytestring does to
+10:01:40 <edwardk> but packCString* are fine if you can accept the O(n) copy time
+10:03:12 <geheimdienst> the CString is coming from nl_langinfo http://www.opengroup.org/onlinepubs/009695399/functions/nl_langinfo.html , which is not telling me the length as an int or something
+10:03:27 <geheimdienst> so i have no way of knowing the length short of doing strlen
+10:03:53 <geheimdienst> so the whole shebang will be O(n) no matter what ... i guess
+10:08:21 <kmc> yeah
+10:08:22 <kmc> C strings suck
+10:08:45 <geheimdienst> C * suck
+10:15:59 <mreh> > [1,2,3] :: [] Int
+10:15:59 <lambdabot>   [1,2,3]
+10:16:20 <mreh> @kind []
+10:16:21 <lambdabot> * -> *
+10:16:40 <mreh> is this haskell98?
+10:16:46 <medfly> ?
+10:16:57 <medfly> what is wrong?
+10:17:03 <mreh> using [] as a prefix type constructor
+10:17:06 <chrisdone> a C string walks into a bar and says "Hello, I'd like a Budweiser."
+10:17:19 <geheimdienst> > [Int] == [] Int
+10:17:20 <lambdabot>   Not in scope: data constructor `Int'Not in scope: data constructor `Int'
+10:17:20 <chrisdone> properly terminated of course, I wrote it
+10:17:26 <geheimdienst> *cough cough*
+10:17:32 <dankna> Some stuff ensues and the string eventually says "No, I'm a frayed knot."
+10:17:37 <mreh> lol wut
+10:17:50 <dankna> sorry :)
+10:18:03 * chrisdone drumrolls over dankna 
+10:18:35 <cwraith> mreh: using [] as a prefix type constructor is H98
+10:18:37 <int80_h> tough room
+10:19:33 <geheimdienst> a c string walks into a bar and says "hi there, i'd like a budweiser.[[[    @^H A A A $%&'*^C##3udweiser ^A"
+10:20:02 <mreh> the barman's buffer overruns
+10:20:16 <dankna> geheimdienst hahaha
+10:20:46 <chrisdone> ok, now re-read what I said if geheimdienst's was new to you
+10:21:52 <omnihil> if I have two IO [Integer] variables and want an IO [Integer] of their sum, what's the best way? (liftM (map (\(a,b) -> a+b))) . (liftM2 zip) seems to generate a type error?
+10:22:01 * geheimdienst still doesn't get chrisdone's c string in a bar
+10:22:09 <mreh> non null terminated?
+10:22:21 <chrisdone> that joke's older than the octal joke
+10:22:27 <copumpkin> :t liftM2 (zipWith (+))
+10:22:28 <lambdabot> forall a (m :: * -> *). (Num a, Monad m) => m [a] -> m [a] -> m [a]
+10:22:34 <copumpkin> omnihil: ^
+10:22:38 <omnihil> excellent thank you
+10:22:47 <int80_h> what's the octal joke?
+10:22:49 <mreh> I bet it's not older than the 10 kinds of people joke
+10:23:06 <int80_h> I thought it was the 01 kinds of people.
+10:23:14 <hpc> there are two kinds of people in the world; * and * -> *
+10:23:15 <hpc> :P
+10:23:18 <Twey> Hallowe'en, Christmas?
+10:23:19 <aRcatan> :-----_D
+10:23:20 <chrisdone> programmers celebrate hallowe'en and christmas on the same day
+10:23:44 <int80_h> oh yeah I saw that in the deep C book.
+10:23:49 <geheimdienst> what's that have to do with c
+10:23:59 <mreh> there are 10 values in between 00 and 01, yes
+10:24:27 <dankna> yes, I love the halloween/christmas one, cause it's true
+10:24:35 <mreh> mental note: never try to tell a joke in here
+10:24:38 <int80_h> the later chapters were peripheral.
+10:24:52 <mreh> jesus, where was I?
+10:25:05 <chrisdone> I remember when I was about 13 and someone had that joke written somewhere
+10:25:09 <medfly> chrisdone, why?
+10:25:17 <chrisdone> and I was all "THAT'S TEN NOT TWO YOU MORAN"
+10:25:32 <chrisdone> :(
+10:25:32 <geheimdienst> dankna, i think the american middle-endian way of writing the date is more confusing
+10:25:49 <geheimdienst> there's only 2 hard problems in computer science: naming things, cache invalidation, and off-by-one errors
+10:25:55 <dankna> smirk
+10:25:55 <int80_h> confusion is the American Wat (tm).
+10:26:00 <chrisdone> geheimdienst: hehe
+10:26:02 <int80_h> hah, I mean Way.
+10:26:08 <byorgey> Wat is better
+10:26:11 <geheimdienst> Wat is great also
+10:26:12 <mreh> wat 0_0
+10:26:15 <int80_h> yeah it works, I'm laughing.
+10:26:16 <dankna> mm, more confusing?  I don't know about that.  it doesn't sort as easily though.
+10:26:31 <medfly> we've all done stupid things :/
+10:26:42 <medfly> when I was a kid, I heard about P vs. NP...
+10:26:44 <int80_h> I do at least three stupid things daily.
+10:26:47 <hpc> there are two types of people in the world: those who can extrapolate from incomplete information
+10:27:16 <Twey> > "There are 10 kinds of people in the world: " ++ intercalate ", " (map ("those who understand " ++) $ "binary" : "trinary" : map (("base-" ++) . show) [4 ..])
+10:27:17 <lambdabot>   "There are 10 kinds of people in the world: those who understand binary, th...
+10:27:17 <dankna> N = 1 therefore P = NP...
+10:27:18 <geheimdienst> there are eight types of people in the world: those who can extrapolate from incomplete information
+10:27:30 <medfly> dankna, right...
+10:27:46 <geheimdienst> twey, even lambdabot is getting tired of the joke and cuts it off in the middle :-)
+10:27:50 <Twey> Heheh.
+10:27:58 <chrisdone> @vixen do you like pun jokes?
+10:27:59 <lambdabot> yah, i like
+10:28:10 <int80_h> did lambdabot get bored and go off somewhere to check his facebook?
+10:28:13 <chrisdone> there's a magic tractor going down the road, and it turns into a field
+10:28:51 <mreh> good joke
+10:28:59 * chrisdone observes the silence
+10:29:00 <chrisdone> bad joke
+10:29:02 <mreh> a man walks into a bar: "ouch"
+10:29:10 <jaredj> ouch
+10:29:10 <int80_h> okay okay I have to get serious and fix my code.
+10:29:16 <geheimdienst> what magic tractor?
+10:29:24 <jaredj> i'll field that question!
+10:29:26 <dankna> So an engineer, a mathematician, and a computer scientist are in a car and it gets a flat tire.
+10:29:34 <dankna> The engineer says they should replace the tire.
+10:29:40 <dankna> The mathematician says they should replace the car.
+10:29:51 <dankna> The computer scientist says they should drive around the block in case it fixes itself.
+10:29:55 <Twey> Heheh.
+10:29:58 <dankna> yeah
+10:30:12 <medfly> why does the mathematician say to replace the car?
+10:30:20 <int80_h> they like to generalize
+10:30:23 <geheimdienst> i thought it was "... says the should push it back up the hill, roll down once more and see if it happens again"
+10:30:24 <monochrom> the computer scientist says they should design a haskell EDSL for flat tires.
+10:30:30 <dankna> that's more or less it, yes
+10:30:45 <jaredj> i thought it was "... turn the car off, get out, get back in and start it again"
+10:30:51 <medfly> :)
+10:30:52 <dankna> tough crowd :)
+10:31:45 <int80_h> when I'm in front of a tough crowd, I just sing "I'm alittle teapot", and they come around.
+10:32:22 <monochrom> And the mathematician says the flat tire is homeomorphic to the pumped-up tire, what's the difference.
+10:32:32 <geheimdienst> edsl for flat tires? this is getting so silly, people are apparently hoping the silly counter will underflow and wrap around to make something awesome
+10:32:38 <dankna> smirk, nice one
+10:33:10 <monochrom> And the engineer should be the one saying to replace the car, since it's the car, not the tire, that contains the engine.
+10:33:13 <mreh> slow day at the office probably
+10:34:33 <geheimdienst> And the teenage girl uses her cellphone to make a youtube video "omg totaly a flat tire lol!"
+10:34:39 <mreh> what's the "output monad" when it's at home?
+10:34:42 <geheimdienst> And the guy with the slow day at the even office watches it.
+10:34:43 <mreh> writer?
+10:35:41 <monochrom> basement writer
+10:36:01 <geheimdienst> anyhoo, any red flags about this? fmap UTF8.toString (BS.packCString =<< nl_langinfo li)
+10:36:02 * writer writer
+10:36:09 <geheimdienst> (nl_langinfo li has type IO CString)
+10:38:04 <int80_h> is hpaste down? I'm getting a "unable to  open database file" error 
+10:38:09 <int80_h> go there and see.
+10:38:23 <mreh> monochrom: just understood that
+10:39:03 <monochrom> yeah unable to open datebase file
+10:39:17 <chrisdone> runShakespeare :: Shakespeare w a -> (a,w)
+10:39:28 <monochrom> I wonder if you could skip the packCString stage
+10:39:33 <int80_h> crap
+10:39:40 <int80_h> is the a backup for hpaste?
+10:39:44 <chrisdone> yerrp. hpaste is hosted by imaginary pixies
+10:39:47 <chrisdone> we're at their whim
+10:39:49 <monochrom> no
+10:39:50 <geheimdienst> int80_h, try pastebin.com
+10:39:54 <chrisdone> NO
+10:39:55 <geheimdienst> or gist.github.com
+10:39:56 <chrisdone> not pastebin
+10:39:57 <chrisdone> jesus
+10:39:58 <Zao> runShakespeare (Shakespeare 2 b)
+10:40:06 <Zao> Or codepad.
+10:40:07 <jaredj> somebody pointed out codepad
+10:40:11 <chrisdone> http://paste.lisp.org/ or http://pastie.org/ or http://gist.github.com
+10:40:19 <int80_h> I naively did not make a copy of an old version of a program I am working on. I figured I could just go get it from hpaste if I needed to.
+10:40:27 <monochrom> what's wrong with pastebin.com?
+10:40:33 <mreh> what is the writer Monad without all the type-fu?
+10:40:40 <geheimdienst> monochrom, i'm open to ideas :-)
+10:40:40 <mreh> (,) w?
+10:40:42 <geheimdienst> @hoogle CString -> String
+10:40:43 <lambdabot> Foreign.C.String peekCAString :: CString -> IO String
+10:40:43 <lambdabot> Foreign.C.String peekCString :: CString -> IO String
+10:40:43 <lambdabot> Prelude show :: Show a => a -> String
+10:40:50 <jaredj> monochrom: the site is visually not very simple
+10:40:55 <Zao> monochrom: Naughty ads occasionally.
+10:41:01 <mreh> Monoid w => (,) w
+10:41:20 <Zao> Even worse, Flash ads *shudder*
+10:41:26 <geheimdienst> what that's all? it has ads and is "visually not very simple"?
+10:41:30 <int80_h> what is this flash you speak of
+10:41:39 <Zao> int80_h: Something people with Real OSes has :D
+10:41:46 <int80_h> oh snap!
+10:41:48 <monochrom> flesh ad
+10:41:53 <chrisdone> I don't know why we don't just invite lisppaste back in here
+10:42:07 <chrisdone> like it's some kind of acceptance of defeat that we can't even manage a simple paste web site with a bot
+10:42:17 <int80_h> it is!
+10:42:24 <monochrom> a writer without type-fu is a handwriter
+10:42:40 <monochrom> as opposed to a writer with type-fu: typewriter
+10:42:42 * geheimdienst thinks you can cut the NIH syndrome with an knife in here
+10:43:00 <chrisdone> geheimdienst: why use a knife when you can create your own cutting instrument?
+10:43:38 <monochrom> I wonder why it's "unable to open database file" every so often.
+10:43:55 <chrisdone> last I heard it's using takusen which is buggy
+10:44:47 <chrisdone> doesn't really matter because we don't have access to the damn thing
+10:45:35 <geheimdienst> let's just use gist or pastie. problem solved
+10:45:37 <dankna> I may see about writing one, not sure...
+10:45:59 <chrisdone> dankna: we have the source, we don't need to write one
+10:46:10 <dankna> but that was invented by somebody other than me! :D
+10:46:17 <chrisdone> we need access to the host or to get someone to point the domain elsewhere
+10:46:21 <dankna> hrm
+10:46:23 <dankna> I see
+10:46:42 <chrisdone> I don't think glguy runs it
+10:46:52 <monochrom> you're welcome to create nemesis-of-hpaste.com
+10:47:00 <dankna> whois says
+10:47:05 <geheimdienst> haste.com
+10:47:07 <geheimdienst> phaste.com
+10:47:11 <dankna> bos@serpentine.com, Bryan O'Sullivan
+10:47:19 <kmc> http://www.reddit.com/r/programming/comments/d3se0/the_programmer_hierarchy/c0xcu8b
+10:47:24 <geheimdienst> woah the RWH dude
+10:47:37 <chrisdone> I'll email Bryan then
+10:47:45 <geheimdienst> haskaste.com
+10:48:10 <Zao> Wasn't there a hpastetwo once?
+10:48:59 <geheimdienst> paste-me-a-haskell-for-great-good.com
+10:49:23 <geheimdienst> real-paste-haskell.com
+10:49:46 <roconnor> kmc: what program generated that comment?
+10:50:01 <geheimdienst> i-can-has-paste.com
+10:50:26 <chrisdone> roconnor: me :p
+10:51:04 <roconnor> chrisdone: are you sure it wasn't that automatic encylopedia project?
+10:51:26 <monochrom> mejeje is the name of chrisdone's chat bot iirc
+10:51:40 <monochrom> appeared in #haskell-blah
+10:51:53 <geheimdienst> lol, "xmonad is the most moving window manager of the 2000s"?
+10:52:27 <dankna> note that the 2000s are over
+10:52:35 <chrisdone> okies, emailed bryan
+10:52:44 <Zao> geheimdienst: Century? Millenium?
+10:52:51 <dankna> cool
+10:52:54 * geheimdienst regards xmonad the most moving window manager of the 21st century
+10:54:30 <monochrom> a power manager, a memory manager, and a window manager moves into a car
+10:54:36 <chrisdone> Zao: mmorrow hosted a hpaste on moonpatio before he started a project on candlejack, and then he
+10:54:52 <monochrom> indeed, and then he.
+10:55:03 <Zao> He indeed.
+10:55:08 <monochrom> or you can say, and then he accidentally.
+10:55:38 <geheimdienst> anyhoo, should i declare foreign functions that return a char * as CString or IO CString? what's the difference?
+10:56:10 <dankna> I would do it as IO CString but it really depends on what the function does.  the difference is, er, that the latter will have to be called from the IO monad :)
+10:56:17 <dankna> the former will not but is subject to CSE and stuff
+10:56:57 <chrisdone> I think the judgment goes if the foreign is referentially transparent then you make it CString
+10:56:58 <pikhq> geheimdienst: If the foreign function has actual side effects, IO CString is probably the right choice.
+10:57:06 <chrisdone> everything else, IO
+10:57:34 <pikhq> (an example of something that *doesn't* have side effects would be, say, strlen.)
+10:58:16 <chrisdone> sure. strLen "foo" could be replaced with 3 and not change meaning of the program
+10:58:22 <geheimdienst> it's nl_langinfo, it tells you things about the user's locale. i'd say: it doesn't have side effects as in changing state, but it's not entirely referentially transparent because some weird program might in the middle of running change its locale
+10:59:53 <chrisdone> good question
+11:00:16 <chrisdone> so invoking by invoking the program multiple times can produce different behaviour because the locale can change
+11:00:24 <pikhq> geheimdienst: Is it possible to change the locale during execution?
+11:00:26 <chrisdone> uh, s/by invoking//
+11:00:36 <pikhq> If so, then make that IO. Otherwise, not.
+11:01:11 <freiksenet> I wonder if it is a right place to ask about hidnley-milners type inference. not for homework, don't worry :)
+11:01:13 <chrisdone> and, I suppose, if in doubt, IO it
+11:01:32 <monochrom> it is a good place to ask about HM type inference
+11:01:35 <geheimdienst> pikhq, yes, there's a package setlocale. it's even necessary to call setlocale "" once on startup to really enable locale stuff. somebody for some reason might make a program calling setlocale "de_DE.whatnot"
+11:02:15 <freiksenet> great. I've made basic HM for a lisp-like language, but I think i misunderstood some part of the unification algorithm
+11:02:28 <pikhq> geheimdienst: Then it should *definitely* be IO.
+11:02:30 <geheimdienst> ok i'm sold, i'll IO it
+11:02:41 <freiksenet> say I am infering (+ 1 t) (1 + True in Haskell). This obviously has to fail
+11:03:36 <geheimdienst> so you could say, declare a function as IO to tell ghc that it's not referentially transparent. is that right?
+11:04:06 <chrisdone> geheimdienst: yeah
+11:04:46 <freiksenet> but it doesn't because number = bool constraint appears only in substitution, because of the order of the constraints. 
+11:04:51 <pikhq> geheimdienst: When importing a FFI function, yes. Functions that aren't referentially transparent should be IO.
+11:05:10 <freiksenet> should I move the constraint back to the stack when there is substitution there?
+11:05:40 <geheimdienst> okay thanks guys, great information
+11:05:51 <pikhq> (in native Haskell, just don't cheat and you'll be fine. :P)
+11:06:44 <geheimdienst> gotta run
+11:08:21 <Cale> freiksenet: I don't think I understand your question.
+11:09:11 <freiksenet> Cale: sorry, I was drawing a chart to show my problem, but it sees one substitution just didn't occur
+11:09:19 <freiksenet> so thanks anyway
+11:09:56 <freiksenet> just a bug in code. 
+11:10:01 <Cale> okay
+11:14:51 <freiksenet> grand, it works now. typo. I wish I used haskell :|
+11:25:21 <malware> hi
+11:25:25 <malware> i have a q
+11:25:35 <dankna> I have an a
+11:25:44 <malware> :)
+11:25:54 <malware> i couldnt use leksah in mac
+11:26:02 <malware> it crashes when i launched
+11:26:10 <malware> any IDE for
+11:26:10 <dankna> never tried it.
+11:26:13 <writer> leksah isn't malware ;)
+11:26:16 <dankna> I use Emacs and Terminal.
+11:26:38 <malware> haskell to precompile
+11:26:44 <malware> precompiling option
+11:26:54 <malware> multiplatform
+11:26:59 <malware> except eclipse
+11:28:00 <malware> any answer?
+11:32:44 <aristid> @quote ubuntu.*freebsd
+11:32:45 <lambdabot> NIXDAEMON-COOL says: how to uncompile make into java gcc 3.3 under ubuntu freebsd ??
+11:33:35 <aristid> how to precompile option ide leksah multiplatform except eclipse?
+11:37:13 <malware> precompiling option ide for croosplatform except eclipse
+11:37:28 <malware> eclipse couldnt find the PATH 
+11:41:48 <sm> yay figured out my encoding issue.
+11:42:18 <sm> I believe that as of ghc 6.12, file paths and arguments are utf-8 or other local encoding on unix, and unicode on windows.
+11:43:03 <sm> so if I want to display a filename or argument value to the user, I'll use this: decodeIfUTF8 s = if isUTF8Encoded s then decodeString s else s
+11:44:12 <chrisdone> is there some software that given some project-specific configuration file will analyse any project directory and point out that changes to one file at line whater or to variable whatever influence those in line whatever or to another file. basically a very generic dependency consistency checker?
+11:44:29 <chrisdone> example case: documentation and function definition are interdependent and need to be consistent
+11:45:02 <chrisdone> server side parser needs to be consistent with client side producer, etc.
+11:45:42 <chrisdone> it doesn't need to do anything clever. it just needs to say "you change X, please confirm that Y and Z are consistent with it"
+11:48:41 <chrisdone> I'll take that as a no...
+11:49:26 <sm> you mean like make, but more precise ? It would have to be aware of file semantics wouldn't it ?
+11:50:20 * sm shakes head, no
+11:50:23 <chrisdone> possibly. or it could just be line or marker based
+11:51:07 <chrisdone> maybe it could hook into git's diff
+11:52:26 <chrisdone> I dunno
+11:53:01 <chrisdone> I like that type checking makes refactoring a little easier
+11:53:15 <chrisdone> a generalised checker would be really useful, I think
+11:56:20 <chrisdone> suppose:
+11:56:20 <chrisdone> -- | Returns the length of the string. [1]
+11:56:20 <chrisdone> foo :: String -> Int
+11:56:20 <chrisdone> foo = length -- [1]
+11:56:37 <chrisdone> three changes, I get a message saying "check out line 1 that you're consistent"
+11:56:51 <chrisdone> and vise versa
+11:56:51 <geheimdienst> couldn't you use hunit somehow for that? (not sure what you're driving at)
+11:56:54 <chrisdone> that would be the marker way
+11:57:20 <chrisdone> geheimdienst: how would hunit check that documentation matches your implementation?
+11:59:04 <geheimdienst> you're right ...
+11:59:48 <chrisdone> the alternative route would be having editor support. so the markers don't actually modify the file, but are displayed in a nice way and easy to edit, are stored in a .check database or something
+11:59:53 <chrisdone> and the 'check' program just reads this database file, scans your whole project and prints any warnings
+12:00:31 <geheimdienst> i guess i would grep through the diff, maybe in a commit hook. when file X is changed, you output a warning that file Y needs to be changed accordingly
+12:00:36 <chrisdone> surely there must be something like this out there... I figured if there was, Haskellers would know of it
+12:01:20 <chrisdone> geheimdienst: yeah, that seems like a good way
+12:01:43 <chrisdone> don't commit yet, check the following file(s) are consistent with your changes
+12:02:36 <geheimdienst> i guess you'd like the "links" as close to the code as possible. so i don't like the idea of an extra file with lots of "foo.hs:37 bar.txt" lines, because i think that would just get stale
+12:03:26 <chrisdone> in what way and how would it get stale?
+12:03:45 <ville> Howdy. Anyone else running into problems with certain Haskell packages wanting a specific version of GHC rather than version or above when doing pacman -Syu?
+12:04:35 <Zao> ville: Isn't there an Arch Haskell channel out there somewhere?
+12:04:50 <chrisdone> #haskell-arch?
+12:05:00 <geheimdienst> well i imagine it's like api documentation ... if you have that far from the code (in some word document somewhere), then it's just too easy to say "i'll get back to updating the docs later" and actually never do it
+12:05:11 <ville> Zao: indeed and this wasn't meant for this channel anyway.
+12:05:18 <geheimdienst> so i like the haddock/javadoc idea of having that as close to the function as possible
+12:05:34 <geheimdienst> not in an extra file
+12:06:39 <chrisdone> geheimdienst: hmm. maybe. I mean, the point is even if your documentation was in separate files, with this checker software, you would get errors saying that your documentation isn't consistent in files X, Y and Z
+12:07:06 <chrisdone> geheimdienst: sure it's a chicken and egg problem, you need to remember to specify dependencies all the time for this to actually help you
+12:07:08 <geheimdienst> anyway, i'd maybe choose "---" as your marker and in foo.hs say "code code code --- bar.txt". to ghc it's a comment, but your tool would then grep through the diff, and when a "---" shows up, ensure "bar.hs" shows up in the diff as well
+12:07:37 <Zao> geheimdienst: What if someone defines (---)?
+12:07:37 <chrisdone> at least this one is checkable though, unlike documentation. and I can use it to make sure people hacking on my code don't do something stupid without checking the implications (literally, they'd see a list)
+12:07:57 <Zao> -- - on the other hand...
+12:08:24 <geheimdienst> zao, it's his project, he's got it under control (i understood)
+12:08:50 <geheimdienst> also, just make up something else, it's not like you absolutely have to use that particular string as your marker
+12:09:06 <chrisdone> sure, choosing a marker is trivial
+12:09:29 <chrisdone> Zao: that's kind of nice. it fits in with the -- |, -- ^ style of Haddock
+12:09:52 <Zao> -- U+2603
+12:09:57 <megajosh2> It's possible to define an operator that starts with --
+12:09:58 <megajosh2> ?
+12:10:11 <megajosh2> > let (--) lol = lol * 2
+12:10:11 <lambdabot>   <no location info>: parse error (possibly incorrect indentation)
+12:10:22 <megajosh2> ...
+12:10:26 <chrisdone> > let (---) = (*) in 2 --- 4
+12:10:27 <lambdabot>   <no location info>: parse error (possibly incorrect indentation)
+12:10:40 <chrisdone> > let (--^) = (*) in 2 --^ 4
+12:10:40 <Tinned_Tuna> @let (--) l == l * 2
+12:10:41 <lambdabot>   Parse error: SemiColon
+12:10:41 <lambdabot>   8
+12:10:45 <chrisdone> there we go
+12:10:47 <Zao> > let (--:) a b = 42 in a --: b
+12:10:47 <lambdabot>   42
+12:10:49 <megajosh2> wow
+12:11:05 <Zao> Erm... where did it conjure up a and b?
+12:11:18 <megajosh2> @let (--) = (+) in 1 -- 1
+12:11:19 <lambdabot>   Parse error: SemiColon
+12:11:22 <chrisdone> geheimdienst: but, suppose two binary files are inter dependent
+12:11:31 <megajosh2> > let (--) = (+) in 1 -- 1
+12:11:32 <lambdabot>   <no location info>: parse error (possibly incorrect indentation)
+12:11:34 <megajosh2> Nope
+12:11:45 <geheimdienst> then you're out of luck with that method
+12:11:47 <chrisdone> Zao: probably the Expr thingie
+12:11:49 <_Cactus_> hi
+12:11:49 <chrisdone> :t a
+12:11:50 <lambdabot> Expr
+12:12:04 <_Cactus_> I've just realised that MonadWriter's 'listen' function doesn't stop upwards propagation
+12:12:32 <chrisdone> mhm
+12:12:37 <Deewiant> > foldr f z [a,b] -- Zao
+12:12:38 <lambdabot>   f a (f b z)
+12:12:39 <_Cactus_> is there a cleaner way to do that than doing a manual runWriter?
+12:13:21 <chrisdone> geheimdienst: if you're not dealing with text files then you need a separate file to document it!
+12:13:52 <joerisamson> talksmallthinkgreat
+12:16:24 <geheimdienst> chrisdone, true, didn't know you wanted to do that
+12:19:01 <chrisdone> well, I'm just thinking
+12:19:07 <chrisdone> would you want to do that?
+12:19:37 <geheimdienst> i'm certain i wouldn't :-)
+12:19:46 <peeler> anyone know if there's a high level interface to glBindFragDataLocation in HOpenGL?
+12:19:58 <chrisdone> geheimdienst: what if you have a bunch of images that are dependent?
+12:20:03 <geheimdienst> i rarely have binary stuff under version control anyway, and i can't imagine two binaries linked in this "update the doc" trigger
+12:20:05 <peeler> I see it in the raw API, but there's not a corresponding interface under Shaders
+12:20:24 <geheimdienst> okay that's a usecase i'd say
+12:20:33 <chrisdone> the only use case I can think of right now :p
+12:20:38 <benmachine> _Cactus_: what's unclean about runWriter? (in answer to your question, no I don't think so)
+12:20:54 <peeler> and I'd really prefer not to use a pointer-to-GLchar as a string...
+12:21:03 <chrisdone> css depends on binary files, as do programs, but then you could document that dep inside the css or program source
+12:21:34 <_Cactus_> benmachine: well in my case it's more like runRWS . runErrorT, with a get before and a put after
+12:21:40 <_Cactus_> benmachine: so it kinda falls apart
+12:22:16 <kmc> _Cactus_, sounds a little ugly, but you can define that as a combinator once
+12:22:31 <kmc> also if you have RWS *and* error, you might be better off making your own custom monad
+12:22:39 <kmc> and implementing the operations which make sense for your domain
+12:22:59 <kmc> i generally like to write most of the code that way, with a small module providing the monad (whether "from scratch" or newtype-wrapping a MTL stack)
+12:23:10 <_Cactus_> kmc that's exactly what I'm doing
+12:23:13 <copumpkin> dolio: I was looking in logict and you have two types called SK and FK, and I get what they do but not what the names stand for :) do you remember by any chance?
+12:23:20 <_Cactus_> kmc: so we're talking about the code inside the small module
+12:23:32 <_Cactus_> but that shouldn't be too ugly either :)
+12:23:32 <kmc> right
+12:23:37 <kmc> maybe wrapping MTL is the wrong way to go though
+12:24:30 <chrisdone> geheimdienst: also, XML file depends on CSS file.. now we need a 'tagging' syntax for xml. hmm, I'll try a dummy implementation with haskell and emacs. see how it fares
+12:25:55 <geheimdienst> i guess a start would be just: git diff | grep -o "\+ .*---.*"
+12:26:02 <geheimdienst> (if you go with --- as the marker)
+12:26:18 <peeler> lacking a high level interface, what's the cleanest way to convert a String to a Ptr GLchar?
+12:26:34 <kmc> peeler, look at Foreign.C.String
+12:26:47 <geheimdienst> i guess any language has some comment feature. in xml you could say <!--- blah.css --> or <!-- --- blah.css -->
+12:26:49 <lambdaKalkuel> Is functional reactive programming the right paradigm for an "complex event-processing" system (cf. Esper) in Haskell? Or rather something like CHP?
+12:26:53 <benmachine> that'd get you a Ptr CChar though surely?
+12:26:58 <kmc> assuming GLchar = CChar, you can use withCString
+12:27:08 <omnihil> can someone answer this newbieish IO/evaluation ordering question? http://pastebin.com/cd9KPmPF
+12:27:11 <peeler> thanks kmc, will do
+12:27:35 <omnihil> I'm trying to get an infinite loop that's printing progress as it goes, but instead it's re-calculating its entire history at every step it appears
+12:27:40 <_Cactus_> tbh I don't even understand why listen's semantics are not like that by default
+12:27:46 <_Cactus_> you can always easily tell its result again
+12:27:49 <benmachine> if GLchar and CChar have the same representation you could castPtr
+12:28:44 <chrisdone> geheimdienst: as a compromise, the program could be fuelled by a .check file, but it could automatically generate one on the fly from inline comments, and if you have binary file deps specifiy it in the .check file
+12:29:12 <benmachine> but isn't the whole point of GLchar that it might not be
+12:29:36 <kmc> omnihil, it's a bit convoluted; can you cut the example down to a minimal case which exhibits the unexpected behavior?
+12:29:52 <peeler> benmachine: yep
+12:30:03 <kmc> my first guess is that the problem lies at «total >>= \oldTotal -> …»
+12:30:04 <omnihil> kmc, that's already cut down significantly
+12:30:12 <geheimdienst> sure. i guess the .check file would be much like a makefile then. you could maybe even use make on it
+12:30:14 <omnihil> I don't know how to cut it down further
+12:30:19 <kmc> you're defining "newtotal" as an IO action which starts by running the "total" IO action
+12:30:25 <omnihil> it's adding up a list of random numbers and trying to print the intermediate sum at regular intervals
+12:30:43 <peeler> unfortunately i don't think it will matter much because i'll also need to convert the high level shader 'Program' i'm working with to a GLuint
+12:30:58 <kmc> shouldn't "total" be the running total, rather than a IO action?
+12:31:04 <peeler> oh wait, i see, in the source it's a named field...
+12:31:27 <chrisdone> geheimdienst: you mean like 'make check' or some such?
+12:31:39 <omnihil> hmm I see, I'll try that
+12:32:30 <kmc> omnihil, also, it might be more readable if you used the "do" syntax.  though perhaps you're deliberately avoiding it in order to learn the monad operators
+12:32:39 <geheimdienst> i mean a makefile is a bunch of lines like:
+12:32:59 <omnihil> yes, I am deliberately avoiding it
+12:33:00 <geheimdienst> foo.hs : foo.txt foo-image.png
+12:33:07 <kmc> omnihil, type signatures on top-level bindings are usually good style.  in this case it would highlight the fact that the second arg to 'runloop' is an IO action
+12:33:15 <chrisdone> geheimdienst: ahhh
+12:33:18 <geheimdienst> to specify that foo.hs must be changed whenever foo.txt or the png change
+12:33:26 <geheimdienst> (not the best example, but you get it)
+12:33:33 <chrisdone> sure
+12:34:03 <Polarina> Where can I find the gtk2hsC2hs program?
+12:34:13 <kmc> gtk2hs-buildtools
+12:34:14 <kmc> on Hackage
+12:34:24 <omnihil> so the $! operator doesn't evaluate it into a constant integer, but leaves it as an IO action that's re-evaluated each time?
+12:34:37 <kmc> omnihil, you're confusing evaluation with execution
+12:34:49 <kmc> $! control evaluation
+12:35:03 <kmc> it will never turn an IO action into something which isn't an IO action
+12:35:14 <Polarina> kmc, thanks.
+12:35:18 <kmc> IO actions may be fully evaluated but the effects do not occur until they are *executed*
+12:35:35 <kmc> the way you execute an IO action is by naming it "main", or by gluing it onto an IO action which is already going to get executed
+12:35:50 <kmc> IO actions are first-class values and so you can pass them around like anything else, as you do in the 'total' argument
+12:35:56 <omnihil> so the execution will always only follow the data dependencies
+12:36:03 <omnihil> and not actually the statement ordering or evaluation ordering
+12:36:03 <kmc> evaluation follows data dependencies
+12:36:10 <kmc> execution follows statement ordering
+12:36:26 <kmc> (statements exist in "do".  once you desugar "do", it follows the ordering imposed by (>>=))
+12:36:29 <Polarina> Where do I find the pkg-config program?
+12:36:37 <kmc> Polarina, standard unix program
+12:36:49 <kmc> check your OS's package manager
+12:36:51 <Zao> /usr/local/bin/pkg-config
+12:36:57 <Zao> Doesn't look horribly standard here :D
+12:37:10 <Polarina> kmc, I am using the haskell platform, trying to install gtk.
+12:37:13 <Zao> kmc: De-facto standard, maybe?
+12:37:23 <geheimdienst> i've never heard of it :)
+12:37:37 <kmc> fine standard on the two linux distros i'm familiar with ;P
+12:37:40 <kmc> anyway, it's not a haskell thing
+12:42:26 <kmc> omnihil, would you like miscellaneous suggestions as well?
+12:42:32 <Polarina> Could anyone be so kind and help me figure out how to install gtk2hs on haskell platform on windows? I cannot seem to find anything lurking around the internet. :(
+12:43:00 <omnihil> kmc, sure
+12:43:14 <omnihil> though I'm still trying to figure out how to move the addition into total to get it to stop re-executing previous steps for different results
+12:43:14 <kmc> drawVal :: IO Int; drawVal = randomRIO (0,1)
+12:43:15 <peeler> gaahhh... the data contructor for the high level 'Program' in HOpenGL isn't exported, so I can't get the underlying GLuint out. So I think I can either not use glBindFragDataLocation, and thus be incapable of using the simplest of fragment shaders
+12:43:25 <peeler> or write *all* of my shader code using the raw interface
+12:43:55 <omnihil> oh, neat
+12:44:06 <Zao> Polarina: Aren't there binary installers for that?
+12:44:29 <Polarina> Zao, I am trying to use cabal-install. It doesn't seem to be smart enough. :(
+12:44:33 <Zao> Polarina: If there's none for the particular GHC in your HP, you've got to grease your elbows and install msys and build GTK from scratch.
+12:44:47 <Zao> Polarina: I don't think cabal-install ever was capable of installing gtk2hs.
+12:45:42 <luite> it is now
+12:45:56 <luite> has been since march or something
+12:46:30 <luite> Polarina: have you downloaded the gtk development package and added its bin directory to your PATN?
+12:47:08 <Polarina> luite, I downloaded the development package, but I have no clue on what to do with it. There are no instructions whatsoever.
+12:48:20 <luite> Polarina: did you get this one? http://ftp.gnome.org/pub/gnome/binaries/win32/gtk+/2.20/gtk+-bundle_2.20.0-20100406_win32.zip
+12:48:30 <kmc> omnihil, http://codepad.org/kTjGuBJO
+12:49:12 <kmc> also hooray for the central limit theorem
+12:49:31 <Polarina> luite, I got that one.
+12:50:00 <kmc> omnihil, when you do this kind of tail recursion, you have to be careful about building a big lazy chain of additions in "newTotal" and overflowing stack or heap
+12:50:15 <kmc> omnihil, in this case it's okay because every hundred loops it will force "newTotal" in order to print it
+12:50:24 <luite> Polarina: ok, just choose some directory to unpack that to. for example I tend to keep my haskell files in c:\haskell, so I extracted the files to c:\haskell\gtk
+12:50:29 <kmc> omnihil, but you could also do «runLoop (count+1) $! newTotal»
+12:50:45 <luite> Polarina: and if you choose that location, you need to add c:\haskell\gtk\bin to your PATH
+12:51:20 <luite> Polarina: after that, open a command prompt, and try the following:  > pkg-config --cflags cairo
+12:51:24 <Polarina> luite, I've extracted it there. How do I add it to my path?
+12:51:43 <luite> Polarina: which version of windows are you on?
+12:52:19 <Polarina> luite, 6.1
+12:52:43 <omnihil> kmc, that does seem to behave the way I want. thanks.
+12:53:00 <luite> that's windows 7 right? :)
+12:53:04 <Phyx-> eh?
+12:53:08 <Polarina> luite, I believe so.
+12:53:10 <Zao> luite: Or corresponding server SKU.
+12:53:18 <Phyx-> that's an odd response :P
+12:53:29 <Phyx-> that's usually given when someone asks what version of NT
+12:53:34 <Zao> As for setting PATH, it's in system properties as usual.
+12:53:41 <kmc> omnihil, let me know if you want help exploring the differences with your version
+12:53:58 <Zao> Win-Break, Advanced System Settings, Environment Variables
+12:54:02 <luite> Polarina: ok, go to start menu, control panel, system and security / system / Advanced System Settings
+12:54:07 <Polarina> luite, ok.
+12:54:18 <omnihil> kmc, alright... I'm playing with translating yours into the monadic syntax and comparing it side by side with mine now to understand what's happening with execution order
+12:54:28 <luite> Polarina: in the advanced tab, there's an environment variables button
+12:54:38 <Polarina> luite, I seem to have found it.
+12:54:56 <sm> question.. you have a regex lib which doesn't support unicode (pcre-light). Will you get the correct results, at least for testing a match, if you always convert the regex and target string to utf 8 first ?
+12:55:05 <_Cactus_> bye
+12:55:18 <luite> Polarina: ok, under system variables, find Path, and add c:\haskell\gtk\bin   (use a ; to separate it from the existing values)
+12:55:40 <Zao> sm: I'd be a bit vary of things like "([ß]+)"
+12:55:45 <hpc> sm: the ? wildcard might not work entirely
+12:55:48 <Polarina> luite, all right. I've done that. Should I rerun cabal-install?
+12:55:50 <hpc> yeah, and +
+12:55:54 <Zao> I'd expect that character class to match on code units, not codepoints.
+12:55:55 <luite> Polarina: open a new command prompt first
+12:56:00 <sm> pcre-light does have a utf8, which would maybe help
+12:56:03 <Polarina> luite, ok.
+12:56:04 <luite> Polarina: and try the command > pkg-config --cflags cairo
+12:56:10 <sm> I'll test a bit
+12:56:21 <sm> s/a utf8/a utf8 option/
+12:56:26 <luite> Polarina: (the old promtps down't known about the new path variables)
+12:56:43 <Polarina> luite, all right, I've done that.
+12:56:44 <luite> Polarina: what does it say?
+12:56:52 <Polarina> It won't let me copy. :(
+12:57:08 <luite> Polarina: right click, choose "mark", and then select
+12:57:09 <omnihil> kmc, so the let vs where change is significant here yes?
+12:57:10 <luite> enter to copy
+12:57:17 <kmc> omnihil, not really
+12:57:18 <Polarina> luite, -IC:/haskell/gtk/include/cairo -IC:/haskell/gtk/include/freetype2 -IC:/haskell/gtk/include -IC:/haskell/gtk/include/libpng14
+12:57:27 <luite> Polarina: ok, then it's installed fine
+12:57:32 <Polarina> :D
+12:57:34 <kmc> omnihil, neither let nor where does any execution by itself.  both of them just assign names to expressions
+12:57:35 <omnihil> oh
+12:57:37 <kmc> they scope differently
+12:57:38 <luite> Polarina: now run: cabal install gtk2hs-buildtools
+12:57:48 <Polarina> luite, I've already done that.
+12:57:53 <kmc> i used "let" because i wanted access to a value which i'd obtained earlier in the "do" block
+12:57:57 <luite> Polarina: ok, then you don't need to do that again
+12:58:09 <luite> Polarina: you should be able to cabal install gtk now
+12:58:21 <kmc> the difference between «x <- v» and «let x = v» is important
+12:58:35 <Polarina> luite, it fails with the same reason. pkg-config not found.
+12:58:43 <kmc> they desugar as «v >>= \x -> …» and «let x = v in …»
+12:58:45 <luite> Polarina: you need to do it in a new command prompt
+12:58:46 <kmc> respectively
+12:58:58 <luite> Polarina: close all the ones you started before changing the path variable
+12:59:01 <Polarina> luite, I am running it in winghci.
+12:59:07 <kmc> the former executes an IO action; if «v :: IO t» then «x :: t»
+12:59:08 <hpc> more specifically, do {x; let z = a; y} translates to x >> let z = a in y
+12:59:19 <kmc> the latter is just a local name for something; if «v :: t» then «x :: t»
+12:59:34 <b0fh_ua> Hello! I have "data Event = Evt { prop :: String } " and "data Container = Cont { evts :: Event }". How do I "update" property "prop" of type Event within value of type Container using record syntax?
+12:59:35 <luite> Polarina: can you restart it?
+12:59:40 <Polarina> luite, it seems to be working now. :)
+12:59:44 <luite> ok, great
+12:59:56 <kmc> b0fh_ua, with great annoyance
+13:00:01 <kmc> b0fh_ua, or by using a package like fclabels
+13:00:26 <Polarina> luite, thanks a lot. I can now go and mess around with cairo. :)
+13:01:38 <luite> Polarina: it used to be much more difficult before cabal install could be used, but it's still more difficult to install third party dependencies on windows, compared to linux
+13:02:01 <hpc> installing is just generally difficult on windows
+13:02:12 <megajosh2> You can't just use (evts myCont){prop="something"} ?
+13:02:25 <hpc> at least, installing anything without installshield or msi
+13:02:28 <luite> depends on what you intend to do... many multimedia related things are much easier on windows :)
+13:03:07 <kmc> megajosh2, that'll give you an Event
+13:03:36 <kmc> myCont { evts = (evts myCont){prop="something"} }
+13:03:39 <kmc> bleh
+13:03:52 <megajosh2> Oh my
+13:04:07 <hpc> records of records are so hard to manipulate
+13:04:16 <kmc> yeah
+13:04:19 <luite> but I have to admit that I prefer linux for programming haskell... emacs runs faster on linux too
+13:04:39 <kmc> it's quite an ugly part of the language
+13:04:43 <kmc> but there are several packages to help
+13:05:04 <peeler> if a module does not export the data constructor for a newtype, is it at all possible to get the field it contains?
+13:05:14 <hpc> no
+13:05:24 <peeler> dammit
+13:05:28 <hpc> it's how IO is enclosed
+13:06:12 <peeler> i'm honestly a little bit shocked, not by that rule
+13:06:13 <luite> unsafeCoerce to the same type with exposed constructors?
+13:06:19 <peeler> but by the deficiency in HOpenGL
+13:06:24 <luite> not recommended probably, but I wonder whether that would work
+13:06:33 <hpc> it's just OpenGL now
+13:06:52 <kmc> peeler, can you use OpenGLRaw
+13:07:05 <Polarina> I keep getting this error while compiling a simple example:    Could not find module `Graphics.Rendering.Cairo':
+13:07:12 <peeler> kmc: i would like to. there's just one function i need from OpenGLRaw
+13:07:40 <peeler> kmc: but that function requires information I can't retrieve from the high level data i'm using elsewhere
+13:07:47 <peeler> so it becomes an all-or-nothing situation.
+13:08:47 <peeler> 	OpenGLRaw-1.1.0.1: A raw binding for the OpenGL graphics system	Source code	Contents	Index
+13:08:50 <peeler> Graphics.Rendering.OpenGL.Raw.Core31	
+13:08:52 <peeler> Portability	portable
+13:08:55 <peeler> Stability	stable
+13:08:57 <peeler> Maintainer	sven.panne@aedion.de
+13:09:00 <peeler> Contents
+13:09:02 <peeler> Functions
+13:09:05 <peeler> Tokens
+13:09:07 <peeler> Types
+13:09:10 <peeler> Extensions promoted to OpenGL 3.1 core
+13:09:12 <peeler> Description
+13:09:15 <peeler> All raw functions, tokens and types from the OpenGL 3.1 core, see http://www.opengl.org/registry/.
+13:09:18 <peeler> Synopsis
+13:09:18 <kmc> don't paste lots of lines here
+13:09:21 <peeler> glActiveTexture :: GLenum -> IO ()
+13:09:23 <peeler> glAttachShader :: GLuint -> GLuint -> IO ()
+13:09:25 <peeler> glBeginConditionalRender :: GLuint -> GLenum -> IO ()
+13:09:28 <peeler> glBeginQuery :: GLenum -> GLuint -> IO ()
+13:09:31 <peeler> glBeginTransformFeedback :: GLenum -> IO ()
+13:09:32 <luite> Polarina: hmm, cairo is a dependency of gtk, which packages did you install?
+13:09:33 <peeler> glBindAttribLocation :: GLuint -> GLuint -> Ptr GLchar -> IO ()
+13:09:36 <peeler> glBindBuffer :: GLenum -> GLuint -> IO ()
+13:09:38 <peeler> glBindFragDataLocation :: GLuint -> GLuint -> Ptr GLchar -> IO ()
+13:09:39 <kmc> @where ops
+13:09:39 <lambdabot> shapr Cale glguy dons sjanssen dcoutts Saizan dibblego conal Philippa bos arjanb xerox Heffalump kosmikus wli Pseudonym Igloo quicksilver monochrom Lemmih jmcarthur copumpkin
+13:09:41 <peeler> glBindFramebuffer :: GLenum -> GLuint -> IO ()
+13:09:41 <Polarina> luite, gtk.
+13:09:43 <peeler> glBindRenderbuffer :: GLenum -> GLuint -> IO ()
+13:09:46 <peeler> glBindTexture :: GLenum -> GLuint -> IO ()
+13:09:48 <peeler> glBindVertexArray :: GLuint -> IO ()
+13:09:51 <peeler> glBlendColor :: GLclampf -> GLclampf -> GLclampf -> GLclampf -> IO ()
+13:09:53 <peeler> glBlendEquation :: GLenum -> IO ()
+13:09:56 <peeler> glBlendEquationSeparate :: GLenum -> GLenum -> IO ()
+13:09:56 --- mode: ChanServ set +o copumpkin
+13:09:58 <peeler> glBlendFunc :: GLenum -> GLenum -> IO ()
+13:10:01 <peeler> glBlendFuncSeparate :: GLenum -> GLenum -> GLenum -> GLenum -> IO ()
+13:10:03 <peeler> glBlitFramebuffer :: GLint -> GLint -> GLint -> GLint -> GLint -> GLint -> GLint -> GLint -> GLbitfield -> GLenum -> IO ()
+13:10:04 <luite> Polarina: hm you should have it then. you can check with ghc-pkg list
+13:10:06 <peeler> glBufferData :: GLenum -> GLsizeiptr -> Ptr a -> GLenum -> IO ()
+13:10:09 <peeler> glBufferSubData :: GLenum -> GLintptr -> GLsizeiptr -> Ptr a -> IO ()
+13:10:10 <kmc> copumpkin, you're an op? wicked
+13:10:11 --- kick: peeler was kicked by copumpkin (come back :))
+13:10:22 <copumpkin> kmc: hah yeah
+13:11:02 <Polarina> luite, it complains about the cache being out of date.
+13:11:18 --- mode: copumpkin set -o Cobra
+13:11:21 <copumpkin> whoops
+13:11:24 --- mode: copumpkin set -o copumpkin
+13:12:04 <luite> Polarina: ghc-pkg recache
+13:12:22 <Polarina> luite, ghc-pkg: C:/Program Files (x86)/Haskell Platform/2010.2.0.0\lib\package.conf.d\package.cache: you don't have permission to modify this file
+13:12:51 <luite> hmm... I've never had that problem
+13:13:06 <Zao> Polarina: Run it from an elevated command prompt, or do an user install?
+13:13:09 <luite> you can fix it probably by running ghc-pkg recache als administrator
+13:13:22 <luite> but I don't think that should be necessary for a platform install
+13:13:23 <Polarina> Zao, I'll try running it as an administrator.
+13:13:27 <Zao> (whack start button, type cmd, rightclick the search hit for command prompt and run as admin)
+13:13:31 <applicative> wow, whats up with the glfunctions?
+13:13:52 <Zao> luite: I wouldn't expect a luser to have permissions in Program Files.
+13:14:02 <copumpkin> applicative: someone accidentally pasted and their client wasn't smart enough
+13:14:17 <Polarina> Ok. ghc-pkg list doesn't do anything.
+13:14:22 <copumpkin> you'd think IRC clients would warn you or simply disallow pasting of large volumes of text
+13:14:32 <Zao> copumpkin: Most sane ones do.
+13:15:12 <luite> Zao: me neither, but why would the global package cache need updating?
+13:15:39 <orbitz> whee Futures!
+13:15:44 <orbitz> helloooooo copumpkin
+13:15:45 <Zao> luite: I had to do that the other day, ghc-pkg list whined greatly.
+13:15:50 <copumpkin> orbitz: ohai!
+13:15:53 <orbitz> copumpkin: irssi does
+13:16:00 <Zao> Which made some script break.
+13:16:02 <copumpkin> ah
+13:16:15 <Polarina> I see cairo listed in ghc-pkg list.
+13:16:29 <nettok_> damm monad mixing
+13:16:34 <orbitz> dam that monad mixin
+13:16:38 <orbitz> copumpkin: I'm getting back into the haskell swin gof things!
+13:16:45 <luite> Polarina: can you load the Graphics.Rending.Cairo module now?
+13:16:47 <luite> Rendering
+13:17:00 <Polarina> luite, It still won't let me. :I
+13:17:03 <Polarina> :(
+13:17:18 <luite> even after restarting winghci?
+13:17:42 <Polarina> Restarting seemed to fix it. Thanks. :D
+13:17:44 <nettok_> How can I use an IO monad inside a Eval monad?
+13:17:52 <orbitz> Could one implement better protocol API's than generallye xist using linear types (to ensure the order operations are consistent with the rpotocol)?
+13:18:08 <orbitz> nettok_: you can't, Eval monad is deterministic
+13:18:17 <copumpkin> orbitz: yay, glad to have you back!
+13:18:37 <orbitz> copumpkin: any thoughts on snap vs happstack?
+13:18:48 <copumpkin> orbitz: not really, haven't tried either :/
+13:18:57 <copumpkin> haven't done any webby stuff in haskell at all
+13:19:30 <orbitz> I'm doing a couchdb backed web app for a play app
+13:19:37 <b0fh_ua> Hello again. With fclabels should I use template haskell and related things? Is there any tutorial for this library?
+13:19:52 <nettok_> orbitz: thanks for the info
+13:20:16 <orbitz> nettok_: from Marlow's blog post on it: Either way, the result of join is the same: since the Eval monad may not perform side effects, the API is deterministic.
+13:20:41 <jmcarthur> i'm an op, sure, but who put me in lambdabot's @where ops lineup?
+13:20:51 * copumpkin whistles innocently
+13:20:58 <orbitz> it clearlyw asn't copumpkin 
+13:21:02 <orbitz> he whistled innocently
+13:21:10 <sioraiocht> that always indicates innocence
+13:21:20 <Polarina> I seem to be getting an error trying to compile a simple gtk program. http://codepad.org/p3A6MfuS
+13:21:41 <copumpkin> jmcarthur: you can take yourself out if you prefer :P
+13:22:00 <copumpkin> I ended up doing what mauke suggested and just setting a highlight on @w.... ops
+13:25:06 <luite> pending a proper solution, wouldn't it be useful to have some "haskell-platform-extras" binary installer for windows, that would install common binary dependencies required by many hackage packages? things like gtk, libcurl, pcre?
+13:27:21 <orbitz> luite: can cabal not do that?
+13:28:22 <luite> orbitz: I mean the non-haskell dependencies, I don't think cabal-install can install them (and it probably shouldn't be its job)
+13:34:16 <copumpkin> is there anything remotely "interesting" about the category one can get from a preordered set?
+13:35:03 * hackagebot attoparsec-enumerator 0.1 - Convert an Attoparsec parser into an iteratee  http://hackage.haskell.org/package/attoparsec-enumerator-0.1 (JohnMillikin)
+13:35:21 <azaq23> what's exactly the use of the last type parameter on GADTs if it can be anything at all since you pattern match on the constructors? I can define a GADT data T t where T :: Num t => t -> t -> T (t, t) and use if like f (T x y) = ... and it still has the tuple type, yet this doesn't seem to buy me anything...?
+13:35:50 <kmc> azaq23, http://haskell.org/ghc/docs/6.12.2/html/users_guide/data-type-extensions.html#gadt
+13:35:53 <kmc> see the example there
+13:35:58 <copumpkin> it refines the type for you, but how useful that is depends on your use of it
+13:36:12 <kmc> by choosing the GADT ctor return types, we make it possible to write «eval :: Term a -> a»
+13:36:18 <ddarius> copumpkin: It depends on the preordered set.
+13:36:28 <kmc> if we chose wrong, the GADT is still valid data but we won't be able to write the useful functions we want
+13:36:30 <copumpkin> ddarius: do you have any interesting examples?
+13:36:36 <nettok_> After all the trouble of applying Parallel strategies I dont get any speedup :(
+13:36:51 <kmc> nettok_, did you build with ghc -threaded
+13:36:52 <copumpkin> ddarius: I was looking at naturals and the only remotely interesting thing I could think of was an initial object :P
+13:36:56 <kmc> and run with ./foo +RTS -N
+13:36:57 <nettok_> kmc: yeah
+13:37:03 <nettok_> kmc: that too
+13:37:16 <kmc> and with +RTS -s ?
+13:37:31 <nettok_> kmc: -s is for statistics right?
+13:37:50 <nettok_> kmc: ill try that
+13:37:50 <kmc> yeah
+13:39:32 <nettok_> Instead of speedup i got speeddown
+13:40:43 <ddarius> copumpkin: The preordered set of theorems of propositional logic under entailment has a lot of categorical structure.
+13:41:09 <ddarius> Any complete preorder should have all limits and colimits.
+13:42:24 <ddarius> In fact, every small category that has all limits is a complete preorder category.
+13:42:57 <azaq23> kmc: So if I see this right, Term a -> a shall just imply (to the reader) that you will get a straigt a from the eval function which (for the Pair data constructor) happens to be (a, b) while this value is actually just constructed in eval after the pattern match? That seems just like "ghost type metadata", then - although not without use
+13:43:24 <kmc> azaq23, i think your assessment is correct
+13:43:43 <kmc> you can accomplish something similar with phantom types and smart constructors, though the GADT gives stronger guarantees
+13:44:03 <copumpkin> ddarius: interesting, I'll play around with that, thanks :)
+13:44:19 <kmc> azaq23, in the use case of GADTs for  typed syntax, you're modeling the type system of the language you're implementing in Haskell's type system
+13:44:56 <kmc> and what you get is a guarantee that your Haskell code produces well-typed terms of the language you're modeling, that your optimizations preserve typing, etc.
+13:44:56 <alise> what's the ((,) a) fmap?
+13:45:01 <kmc> @src (,) fmap
+13:45:01 <lambdabot> fmap f (x,y) = (x, f y)
+13:45:08 <alise> thanks
+13:45:30 <kmc> azaq23, i enjoyed this recent post about GADTs in ocaml and haskell: http://ocaml.janestreet.com/?q=node/81
+13:46:23 <kmc> @djinn (a -> b) -> (c, a) -> (c, b)
+13:46:24 <lambdabot> f a (b, c) = (b, a c)
+13:46:27 <ddarius> copumpkin: The interesting thing about representing preorders as categories is that we can do it, not that preorders are especially interesting categories.  A preorder category is interesting if the preorder is interesting.
+13:47:11 <azaq23> kmc: thanks, will read it
+13:47:14 <copumpkin> ddarius: makes sense
+13:50:02 <nettok_> According to +RTS -s,  only one task seems to be doing all the work
+13:50:17 <kmc> nettok_, did you try ThreadScope
+13:50:24 <kmc> nettok_, if your code isn't too long, i can take a look
+13:51:07 <nettok_> kmc: t's very small, and I think you already had a look when it was non-parallel, ill got it up
+13:52:08 <nettok_> kmc: http://codepad.org/q8scjY4f
+13:52:56 <nettok_> I just changed avgTimes to use runEval and divide the task in 2
+13:53:04 <kmc> nettok_, i think you're computing a few IO actions in parallel, then executing them sequentiallya
+13:53:31 <kmc> evaluating an IO action doesn't perform the effect
+13:54:28 <nettok_> I am not getting it...
+13:54:57 <kmc> well, an IO action is just a description of stuff to do
+13:55:00 <kmc> it hasn't been done yet
+13:55:02 <nettok_> So the problem is I have IO actions inside  the parallel stuff?
+13:55:15 <kmc> and evaluating the description of what to do is not the same thing as doing it
+13:55:26 <kmc> and so you figure out what to do in parallel, but then you do it in sequence
+13:55:32 <kmc> that's my guess anyway
+13:55:55 <nettok_> mmm... I think it makes sense
+13:56:02 <nettok_> ...what you said
+13:56:04 <kmc> nettok_, perhaps you should use concurrency instead of parallelism
+13:56:12 <kmc> i.e. Control.Concurrent, forkIO, chans, etc
+13:56:23 <nettok_> ok
+13:56:25 <kmc> or, perhaps you can get an infinite list of random numbers, and then pass it into your computation
+13:56:28 <kmc> so that the computation itself is pure
+13:56:40 <nettok_> Thank you!
+13:57:00 <kmc> :)
+14:20:18 * hackagebot attoparsec-enumerator 0.1.0.1 - Convert an Attoparsec parser into an iteratee  http://hackage.haskell.org/package/attoparsec-enumerator-0.1.0.1 (JohnMillikin)
+14:21:28 <mreh> I just notice bitspeak
+14:27:09 <mreh> Cale: I think the semantics of monadfix for Rand should be reconsidered
+14:27:34 <mreh> your seed gets stuck at the end of an infinite computation potentially
+14:28:44 <mreh> that would be operational semantics
+14:40:08 <mreh> preflex: seen Cale
+14:40:08 <preflex>  Cale was last seen on #haskell 3 hours, 30 minutes and 7 seconds ago, saying: okay
+14:48:01 <dobblego> @check \f a -> f <*> a == (a :: Maybe Int) <**> f
+14:48:01 <lambdabot>   Precedence parsing error
+14:48:02 <lambdabot>      cannot mix `Control.Applicative.<*>' [infixl ...
+14:48:13 <dobblego> @check \f a -> (f <*> a) == ((a :: Maybe Int) <**> f)
+14:48:13 <lambdabot>   Overlapping instances for GHC.Show.Show (GHC.Types.Int -> b)
+14:48:14 <lambdabot>    arising fro...
+14:48:18 <dobblego> oh poo poo
+14:48:29 <hpc> :t <*>
+14:48:30 <lambdabot> parse error on input `<*>'
+14:48:38 <hpc> :t (<**>)
+14:48:39 <lambdabot> forall (f :: * -> *) a b. (Applicative f) => f a -> f (a -> b) -> f b
+14:48:44 <hpc> :t (<*>)
+14:48:45 <lambdabot> forall (f :: * -> *) a b. (Applicative f) => f (a -> b) -> f a -> f b
+14:49:47 <dobblego> I think the answer is yes for Maybe
+14:50:17 <hpc> (Left "poo") <**> (Right id)
+14:50:18 <benmachine> Maybe has a sort of commutativity
+14:50:19 <hpc> > (Left "poo") <**> (Right id)
+14:50:20 <lambdabot>   No instance for (Control.Applicative.Applicative
+14:50:20 <lambdabot>                     (Data....
+14:50:26 * hackagebot bird 0.0.18 - A simple, sinatra-inspired web framework.  http://hackage.haskell.org/package/bird-0.0.18 (MattParker)
+14:51:00 <hpc> > (Left "1") <**> (Left "2")
+14:51:01 <lambdabot>   No instance for (Control.Applicative.Applicative
+14:51:01 <lambdabot>                     (Data....
+14:51:28 <byorgey> dobblego: yes, for Maybe the only possible effect is failure, so the order of effects doesn't matter
+14:51:35 <byorgey> either the computation fails or it doesn't
+14:51:44 <dobblego> byorgey, cheers
+14:51:53 <byorgey> it corresponds to commutativity of and =)
+14:52:34 <hpc> wow, how does either not have an applicative instance?
+14:53:15 <byorgey> that's... odd
+14:54:20 <hpc> it seems the issue is complicated, actually
+14:54:30 <hpc> because of the Error constraint on the Either monad
+14:56:06 <hpc> but if Either had an instance, i suspect that (<*>) would not equal flip (<**>), because (Left 1 <*> Left 2) would be 1, and (Left 1 <**> Left 2) would also be 1
+14:56:32 <hpc> er, s/had/was/
+15:02:15 <byorgey> hpc: right
+15:02:23 <byorgey> makes sense
+15:02:52 <hpc> it could go either way though (pun intended)
+15:03:07 <byorgey> hehe =)
+15:03:14 <hpc> Either Right or Left :P
+15:05:25 <benmachine> hpc: nah, it'd be No instance for Monoid Integer :)
+15:06:05 <benmachine> if it was a commutative monoid then something interesting would happen
+15:06:08 <benmachine> otherwise it wouldn't
+15:06:41 <wli> Set Person -> IO Bool for group sex?
+15:06:58 <wli> woops wrong channel, sorry
+15:07:08 <mreh> which channel?
+15:07:09 <wli> Not my smoothest move.
+15:07:11 <megajosh2> ... :O
+15:07:19 <wli> #haskell-blah
+15:07:19 <mreh> ....then which channel?
+15:07:50 <copumpkin> lol
+15:07:53 <BCoppens> :D
+15:07:57 <mreh> D:
+15:10:36 * hackagebot np-extras 0.2.0.3 - NumericPrelude extras  http://hackage.haskell.org/package/np-extras-0.2.0.3 (BrentYorgey)
+15:11:04 <anair_84> hi newbiew question , I was reading this: http://en.wikibooks.org/wiki/Haskell/Understanding_monads/State
+15:11:24 <anair_84> and this line seems wrong : First, we take out the pseudo-random generator with get: the <- notation extracts the value from the GeneratorState monad, not the state; since it is the state we want, we use get, that extracts the state and outputs it as the value (look again at the definition of get above, if you have doubts).
+15:11:40 <megajosh2> Yeah, I was having a bit of trouble with that monad myself recently...
+15:12:04 <megajosh2> @type get
+15:12:05 <lambdabot> forall (m :: * -> *) s. (MonadState s m) => m s
+15:12:40 <anair_84> it seems to getting the state not the value
+15:12:54 <anair_84> but the tutorial says it the other way around about the get
+15:13:19 <megajosh2> The <- notation obtains the value using >>= I think
+15:13:21 <hpc> you get the value with value <- monadicAction
+15:13:23 <aristid> :t evalState
+15:13:24 <lambdabot> forall s a. State s a -> s -> a
+15:13:34 <hpc> or that
+15:13:36 <aristid> anair_84: evalState is what gets the value.
+15:13:56 <hpc> only for vanilla State though, not StateT
+15:14:02 <aristid> :t evalStateT
+15:14:03 <lambdabot> forall s (m :: * -> *) a. (Monad m) => StateT s m a -> s -> m a
+15:14:11 <hpc> <.<
+15:14:30 <benmachine> anair_84: basically, 'get' has the state as the value
+15:14:35 <anair_84> yeah
+15:14:40 <anair_84> that is what 
+15:15:15 <anair_84> don't know if the tutorial is clearly conveying it in the above line
+15:16:05 <anair_84> but I think benmachine expresses it most clearly
+15:16:29 <benmachine> the tutorial's wording is a bit weird
+15:16:53 <brad_larsen> is the latex backend for haddock available only the the darcs repo?
+15:16:58 <benmachine> but it's not actually wrong, I think, just unclear
+15:17:37 <benmachine> except of course <- doesn't really extract anything from anything >_>
+15:17:41 <benmachine> but that's a different issue
+15:17:53 <anair_84> k  thanks
+15:26:42 <copumpkin> oh man, I feel so accomplished
+15:26:50 <copumpkin> I just proved listToMaybe is a natural transformation
+15:27:00 <copumpkin> the l33tness is tangible
+15:27:02 <copumpkin> :P
+15:28:13 <RichardBarrell> Yay.
+15:28:17 <aristid> :t foldr (<|> . return) mempty
+15:28:18 <lambdabot> parse error on input `.'
+15:28:30 <aristid> :t foldr ((<|>) . return) empty
+15:28:31 <lambdabot>     Ambiguous occurrence `empty'
+15:28:31 <lambdabot>     It could refer to either `Control.Applicative.empty', imported from Control.Applicative
+15:28:32 <lambdabot>                           or `Text.Regex.Posix.empty', imported from Text.Regex.Posix at State/L.hs:55:0-22
+15:28:41 <aristid> :t foldr ((<|>) . return) Control.Applicative.empty
+15:28:42 <lambdabot> forall (f :: * -> *) a. (Alternative f, Monad f) => [a] -> f a
+15:29:08 <aristid> copumpkin: can you prove that to be a natural transformation? is it one, even? :D
+15:29:23 <copumpkin> aristid: it has to be!
+15:29:32 <aristid> why?
+15:29:40 <copumpkin> :t listToMaybe
+15:29:41 <lambdabot> forall a. [a] -> Maybe a
+15:29:48 <aristid> yeah that's how i got the idea
+15:31:01 <dmwit> :t Control.Applicative.empty
+15:31:02 <lambdabot> forall (f :: * -> *) a. (Alternative f) => f a
+15:31:31 <ddarius> copumpkin: Theorem: listToMaybe is a natural transformation.  Proof: QED.
+15:31:44 <copumpkin> lol
+15:31:51 <hpc> @src listToMaybe
+15:31:52 <lambdabot> listToMaybe []        =  Nothing
+15:31:52 <lambdabot> listToMaybe (a:_)     =  Just a
+15:31:57 <copumpkin> to be honest, I had to do no work at all to prove it
+15:32:21 <ddarius> That's why they are called free theorems.
+15:32:25 <dmwit> All polymorphic, total Haskell functions are natural transformations... right?
+15:32:25 <copumpkin> :)
+15:32:27 <copumpkin> exactly
+15:32:32 <aristid> @free Maybe
+15:32:33 <lambdabot> Pattern match failure in do expression at Plugin/Free/FreeTheorem.hs:54:20-23
+15:32:39 <aristid> :(
+15:32:39 <greap> I think I'm being more dense than usual tonight. Where would I put the Integral class constraint on this? http://hpaste.org/fastcgi/hpaste.fcgi/view?id=29318#a29318
+15:32:48 <copumpkin> @free listToMaybe :: [a] -> Maybe a
+15:32:48 <ddarius> dmwit: Dinatural transformations
+15:32:48 <lambdabot> $map_Maybe f . listToMaybe = listToMaybe . $map f
+15:33:11 <copumpkin> aristid: despite it being free, I can prove it! http://hpaste.org/fastcgi/hpaste.fcgi/view?id=29319#a29319
+15:33:52 <dmwit> greap: Something like data Natural i = Integral i => Natural { unNatural :: i }, I think.
+15:33:58 <copumpkin> unNatural!
+15:34:01 <copumpkin> omg
+15:34:06 <greap> copumpkin: yeah haha
+15:34:29 <aristid> unMutual!
+15:34:32 <dmwit> ddarius: I'm not familiar with dinaturality.
+15:36:07 <greap> dmwit: Unfortunately then I get the error "Not in scope: type variable `i'"
+15:36:15 <aristid> @hoogle (a -> b) -> (b -> a) -> f a -> f b
+15:36:16 <lambdabot> Control.Parallel.Strategies parMap :: Strategy b -> (a -> b) -> [a] -> [b]
+15:36:16 <lambdabot> Prelude until :: (a -> Bool) -> (a -> a) -> a -> a
+15:36:16 <lambdabot> Prelude (.) :: (b -> c) -> (a -> b) -> a -> c
+15:36:19 <dmwit> Looks like Wikipedia says something about dinaturality. I'll have a look in a bit.
+15:36:31 <copumpkin> what other boring proofs can I write
+15:36:32 <copumpkin> hmm
+15:36:38 <ddarius> Consider compose :: Int -> (a -> a) -> a -> a.  Is this natural in a?
+15:36:51 <aristid> do you know of something like Functor but like this? (a -> b) -> (b -> a) -> f a -> f b
+15:37:06 <aristid> like, a Functor that requires a backward-function
+15:37:13 <ddarius> aristid: edwardk has an appropriate class for that in category-extras
+15:37:20 <aristid> ddarius: which one is it?
+15:37:21 <copumpkin> aristid: there's Contrafunctor for one of them
+15:37:29 <copumpkin> (a -> b) -> f b -> f a
+15:37:34 <copumpkin> but that's not really what you need, hm
+15:37:41 <copumpkin> what would you be doing with the backwardsness?
+15:37:55 <ddarius> http://hackage.haskell.org/packages/archive/category-extras/0.53.5/doc/html/Control-Functor-Exponential.html
+15:38:01 <aristid> copumpkin: i was thinking about sets that take a comparison function when constructed
+15:38:09 <copumpkin> oh interesting
+15:38:21 <aristid> and to transform them to another type you need to have a way to make the comparison function work
+15:38:31 <greap> dmwit: I can then get around that with forall i. Integral i =>" as a constraint, but that breaks deriving. I try to create a show instnace using "instance Show Natural where show = ("Natural " ++) . show . unNatural", but that gives the error "Cannot use record selector `unNatural' as a function due to escaped type variables"
+15:38:40 <greap> Quite frustrating.
+15:39:00 <dmwit> greap: You need to have 'i' appear on the left of the data declaration.
+15:39:25 <aristid> ddarius: the type looks right
+15:39:30 <dmwit> ...if I understand what you're trying to do.
+15:39:32 * dmwit has to run now
+15:39:42 <greap> Thanks dmwit :)
+15:39:56 <copumpkin> newtype Nu f  = Nu { old :: f (Nu f) } --so its not funny
+15:40:08 * copumpkin chuckles
+15:42:38 <benmachine> old?
+15:43:09 <copumpkin> many people pronounce new as nu
+15:43:41 <benmachine> oh yes of course
+15:43:43 <benmachine> I get jokes!
+15:43:48 <benmachine> :(
+15:43:54 <benmachine> I made you explain it now I'm sorry
+15:44:54 <greap> The only way I can get it to work is to have an explicit data type parameter.
+15:46:01 <aristid> ddarius: do ordered sets have "exponentialness"?
+15:46:18 <megajosh2> @help src
+15:46:18 <lambdabot> src <id>. Display the implementation of a standard function
+15:46:47 <aristid> @src id
+15:46:48 <lambdabot> id x = x
+15:47:22 <aristid> :t flip const ()
+15:47:23 <lambdabot> forall b. b -> b
+15:47:41 <aristid> (a point-free way to express id without id :D)
+15:49:38 <copumpkin> :t ap const const
+15:49:39 <lambdabot> forall b. b -> b
+15:50:20 <aristid> :t ap const
+15:50:21 <lambdabot> forall b a. (b -> a) -> b -> b
+15:50:49 <aristid> @src (->) (<*>)
+15:50:49 <lambdabot> (<*>) f g x = f x (g x)
+15:50:55 <benmachine> :t fmap fix return
+15:50:56 <lambdabot> forall a. a -> a
+15:51:29 <aristid> (const <*> const ) x = const x (const x)
+15:51:31 <aristid> hmmm
+15:52:13 <dancor> :t const x (const x)
+15:52:14 <lambdabot> Expr
+15:52:19 <aristid> :D
+15:52:22 <dancor> :t const
+15:52:23 <lambdabot> forall a b. a -> b -> a
+15:52:37 <dancor> > const 4 (const 4)
+15:52:38 <lambdabot>   4
+15:52:45 <dancor> i see
+15:53:08 <benmachine> :t ap const ap
+15:53:09 <lambdabot> forall (m :: * -> *) a b. (Monad m) => m (a -> b) -> m (a -> b)
+15:53:26 <benmachine> hmm, okay
+15:53:39 <aristid> benmachine: the type system being mean :D
+15:55:49 <aristid> i wonder if there could be a strict type system where ap const ap is as general as id
+15:56:09 <benmachine> depends what you mean by strict
+15:56:31 <benmachine> it'd have to be pretty weird I think
+15:56:52 <benmachine> ap const f = \x -> const x (f x)
+15:57:05 <benmachine> unless the type-system somehow knows it's not evaluated, f x has to be well-typed
+15:57:13 <aristid> yeah...
+15:59:50 <ddarius> aristid: Define "ordered sets"
+16:03:35 <aristid> ddarius: what i'm thinking of can probably be described as a datastructure with three operations: empty :: (a -> a -> Ordering) -> Set a; insert :: a -> Set a -> Set a; toOrderedList :: Set a -> [a]
+16:06:04 <copumpkin> aristid: why not just an Ord instead of the (a -> a -> Ordering) ?
+16:06:47 <aristid> copumpkin: because it is just an idea that i had
+16:08:51 <aristid> copumpkin: i think that is actually isomorphic
+16:09:07 <copumpkin> aristid: yeah, it is
+16:09:24 <copumpkin> just more convenient, and you can make a datatype that wraps the compare function and makes an Ord instance
+16:10:32 <ddarius> benmachine: Intersection types probably allow that, but intersection types have their problems.
+16:10:55 <aristid> copumpkin: so with exponential functors, you can go back to the type which has the appropriate Ord instance, right?
+16:13:07 <JHoglund> If my char c exists in my list "ls", I'd like to return a, otherwise I'd like to return b. How can I construct that in Haskell?
+16:13:53 <copumpkin> aristid: data Ordomg a = Ordomg (a -> a -> Ordering) a; instance Ord (Ordomg a) where compare (Ordomg c x) (Ordomg _ y) = c x y
+16:13:56 <copumpkin> aristid: fairly ugly though :P
+16:13:58 <lastk> I would like to read about functional programming, someone can send me a good text?
+16:14:42 <JHoglund> lastk: I think that "Why functional programming matters" is some sort of must-read text
+16:14:44 <aristid> copumpkin: yeah, i figured the isomorphy out, too
+16:15:12 <Philonous> > if 'e' `elem` "hello!" then Just 5 else Nothing -- JHoglund like this ?
+16:15:12 <lambdabot>   Just 5
+16:15:17 <ddarius> copumpkin: Not a legal Ord instance.
+16:15:37 <aristid> ddarius: huh?
+16:16:13 <JHoglund> Philonous: I don't really understand the syntax, but I guess that could be a solution :)
+16:16:51 <copumpkin> ddarius: missing Eq?
+16:16:53 <JHoglund> Philonous: In PHP code I would write: if(in_array('e', 'hello!')) { return 5; } { else return null; }
+16:17:17 <ddarius> It doesn't satisfy the laws even if we assume only proper orderings will be given as c.
+16:17:20 <Philonous> JHoglund: You can make functions infix by enclosing them in backticks. So "e `elem` es" = "elem e es"
+16:18:18 <Philonous> JHoglund: Ah, so you would write something like 
+16:18:20 <Philonous> > if (elem 'e' "Hello!") then 5 else 7
+16:18:21 <lambdabot>   5
+16:18:45 <aristid> ddarius: can it be fixed?
+16:19:15 <copumpkin> just make assumptions
+16:19:30 <JHoglund> Philonous: It was mainly the "elem" keyword I was looking for, thanks!
+16:19:35 <copumpkin> until it works :)
+16:20:25 <davidL> I think I found a bug in parsec: http://hpaste.org/fastcgi/hpaste.fcgi/view?id=29302
+16:21:28 <aristid> copumpkin: i think one advantage of my Set definition was that you could only add the ordering in the empty constructor, so there was no way to get a set with multiple ordering functions 
+16:22:11 * benmachine wonders what bin-package-db-0.0.0.0 is
+16:24:01 <dobblego> is there an anamorphism for Maybe defined?
+16:24:04 <JHoglund> I have a list of strings and now I'm looking for a way to glue these together to a string. I assume that this functionality is built-in in Haskell/Prelude, what is the best strategy to find out how to do it?
+16:24:12 <dobblego> JHoglund, join or concat
+16:24:28 <dobblego> > concat ["abc", "def"]
+16:24:29 <lambdabot>   "abcdef"
+16:24:52 <JHoglund> dobblego: You answered the wrong question ;) I was woindering how I could find that out for myself, without having to ask you kind guys ;)
+16:25:04 <dons> benmachine: its a library for programming the package database used internally by ghc
+16:25:07 <aristid> dobblego: what is an anamorphism? :)
+16:25:07 <ddarius> davidL: I'm the maintainer, not the author, and what do you think the error message should say?
+16:25:13 <dobblego> @hoogle [[a]] -> [a]
+16:25:13 <lambdabot> Prelude concat :: [[a]] -> [a]
+16:25:14 <lambdabot> Data.List concat :: [[a]] -> [a]
+16:25:14 <lambdabot> Data.List intercalate :: [a] -> [[a]] -> [a]
+16:25:18 <ddarius> aristid: unfold
+16:25:18 <dobblego> JHoglund, ^^
+16:25:24 <JHoglund> For PHP, there's a comprehensive function list in the online docs and I could look under "string" functions
+16:25:26 <aristid> :t unfoldr
+16:25:27 <lambdabot> forall b a. (b -> Maybe (a, b)) -> b -> [a]
+16:26:22 <davidL> ddarius: it should not include the line 'expecting "foo"'
+16:26:35 <benmachine> would (b -> Maybe a) -> b -> Maybe a count >_>
+16:26:37 <JHoglund> dobblego: I could google, but the results are different for each question I ask, I guess that there should be a standard reference list somewhere?
+16:26:47 <benmachine> JHoglund: hoogle!
+16:26:50 <benmachine> also hayoo
+16:26:53 <dobblego> JHoglund, note that I hoogled, not googled :)
+16:27:00 <benmachine> http://holumbus.fh-wedel.de/hayoo/hayoo.html
+16:27:08 <dobblego> JHoglund, also note that hoogle gave the answer that I gave (concat)
+16:27:16 <benmachine> http://www.haskell.org/hoogle/
+16:27:29 <dobblego> JHoglund, there is also http://www.haskell.org/ghc/docs/6.12.1/html/libraries/index.html
+16:27:58 <ddarius> davidL: Why not?  The only way for that parser to even start parsing anything is to receive "foo".  Furthermore, it went on a branch that didn't parse "foo" and failed.
+16:29:04 <JHoglund> dobblego: THanks!
+16:29:23 <davidL> ddarius: yes, but it failed for a reason unrelated to "foo"
+16:30:08 <JHoglund> @hoogle String -> [Char]
+16:30:08 <lambdabot> Network.URI normalizeCase :: String -> String
+16:30:09 <lambdabot> Network.URI normalizeEscape :: String -> String
+16:30:09 <lambdabot> Network.URI normalizePathSegments :: String -> String
+16:30:48 <JHoglund> Uhm, maybe there's no difference between a string and a list of chars, when I think about it :)
+16:33:05 <Zao> @src String
+16:33:05 <lambdabot> type String = [Char]
+16:33:08 <aristid> scoped module imports are cool
+16:33:43 <Zao> JHoglund: The common "natural" string type is a list-of-char, where Char is a unicode codepoint.
+16:34:12 <Zao> JHoglund: There's also Data.Text which is a rather efficient UTF-16-based storage, and Data.ByteString which is more like a raw soup of bytes.
+16:36:46 <Kaidelong> lambdabot doesn't know about comonads
+16:36:57 <Kaidelong> so what I am wanting to know is if
+16:36:59 <ddarius> There is no standard comonad library.
+16:37:02 <Kaidelong> extend (flip const)
+16:37:06 <Kaidelong> is analogous to return
+16:37:36 <aristid> ddarius: category-extras does not count? lambdabot isn't limited to haskell98 anyways
+16:37:50 <ddarius> category-extras is hardly a standard library
+16:38:10 <aristid> nor is, say, the Expr stuff
+16:38:14 <aristid> or all of caleskell
+16:38:54 <Kaidelong> I was wondering if F#'s lazy type would be an example of a comonad
+16:38:57 <ddarius> Both of which were more or less specifically designed for lambdabot.  There's no particular reason for lambdabot to have comonads.
+16:39:38 <benmachine> is there any particular reason for her *not* to? :)
+16:40:01 <Kaidelong> with extract being force, duplicate being wrapping it in another lazy, and extend being a lazy map
+16:40:41 <aristid> i think there is a reason (particular or not): to demonstrate things about comonads in #haskell
+16:41:52 <aristid> Kaidelong: and delay being pure?
+16:43:25 <Kaidelong> hmm there is a delay for the Lazy type?
+16:43:45 <Kaidelong> I wouldn't know
+16:44:29 <Kaidelong> there is a constructor
+16:44:42 <Kaidelong> where you give it an expression and it creates a promise to evaluate it later
+16:50:51 <aristid> Kaidelong: i think delay is what i mean by the constructor. i'm not aware of the names of F#'s implementation in particular
+16:51:36 <ddarius> davidL: It did fail due to "foo"
+16:52:13 <Kaidelong> so pure is analogous to return?
+16:52:28 <Kaidelong> what I was wondering is if you can implement pure using extend and const
+16:52:57 <aristid> Kaidelong: yeah pure is just another name for return
+16:53:09 <aristid> one is in Applicative the other is in Monad
+16:53:17 <aristid> and in Pointed
+16:53:22 <ddarius> davidL: Parsec doesn't commit until some input is consumed so it can still (conceptually) backtrack after taking the empty branch of the optionMaybe at which point (conceptually) the "foo" branch is tried and fails.
+16:57:08 <sshc> Is foldr and foldl tail recursive?
+16:57:28 <Axman6> foldl is
+16:57:31 <aristid> @src foldl
+16:57:31 <lambdabot> foldl f z []     = z
+16:57:31 <lambdabot> foldl f z (x:xs) = foldl f (f z x) xs
+16:57:33 <Axman6> @src foldl
+16:57:33 <lambdabot> foldl f z []     = z
+16:57:33 <lambdabot> foldl f z (x:xs) = foldl f (f z x) xs
+16:57:37 <Axman6> @src folr
+16:57:37 <lambdabot> Source not found. Do you think like you type?
+16:57:39 <Axman6> @src foldr
+16:57:39 <lambdabot> foldr f z []     = z
+16:57:39 <lambdabot> foldr f z (x:xs) = f x (foldr f z xs)
+16:57:57 <davidL> ddarius: so whenever I use fail after an optionMaybe, the error for the optionMaybe is displayed as well?
+16:58:53 <benmachine> it's never been obvious to me how the concept of tail recursion even applies in haskell
+17:00:06 <yitz> benmachine: it's useful sometimes in strictness analysis i think
+17:00:41 <benmachine> ok I'm just generally not well-educated on the subject
+17:00:44 * benmachine wikipedia
+17:01:48 <Cale> benmachine: Unless they're strict, tail recursive functions tend to build up large unevaluated values in their parameters, since they do nothing except call themselves with variations on their parameters until they reach some base case.
+17:02:18 <Cale> For example, foldl will do nothing except call itself until it reaches the end of the list -- lazy evaluation is outermost first.
+17:02:48 <Cale> (while foldr immediately passes control to f, which is why it's possible for foldr to work on infinite lists)
+17:02:53 <benmachine> so in a lazy language you'd really prefer something sort of 'head recursive'?
+17:03:32 <Cale> Yeah, "productive" is the usual term: something which can produce part of its result from only part of its input.
+17:04:29 <Cale> But when you can't get such a thing, sometimes strictness is really the way to go. So there's foldl' which is a strictified version of foldl
+17:05:07 <Cale> It forces the evaluation of the (f z x) before recursing each time, which can help keep the accumulating expressions small.
+17:06:26 <Cale> (It's appropriate for things like summing a list of Integers, since (+) for Integer can't produce any part of its result without both of its input values being completely determined)
+17:06:51 <alip> i have a test program that should only be built and run on freebsd, i use if os(freebsd) in package.cabal which is fine. is there a builtin way to figure out whether the setup is running on freebsd? (using uname() or something alike)
+17:07:09 <alip> i mean in Setup.lhs
+17:07:14 <Cale> See... foldl (+) 0 [1,2,3] -> foldl (+) (0+1) [2,3] -> foldl (+) ((0+1)+2) [3] -> foldl (+) (((0+1)+2)+3) [] -> (((0+1)+2)+3)
+17:08:28 <yitz> preflex seen dcoutts
+17:08:29 <preflex>  dcoutts was last seen on #haskell 1 day, 9 hours, 37 minutes and 47 seconds ago, saying: shapr: :-)
+17:08:35 <Cale> foldl will always build up an expression whose size is that of the entire original list, and foldl' here would avoid that
+17:08:42 <aristid> > foldl1 (/) [1,2,3]
+17:08:43 <lambdabot>   0.16666666666666666
+17:08:47 <aristid> > foldr1 (/) [1,2,3]
+17:08:48 <lambdabot>   1.5
+17:09:22 <yitz> @ask dcoutts alip asks: how do you detect whether you are on freebsd in Setup.hs, after using os(freebsd)?
+17:09:22 <lambdabot> Consider it noted.
+17:11:29 <yitz> > [fold subtract [1,2,3] | fold <- [foldl1, foldr1]]
+17:11:29 <alip> yitz: thanks
+17:11:30 <lambdabot>   [2,0]
+17:28:31 <sbahra> alip, what are you working on?
+17:29:08 <alip> sbahra: i'm writing haskell bindings for a ptrace wrapper library called pinktrace http://dev.exherbo.org/~alip/pinktrace/
+17:29:26 <alip> sbahra: not exactly because i need haskell bindings but i'm trying to learn haskell :)
+17:29:40 <lastk> I would like to read about functional programming, someone can send me a good text?
+17:30:24 <sbahra> alip, cool. :)
+17:30:37 <dmwit> ?google why functional programming matters
+17:30:37 <lambdabot> http://weblog.raganwald.com/2007/03/why-why-functional-programming-matters.html
+17:30:37 <lambdabot> Title: Why Why Functional Programming Matters Matters
+17:30:38 <dmwit> maybe?
+17:30:53 <alip> sbahra: http://github.com/alip/pinktrace/tree/haskell if you care to help :P
+17:30:56 <lastk> dmwit : i have this book, but I think is feel hard to learn..
+17:31:10 <sbahra> alip, no time. :-)
+17:31:17 <alip> sbahra: hehe :)
+17:31:18 <sbahra> alip, I need help on one of my projects if you're interested. 
+17:31:27 <alip> sbahra: depends on the project :)
+17:31:38 <alip> sbahra: as in "tell me more, tell me more" :)
+17:31:59 <sbahra> alip, library for concurrency primitives and scalable synchronization.
+17:32:06 <sbahra> alip, I need someone to update my 32-bit port, it's too boring.
+17:32:24 <sbahra> alip, other option is, I need someone to work on writing a micro-benchmark for my bytelocks implementation.
+17:32:29 <alip> sbahra: meh i don't want boring stuff :P
+17:32:32 <sbahra> alip, also, I would like to see a sparcv9 port.
+17:32:35 <dmwit> lastk: If you would like to learn Haskell, there are several highly-recommended tutorials.
+17:32:39 <dmwit> ?lyah
+17:32:39 <lambdabot> Unknown command, try @list
+17:32:39 <dmwit> ?where lyah
+17:32:39 <lambdabot> http://www.learnyouahaskell.com/
+17:32:42 <dmwit> ?where rwh
+17:32:42 <lambdabot> http://www.realworldhaskell.org/blog/ http://book.realworldhaskell.org/read/
+17:32:48 <dmwit> ?where gentle
+17:32:48 <lambdabot> http://www.haskell.org/tutorial/
+17:33:02 <dmwit> The last one is not gentle, but is very quick for the people who want to get straight to the meat of the language.
+17:33:03 <sbahra> alip, over-all, the work is definitely not boring. :-)
+17:33:16 <sbahra> alip, it's just that I'm on ArchLinux, and I can't easily compile 32-bit objects.
+17:33:21 <dmwit> It is gentle... if you are in the business of language design. =)
+17:33:37 <alip> sbahra: switch to exherbo :P
+17:33:48 <alip> sbahra: ah we don't have multibuild done yet though
+17:33:49 * alip hides
+17:35:10 <sbahra> Exherbo?
+17:35:30 <sbahra> I see.
+17:35:54 <sbahra> I'll stick with ArchLinux.
+17:38:04 <lastk> dmwit thank you
+17:39:10 <lastk> dmwit I need to make a article about functional programming and a little application, I want code a web server + a static blog
+17:41:49 <megajosh2> Is anybody else having a problem loading http://project.haskell.org/ ?
+17:42:59 <lastk> yes
+17:43:04 <FurnaceBoy> yes
+17:43:15 <megajosh2> Hmm... I wonder what's up
+17:44:26 <applicative> code.haskell.org is down, but not hackage....
+17:45:43 <megajosh2> According to "Haskell.org_domain" @ the wiki, hackage and projects.haskell.org are on two different servers
+17:46:53 <megajosh2> Planet Haskell is down too... guess it's the entire community server
+17:54:15 <chrisdone> AGAIN
+17:55:28 <wakeupsticky> hey, i'm going through Real World Haskell, and I'm trying to make an object file. But when I run ghc -c SimpleJSON.hs I get the error: 
+17:55:43 <wakeupsticky> The function 'main' is not defined in module 'Main'
+17:56:03 <wakeupsticky> but I thought that the -c flag was supposed to avoid the necessity of even having a main function in my source file
+17:56:11 <wakeupsticky> since i just want an object file, not an executable
+17:57:02 <hpc> i would suggest the man page, but that thing is atrociously long
+17:58:21 <applicative> wakeupsticky, if you dont name your module, ghc thinks its "module Main", is that the problem?
+17:58:44 <hpc> he wants to make a library, not an executable
+17:58:51 <applicative> wakeupsticky,  I mean if you put 'module Wakeupsticky where' at the top, does it compile
+17:59:11 <applicative> hpc, I understand.  
+17:59:35 <wakeupsticky> i have "module SimpleJSON where" although between SimpleJSON there is a list of names in parentheses separated by commas (names to export)
+17:59:57 <yitz> applicative: i restarted apache, community.haskell.org and friends should be working again
+18:00:03 <applicative> hmmm. let me study   .
+18:00:09 <applicative> oh cool yitz
+18:00:32 <wakeupsticky> i'm messing around with the placing of the parentheses because i had it slightly different than the book (but it should be equivalent)
+18:00:42 <wakeupsticky> okay, i think it worked this time
+18:01:21 <thotypous> out of curiosity, if I do compile a library into a dynamic object (like a .so), what does happen if it exports a funcion type, for example, [a] -> a ? Wouldn't ghc need to know the 'a' type to compile or at least to optimize the function usage?
+18:01:24 <wakeupsticky> i had "module SimpleJSON ( name1 \n, name2 \n, name3) where" instead of lining the ")" up exactly with the "("
+18:01:29 <wakeupsticky> kind of fragile, no?
+18:01:56 <thotypous> does it remain being statically linked in the final program?
+18:02:17 <yitz> wakeupsticky: that shouldn't matter. are you sure nothing else was wrong?
+18:02:38 <wakeupsticky> i didn't change anything else, but it works now. i guess i could change it back and try it again.
+18:03:08 <applicative> wakeupsticky, yes, I can never get the exported functions lined up right....
+18:03:23 <thotypous> s/function type/function typed/
+18:03:51 <wakeupsticky> changed it back and it worked. so weird...i must have had an extra space or a missing space that messed up the syntax
+18:04:13 <wakeupsticky> maybe it was like: "module SimpleJSON (names...)where" with no space between where and the paren
+18:04:30 <wakeupsticky> that's the only thing i can think of that i could have unknowingly changed when changing the parens 
+18:04:32 <wakeupsticky> strange
+18:04:42 <yitz> wakeupsticky: spaces are pretty inert here. after the 'where' they can affect things, but not before.
+18:04:50 <wakeupsticky> in that case...magic?
+18:05:22 <wakeupsticky> well, i am going to continue reading
+18:05:28 <wakeupsticky> thanks
+18:05:41 <ddarius> davidL: Whenever there is a parse failure all alternative paths that could have made progress since the last commit point are displayed.
+18:05:43 <aristid> woah, the value of -Wall cannot be underestimated, why is it not the default?
+18:05:50 <yitz> wakeupsticky: hehe good idea. let us know if you find any more spooky magic.
+18:06:02 <applicative> yes, i can't reproduce my past difficulties...  The error is definitely the one that comes from not announcing a module, so it assumes it's Main
+18:06:59 <yitz> applicative: mispelling 'module' would do that
+18:07:12 <ddarius> "My question is thus: actors seem to share some of the features of OO languages (messaging, actors are independent entities) so has there been a move to unify actors and OO-languages?"  Wow.
+18:07:20 <davidL> ddarius: I see.
+18:08:13 <yitz> ddarius: the answer is "yes". it was called "smalltalk".
+18:10:15 <yitz> aristid: alias ghc=/usr/bin/ghc -Wall
+18:10:38 <applicative> yitz, if i write "modul Plus (plus, times) where..." I guess that it can't parse "where"
+18:10:45 <aristid> yitz: :)
+18:10:56 <applicative> Sorry, i get the "cant parse "where" " error
+18:11:07 <aristid> yitz: and alias ghci=ghci -Wall
+18:11:24 <aristid> how can i get -Wall into my .cabal? is ghc-options the way?
+18:11:26 <yitz> applicative: hmm true
+18:12:17 <EvanCarroll> :t (\(x,b) -> let a=x in (a,b) ) $ (getLine,5)
+18:12:18 <lambdabot> forall t. (Num t) => (IO String, t)
+18:12:24 <yitz> applicative: how about uncapitalized module name?
+18:12:29 <EvanCarroll> why doesn't that work if I do `a<-x`
+18:12:54 <EvanCarroll> I'm trying to assemble a tuple based on an IO Action and an Int
+18:13:03 <applicative> parse error on "lus" in "module lus ..." hah
+18:13:53 <applicative> well, it would be a drag if all the mysteries of the ghc were fully explained. 
+18:15:01 <yitz> @type (getLine, 5) -- EvanCarroll 
+18:15:02 <lambdabot> forall t. (Num t) => (IO String, t)
+18:15:29 <yitz> EvanCarroll: that whole lambda thing you wrote is a fancy identity function
+18:15:46 <EvanCarroll> yitz: I understand, that isn't what I wanted t write
+18:15:54 <applicative> :t (\(x,b) -> let a=x in (a,b) )
+18:15:55 <lambdabot> forall t t1. (t, t1) -> (t, t1)
+18:16:06 <applicative> hmm, there's only two things that can be.
+18:16:21 <applicative> wait, only one, what am i saying.
+18:16:28 <ddarius> Quite a bit more than two.
+18:16:31 <yitz> @djinn (a,b)->(a,b)
+18:16:32 <lambdabot> f a = a
+18:17:06 <bobbytek> anyone use eclipsefp?
+18:17:11 <bobbytek> for haskell dev?
+18:17:17 <applicative> ddarius, are you counting undefined :: (a,b) -> (a,b)
+18:17:25 <yitz> EvanCarroll: what's wrong with just writing the tuple?
+18:17:50 <ddarius> applicative: Among others.
+18:18:40 <Axman6> @djinn (a,b,c) -> (e -> (a,c,b,e))
+18:18:41 <lambdabot> f (a, b, c) d = (a, c, b, d)
+18:18:44 <applicative> i'm not sure that's a thing a thing can be exactly.
+18:20:57 <yitz> applicative: the only thing i can think of then is that the whole 'modue ... where' was accidentally inside of {- ... -}
+18:21:53 <megajosh2> Hmm
+18:21:56 <megajosh2> :t (***)
+18:21:57 <lambdabot> forall (a :: * -> * -> *) b c b' c'. (Arrow a) => a b c -> a b' c' -> a (b, b') (c, c')
+18:22:06 <megajosh2> :t fmap fmap fmap
+18:22:07 <lambdabot> forall (f :: * -> *) a b (f1 :: * -> *). (Functor f, Functor f1) => (a -> b) -> f (f1 a) -> f (f1 b)
+18:22:13 <megajosh2> ...lol well then
+18:23:34 <applicative> yitz, yes, that does it. 
+18:32:03 <Axman6> if you have a balanced binary tree, does summing all the elements in the leaves take log n time?
+18:33:41 <ddarius> Axman6: Of course not.  It takes n time to look at n elements.
+18:33:59 <Axman6> so n log n then?
+18:34:13 <Axman6> but log n additions?
+18:35:30 <ddarius> Axman6: You can traverse a binary tree in O(n) time and you will have to add in every element.  You can't do less additions than there are elements.
+18:36:48 <Axman6> hmm
+18:36:55 <Polarina> I would not be surprised if one could to addition to a list of elements in less than O(n), now that it is possible to search an unsorted list in less than O(n).
+18:37:24 <Axman6> this is conflicting with what i understood from this talk by Guy Steel
+18:37:53 <dolio> Is he talking about parallelism?
+18:37:57 <ddarius> Axman6: He's taking about parallelism.
+18:37:58 <Axman6> ah, i get it, the log n is the time taken to do it in parallel
+18:38:01 <Axman6> yeah
+18:48:26 <jaredj> NEGADUCK
+18:49:01 <jaredj> oh oops i was scrolled back to yesterday
+18:50:55 <Axman6> heh
+18:59:33 <bobbytek> so, any comments on how a java dev might start interacting with haskell?
+18:59:42 <bobbytek> Are ide's frowned upon?
+18:59:48 <bobbytek> Such as EclipseFP?
+18:59:50 <Axman6> they're not common
+18:59:56 <luite> most people use emacs or vim
+19:00:24 <Axman6> or <text editor of choice>
+19:00:27 <bobbytek> I'm familiar with vim, just not for programming
+19:00:34 <bobbytek> mostly text editing
+19:00:49 <bobbytek> Never used advanced features such as ctags, etc.
+19:00:50 <luite> what's the difference ;)
+19:01:10 <applicative> bobbytek, I don't know who knows about the EclipseFP haskell support; it's not much talked about lately.
+19:01:14 <bobbytek> deep language semantics that an ide can afford 
+19:01:27 <applicative> the IDE like thing is Leksah.
+19:02:18 <bobbytek> cool
+19:02:28 <applicative> @where leksah
+19:02:28 <lambdabot> http://www.leksah.org/
+19:02:32 <bobbytek> not very useful though?
+19:02:38 <bobbytek> vim / emacs still exceeds it?
+19:02:44 <bobbytek> in development experience?
+19:03:30 <applicative> leksah is pretty new, it seems easy to build it these days...   
+19:04:44 <nikki93> Hello! :D
+19:05:56 <megajosh2> @src ap
+19:05:56 <lambdabot> ap = liftM2 id
+19:08:57 <applicative> bobbytek, there was a thread on the haskell-cafe list just lately about this, http://www.haskell.org/pipermail/haskell-cafe/2010-July/081190.html then continuing http://www.haskell.org/pipermail/haskell-cafe/2010-August/081296.html
+19:09:15 <bobbytek> cool thanks
+19:20:31 <Polarina> Is it possible for me to use cairo for rendering without using gtk?
+19:20:49 <p_l> Polarina: yes
+19:20:58 <p_l> Gtk depends on cairo, but not the other way around
+19:22:02 <Polarina> I cannot seem to figure out how to use cairo for rendering without using gtk.
+19:22:16 <Polarina> Litterally all examples assume that one is using gtk.
+19:23:24 <Gracenotes> what do you think about reusing hs file names in different directories?
+19:23:41 <copumpkin> God will strike you down
+19:23:45 <Gracenotes> so you'd have modules X.Y.Z, X.Z, A.Z, A.B.Z, [...]
+19:23:50 <Gracenotes> copumpkin: not yet
+19:24:06 <Gracenotes> is there any reason not to do it, really?
+19:25:08 <Gracenotes> it might make for a more aesthetic modulespace. mehbeh.
+19:25:31 <benmachine> there're about a million module names ending in .Lazy
+19:25:41 <copumpkin> or .Internal
+19:25:43 <benmachine> approximately one million.
+19:26:08 <Gracenotes> this is a bit less generic than that
+19:27:15 <Gracenotes> er. but whatever. I guess trying to reduce redundancy in module naming and structure it hierarchically can be done at the same time
+19:28:08 <bobbytek> Gracenotes: hi
+19:28:28 <Gracenotes> hey bobbytek
+19:31:06 <juhp> Polarina: I thought I remembered seeing a posting about it recently but I can't seem to find it... (sorry to sound vaguely Fermatian:)
+19:36:12 <Polarina> juhp, all right. Thanks. :)
+19:40:46 <juhp> Polarina: actually there are a couple of png examples in cairo-0.11.1/demo/ I think
+19:42:55 <juhp> well Text.hs is png and StarAndRising also pdf, ps, and svg
+19:47:53 <JoeyA> Hmm, when Leksah asks for paths to haskell sources, should I explicitly mention ~/.cabal/packages/hackage.haskell.org ?
+19:48:28 <hamishmack> JoeyA: no
+19:48:44 <JoeyA> Also, what's the server thing about?
+19:48:54 <JoeyA> For running a web server hosting haddock pages?
+19:49:00 <hamishmack> JoeyA: It will use "cabal unpack" to unpack those
+19:49:17 <hamishmack> JoeyA: URL is for downloading prebuilt metadata
+19:49:40 <hamishmack> JoeyA: It an be faster and more reliable than building it locally
+19:50:39 <JoeyA> <gripe>leksah is running a "collects information about Haskell packages on your system" step, and it's taking (in my opinion) unacceptably long.</gripe>
+19:51:54 <hamishmack> JoeyA: Did you allow it to download from leksah.org?
+19:51:56 <JoeyA> <gripe>Also, actual GHC programs shouldn't make ghc show up in top with 100%.  That just looks bad (except if it's ghci doing it).</gripe>
+19:51:58 <JoeyA> Yes
+19:52:10 <JoeyA> oh, it's doing a build, I suppose
+19:52:13 <hamishmack> JoeyA: What OS?
+19:52:20 <JoeyA> Ubuntu Latest
+19:52:27 <JoeyA> Lucid Lynx
+19:52:31 <JoeyA> 10.04
+19:53:23 <hamishmack> I think debian-haskell unstable leksah packages come with prebuilt leksah metadata
+19:53:23 <JoeyA> I guess it would be better if leksah showed what was going on more verbosely rather than having a progress bar.
+19:53:39 <JoeyA> ah
+19:53:41 <hamishmack> so it will be much faster once those are in ubuntu
+19:53:52 <JoeyA> This is making Haskell look _really_ slow.  Doing that is a good way to turn off newcomers.
+19:54:24 <hamishmack> JoeyA: Alternative is to let is start without metadata
+19:54:34 <hamishmack> then leksah just looks badly broken
+19:54:42 <hamishmack> also a turn off
+19:55:17 <Zao> I'd expect that applications might do first-run mangling and accumulating stuff.
+19:55:25 <JoeyA> By the way, the reason I say ghc at 100% looks bad (except for when using GHCi, for instance) is the same reason java at 100% looks bad.
+19:55:28 <Zao> Also, avoid success.
+19:55:37 <JoeyA> When I see java top at 100%, I think "pssh, there's Java for you"
+19:55:45 <JoeyA> bloated as ever
+19:55:47 <hamishmack> BTW I have done quite a bit of work on improving the experience for new users in leksah-head darcs version
+19:55:58 <JoeyA> It's better when the blame is shifted to the application :-)
+19:56:27 <Zao> JoeyA: Core saturation to me implies that the code is not bottlenecked elsewhere.
+19:56:34 <Zao> It implies efficency to me.
+19:56:48 <Gracenotes> metadata? like tags?
+19:57:00 <JoeyA> When it's doing something useful :-)
+19:57:11 <hamishmack> JoeyA: Instructions on building leksah-head are at the end of this page... http://www.leksah.org/download.html
+19:57:24 <JoeyA> Unlike Eclipse, which takes 10 seconds to open every time, not first time.
+19:57:30 <JoeyA> (though it might be better now)
+19:57:42 <JoeyA> (and by 10 seconds, I mean 10 seconds on a decent Core 2 Duo)
+19:59:25 <JoeyA> I get the feeling that installing packages from cabal is somewhat bleeding-edge.  However, distros often don't supply all the Haskell packages I need.
+20:00:11 <JoeyA> (and I'm afraid that installing the Ubuntu dev package for something will conflict with the cabal package.  Is this fear justified?)
+20:06:33 <sshc> newtype Cont r a = Cont { runCont :: ((a -> r) -> r) } -- r is the final result type of the whole computation
+20:06:59 <sshc> What can a function do with its argument when its a function, besides ignore it or return it unmodified?
+20:07:18 <sshc> Well, perhaps a few less useful things, like wrapping it
+20:07:27 <JoeyA> Cool, I really like how it packs all those statistics in there:  http://holumbus.fh-wedel.de/hayoo/hayoo.html?query=ByteString
+20:07:29 <sshc> What's an example of a useful function wrapped in Cont?N
+20:07:47 <JoeyA> I'm not used to seeing side bars like that on a web page that are not ads.
+20:09:50 <sshc> L\lastlog bos> 
+20:36:14 * copumpkin is proving more boring shit about CT
+20:36:19 <copumpkin> except it's super fun
+20:37:36 <ddarius> copumpkin: I have a half-formatted article that you may enjoy.
+20:37:40 * luite is debugging a mix of low level C and haskell code, and its uper unfun
+20:37:48 <copumpkin> ddarius: ooh!
+20:38:21 <copumpkin> it's remarkable how much work it takes to prove even the most trivial things. Just shows how bad I am at it, I expect :)
+20:38:45 <ddarius> copumpkin: I'll email it to the email you use on Haskell-Cafe.
+20:38:57 <copumpkin> ddarius: that'd be great, thanks!
+20:41:25 <copumpkin> ddarius: got it :) thanks
+20:48:15 * hackagebot bmp 1.1.1.0 - Read and write uncompressed BMP image files.  http://hackage.haskell.org/package/bmp-1.1.1.0 (BenLippmeier)
+20:49:17 * hackagebot bmp 1.1.1.1 - Read and write uncompressed BMP image files.  http://hackage.haskell.org/package/bmp-1.1.1.1 (BenLippmeier)
+21:05:45 <yaru1022> hi, I have a question about haskell related category theory... in Hask category, are objects types (such as Integer, Num, etc.) or values of types (such as 1, 2, 3, 0.1, 0.8, etc.)?
+21:10:30 <djahandarie> Num isn't a type, but yeah objects are types, and functions are the morphisms
+21:11:55 <yaru1022> djahandarie, right ; Num is a typeclass hehe. Thanks!
+21:11:57 <djahandarie> Note that morphisms need to be monomorphic though, so polymorphic functions aren't morphisms until you specify a monomorphic type
+21:12:17 <djahandarie> http://en.wikibooks.org/wiki/Haskell/Category_theory is an alright article
+21:24:38 <JoeyA> Is it safe to use unsafeCoerce to convert a newtype type to the type it represents?
+21:25:50 <aavogt> why not just use a function that does the same?
+21:26:49 <JoeyA> In particular, newtype FileStatus = FileStatus (ForeignPtr CStat) is defined in System.Posix.Files, but the FileStatus constructor is not public.
+21:27:07 <JoeyA> I want to peek into it so I can get at a stat flag that System.Posix.Files doesn't reveal
+21:27:17 <JoeyA> (st.st_blocks)
+21:27:32 <JoeyA> (which tells the space used by a file)
+21:27:46 <aavogt> unsafecoerce is supposed to be safe for that
+21:27:51 <JoeyA> okay, thanks
+21:29:28 <ski> i'd say it depends
+21:30:17 <aavogt> @docs Unsafe.Coerce
+21:30:17 <lambdabot> Unsafe.Coerce not available
+21:30:40 <ski> e.g. if a `FileStatus' is supposed to be immutable, but a `CStat' is mutable, then doing that `unsafeCoerce' would break that abstraction
+21:33:37 <JoeyA> I'm just reading
+21:37:37 <ski> probably it is ok (but it's hard to say for sure without know more about the details)
+21:42:37 <JoeyA> Hmm, the "Warning: -#include is deprecated: No longer has any effect" message is a lie.
+21:42:53 <JoeyA> Compiling with an include makes my compile succeed (it includes <sys/stat.h>)
+21:43:02 <JoeyA> Compiling without makes it fail on the struct it needs.
+21:43:23 <JoeyA> err, maybe it doesn't matter to GHC, but it matters to hsc2hs
+21:43:36 <JoeyA> hsc2hs -i sys/stat.h Foo.hsc
+21:43:41 <JoeyA> (without the include, it fails)
+21:43:46 <JoeyA> (with the include, it gives a warning)

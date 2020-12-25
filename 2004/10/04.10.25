@@ -1,0 +1,1779 @@
+00:26:25 <musasabi> sometimes yes, sometimes they are not so nice.
+01:58:14 <xkb> hmm odd.. I have a method that either evaluates  an exceptionhandler or returns a String 
+01:58:24 <xkb> the type system keeps complaining
+01:58:37 <xkb> when I use String as the return type, it requests IO a
+01:58:42 <xkb> and vice versa
+01:59:06 <xkb> I.E. IO a : compiler says:  Couldn't match `IO a' against `String'
+01:59:06 <xkb>         Expected type: IO a
+01:59:06 <xkb>         Inferred type: String
+01:59:38 <earthy> xkb: you're trying to do something weird
+01:59:49 <xkb> I guess so :D
+02:00:03 <earthy> it cannot be *both* String and IO a
+02:00:10 <earthy> however, it *can* be either String or IO a
+02:00:13 <xkb> hmm
+02:00:21 <earthy> so the type you're probably looking for is  Either String (IO a)
+02:00:46 <earthy> but that might not fit in with your current interfacedesign
+02:01:10 <xkb> I think the error is somewhere in my handler code
+02:01:17 <earthy> really?
+02:01:27 <xkb> catchError :: IO a -> (DatabaseException -> IO a) -> IO a
+02:01:29 <earthy> exceptionhandlers are by necessity in IO
+02:01:36 <earthy> and you cannot escape from the IO monad
+02:01:43 <xkb> hmm ok
+02:01:51 <earthy> which you seem to want :)
+02:01:53 <xkb> so this:
+02:01:53 <xkb> retrieve :: String -> Database -> String.$
+02:01:54 <xkb>      40 > retrieve s db = catchError (getElement_ s db) (basicDBExceptionReporter).$
+02:01:58 <xkb> is always wrong
+02:02:02 <earthy> yes.
+02:02:03 <xkb> as it is not in the IO monad
+02:02:15 <earthy> since you cannot statically guarantee that the string will be returned by retrieve
+02:02:23 <xkb> true
+02:02:29 <xkb> it can also throw an exception
+02:02:52 <xkb> hmm so I need to place retrieve in the IO monad as well
+02:03:01 * earthy nods
+02:03:08 <xkb> darn
+02:03:21 <earthy> anything doing IO needs to be in the IO monad.
+02:03:25 <earthy> retrieve does IO...
+02:03:41 <xkb> Database is just a FiniteMap here
+02:03:46 <xkb> so its not really IO
+02:04:06 <earthy> okay, but it can fail right?
+02:04:11 <xkb> yes
+02:04:16 <xkb> the lookup can fail
+02:04:17 <earthy> and you model the failure using exceptions
+02:04:22 <xkb> true
+02:04:43 <earthy> so, the exceptions need to be specified in the type signature
+02:04:53 <xkb> yes
+02:05:04 <xkb> aha.. hmm interesting
+02:05:23 <earthy> one way of dealing with exceptional situations is returing a Maybe String
+02:05:49 <xkb> the goal of this application was to show that exception wrapping is hard in haskell
+02:05:57 <xkb> thats why I choose exceptions
+02:05:57 <earthy> it's not that hard
+02:06:02 <earthy> you just need to think about it :)
+02:06:07 <xkb> :D
+02:06:12 <earthy> there's loads of help in the standard lib
+02:06:34 <xkb> Im using functions of Control.Exception now
+02:06:38 <xkb> like catchJust
+02:06:42 <xkb> and finally
+02:07:01 <xkb> hmm Im still trying to define the correct signature
+02:07:10 <xkb> Either String (IO a) wont work here
+02:07:24 <xkb> hmm why not?
+02:07:39 <earthy> because you're not explicitly injecting
+02:08:00 <xkb> can you explain that?
+02:08:16 <xkb> ah with Just
+02:08:43 <earthy> that'd be for Maybe, but yes
+02:31:39 <xkb> earthy, Im still trying to get the type sig right. I changed the return value from String to Either String (IO ())
+02:32:00 <xkb> as the function can either return the record or write an error message
+02:32:12 <xkb> or rethrow a wrapped exception
+02:32:31 <xkb> retrieve s db = catchError (getElement_ s db) (basicDBExceptionReporter)
+02:33:04 <xkb> now getElement should also indicate it return something belonging to Either?
+02:33:11 <xkb> getElement_ that is
+02:36:59 <kosmikus> which type does getElement_ have?
+02:37:27 <xkb> getElement_ :: String -> Database -> String
+02:39:23 <kosmikus> @type Control.Monad.Error.catchError
+02:39:28 <lambdabot> Control.Monad.Error.catchError :: forall m e a.
+02:39:28 <lambdabot> 				  (Control.Monad.Error.MonadError e m) =>
+02:39:28 <lambdabot> 				  m a -> (e -> m a) -> m a
+02:40:35 <xkb> ah.. I defned my own
+02:40:45 <xkb> catchError :: IO a -> (DatabaseException -> IO a) -> IO a
+02:41:23 <xkb> it tries to match the exception to the DBerror type
+02:41:40 <xkb> if so, it rethrows it wrapped to another exception (BusinessException)
+02:41:59 <xkb> if matching fails it calls a handler function
+02:42:05 <kosmikus> so, the result of retrieve certainly must be "IO something"
+02:42:15 <xkb> yes
+02:42:17 <kosmikus> and not "Either something somethingelse"
+02:42:25 <xkb> ok.. I started with IO a
+02:42:28 <xkb> as return type
+02:42:48 <kosmikus> but it's not "IO a", for any "a"
+02:43:04 <xkb> its just for Strings I would say
+02:43:17 <xkb> as it returns a String from the database
+02:43:26 <kosmikus> well, anyway, why do you try to catch an error in something which isn't an IO action?
+02:43:38 <xkb> to wrap it to another exception
+02:43:40 <kosmikus> getElement_ doesn't have IO type, as you say
+02:43:57 <kosmikus> so you won't get any exceptions from there
+02:44:05 <xkb> Hmm I do
+02:44:18 <xkb> if a lookup fails in the database it throws a DBException
+02:44:50 <kosmikus> using which function?
+02:44:56 <xkb> throwDyn
+02:45:53 <kosmikus> ah
+02:46:08 <kosmikus> I've never used throwDyn/catchDyn ... I don't know how they work
+02:46:17 <xkb> the same as normal throw
+02:46:25 <xkb> only you can now throw everything
+02:46:32 <xkb> instead of the pre-defined exception
+02:46:42 <xkb> everything that's Typeable that is
+02:47:51 <kosmikus> anyway, let's not talk about semantics, but about types ... I know types :)
+02:47:58 <xkb> ok :D
+02:48:15 <kosmikus> the first argument to catchError must be of type "IO something", but your getElement_ application obviously isn't
+02:48:31 <xkb> correct
+02:48:39 <kosmikus> so, you need to fix that
+02:49:04 <xkb> and there is no way to keep it out of the IO monad?
+02:49:49 <xkb> hmm gues snot
+02:49:52 <xkb> eh
+02:49:54 <xkb> guess not
+02:49:56 <kosmikus> I don't think you can catch exceptions in non-IO code
+02:50:16 <xkb> according to the catch definition you can't indeed
+02:50:45 <xkb> ok.. I changed the type signature to getElement_ :: String -> Database -> IO String
+02:51:00 <xkb> and the return statement to return x
+02:51:05 <xkb> where x is the record
+02:52:24 <xkb> ah that's better
+02:52:43 <xkb> now I get an exception matching error.. that's better :D
+02:52:52 <kosmikus> probably, semantically, using "evaluate (getElement_ ...)" is more like what you want
+02:53:18 <xkb> ok.. that lifts the function to the IO monad?
+02:53:39 <kosmikus> and evaluates it to HNF
+02:54:31 <kosmikus> if you want to catch an error in non-monadic code, you have to make sure that the expression is evaluated enough for the error to be triggered
+02:54:32 <xkb> hmm that returns my problem
+02:54:41 <kosmikus> why?
+02:54:43 <xkb> kosmikus, ok.. I understand that
+02:55:01 <xkb> problems matching String to IO String again
+02:55:23 <xkb> catchError (evaluate (getElement_ s db)) (basicDBExceptionReporter)
+02:55:34 <kosmikus> getElement_ of the original type now?
+02:55:37 <xkb> where getElement:
+02:55:41 <xkb> yes
+02:55:50 <xkb> getElement_ :: String -> Database -> String
+02:56:33 <kosmikus> what's the error?
+02:56:53 <xkb> oh.. sigh
+02:56:55 <xkb> my bad
+02:57:04 <xkb> forgot to recompile everything
+02:57:11 <xkb> Couldn't match `Exception' against `DatabaseException'
+02:57:11 <xkb>         Expected type: DatabaseException -> IO String
+02:57:11 <xkb>         Inferred type: Exception -> IO ()
+02:57:15 <xkb> that's ok
+02:57:16 <xkb> :D
+03:20:34 <xkb> another question:
+03:20:50 <xkb> handlers have the type Exception -> IO a
+03:21:03 <xkb> If I want to print something from the handler, how would I do that
+03:21:22 <xkb> the signature of the handler then becomes Exception -> IO ()
+03:22:20 <xkb> but that results in a type matching error.. naturally
+03:42:49 <musasabi> xkb: well what value do you want to return when an exception happens?
+03:43:08 <musasabi> if you just want to print + reraise use:
+03:43:13 <xkb> musasabi, either rethrow the exception or print it
+03:43:19 <xkb> depending on what happened
+03:43:48 <musasabi> xkb: is you exc type static or dynamic?
+03:43:53 <xkb> dynamic
+03:44:30 <xkb> So I defined an exception type
+03:46:55 <musasabi> someComputation `catchDyn` (\x@(MyExc  foo) -> print foo >> throwDyn x)
+03:48:38 <xkb> why the @?
+03:49:11 <musasabi> that just captures the whole value for the later throw, to use an another exception type you could e.g. do:
+03:49:29 <musasabi> someComputation `catchDyn` (\(MyExc  foo) -> print foo >> throwDyn (SomeThingElse foo))
+03:49:52 <xkb> ok
+03:50:10 <xkb> So I should change my basicDBExceptionReporter to IO a
+03:50:22 <xkb> and dont return"
+03:52:04 <musasabi> yes that would work
+03:52:26 <musasabi> or rather not.
+03:52:32 <xkb> :(
+03:52:55 <musasabi> "-> handler dberror" you need to rethrow it somewhere.
+03:53:13 <musasabi> how about doing it in the basicDBExceptionReporter ?
+03:53:18 <xkb> I can rethrow it in the handler i seems
+03:53:21 <xkb> i=it
+03:54:06 <xkb> Im trying to distinguish(?) between to cases of database exception
+03:54:07 <musasabi> basicDBExceptionReporter e  = putStrLn $ (show e) ++ ": " ++ "Unexpected error " >> throw SomeThing
+03:55:07 <musasabi> The basic problem is that retrieve should either return a String or a (set) of exceptions. (ignore the set)
+03:55:38 <musasabi> That means that every nonsuccesfull branch should 1) return a dummy string 2) raise some exception
+03:59:13 <xkb> hmm that still gives the error:     Cannot unify the type-signature variable `a' with the type `()'
+03:59:24 <xkb> due to putStrLn I guess
+04:04:24 <musasabi> there is a little error, instead of:
+04:04:24 <musasabi> putStrLn $ (show e) ++ ": " ++ "Unexpected error " >> throwDyn "unexpected"
+04:04:33 <musasabi> putStrLn ((show e) ++ ": " ++ "Unexpected error ") >> throwDyn "unexpected"
+04:05:30 <xkb> ahhh..
+04:05:31 <xkb> :D
+04:05:37 <xkb> that was the problem indeed
+04:05:58 <xkb> ah.. otherwise it tries to aply putStrLn to throwDyn right?
+05:02:52 <dons> moin shapr!
+05:03:15 <shapr> g'day dons 
+05:03:22 <shapr> I'm just visiting before work.
+05:03:52 <dons> Just about to commit patch to get key mappgins loaded from ~/.yi
+05:04:02 <dons> also, Sean Seefried is writing an emacs key mode
+05:04:18 <shapr> whoa cool
+05:04:47 <dons> now.. to tackle scrolling and the ui
+05:05:11 <dons> btw, reading old vi src is very illuminating. the BSD vi is very well written
+05:06:07 <shapr> I'm still very interested in a buffer arrow, but I haven't had time to do anything about it.
+05:06:33 <dons> I think that will be the big design challenge after 0.1, and syntax hl probably
+05:12:34 <musasabi> Is there a way to get the list of source files references from one .hs file (i.e. those ghc --make would chase) in a recursive manner ?
+05:12:51 <shapr> musasabi: Hal Daume's AllInOne probably has code to do that.
+05:15:33 <dons> would ghc --show-iface Foo.hi | grep depend  do what you want?
+05:17:53 <musasabi> thanks, I think I'll code for the second one at first, although AllInOne looks very nice too.
+05:19:54 <dons> musasabi: if you really need this information, hs-plugins provides a "hi" library interface to this data
+05:20:16 <dons> (rather than calling system "ghc --show-iface" in your code ;)
+05:20:46 <musasabi> well it is a makefile rule telling what to package in a distribution so, I think that will be enough.
+05:20:47 <dons> depend on how big the scale of your project is
+05:21:19 <dons> oh. a make rule... that's a nice idea
+05:21:29 <dons> so no unnec. modules get pulled in
+05:21:59 <dons> ghc -M gives you a lot of this. it generates a Makefile for you with all the dependencies specified as targets
+05:22:08 <dons> now, could we use that somehow to get a list of SRCS
+05:22:29 <musasabi> I looked at that, but it didn't look very promising.
+05:22:48 <dons> ghc -M -optdepf gives you a file 'f'
+05:22:55 <dons> sort f | uniq
+05:23:00 <dons> or a it of set.
+05:23:03 <dons> s/set/sed/
+05:23:24 <dons> I think that would work too. but ghc --show-iface is also very short :)
+05:25:19 <musasabi> but wraps lines in an evil fashion ;)
+05:40:52 <musasabi> AllInOne seems to broken in finding the dependencies
+05:44:10 <shapr> speaking of broken, your PArr bug doesn't work with the latest ghc-cvs in debian
+05:44:27 <shapr> but I can't figure out why... it's just a linking problem I think?
+05:46:18 <shapr> ProtoParrCrash.o(.text+0x367): In function `s227_info':
+05:46:18 <shapr> : undefined reference to `DataziTuple_Z1T_con_info'
+05:46:32 <dons> that was the bug, wasn't it?
+05:46:54 <dons> or, we certainly discussed this DataziTuple_Z1T issue a couuple of days ago
+05:47:15 <shapr> 6.2.1 has an impossible happening
+05:47:19 <shapr> not sure about 6.2.2
+05:47:27 <dons> anyone got a good name for the title bars in edit windows?
+05:47:38 <musasabi> shapr: The bug is different in 6.2.1, 6.2.2, older (debian) cvs and new cvs
+05:47:47 <dons> or is that a modeline in emacs?
+05:48:01 <shapr> nah, modeline is the guy at the bottom
+05:48:12 <shapr> or is that what you mean?
+05:48:16 <musasabi> shapr: http://sourceforge.net/tracker/index.php?func=detail&aid=1035575&group_id=8032&atid=108032 (the bug report)
+05:48:33 <dons> i'm talking about the line that hangs off the bottom of windows in vim, when you split them
+05:48:50 <shapr> I guess that's a modeline...
+05:49:08 <dons> not the line you type commands into?
+05:49:23 <shapr> musasabi: right, and it's different with 6.2.1 and the most recent 6.3 in debian
+05:49:25 <dons> but the one that shows, e.g, the current mode :)
+05:49:40 <shapr> I forget what you call the one you type into...
+05:49:49 <shapr> but the one that shows the mode, line number, etc is the modeline
+05:49:56 <dons> yep. ok.
+05:50:01 * dons is hacking on the ui
+05:50:16 <shapr> musasabi: this sucks, because I've had the crazy idea to compile PArr to Cg
+05:50:41 <shapr> not that I have any time to actually do that of course
+05:51:01 <shapr> speaking of which, I gotta go back to screwing around with apache and plone until my clients are happy.
+05:51:06 * musasabi hopes that it will be fixed as parrays are really nice
+05:51:15 <shapr> yes, PArr r0xx0rs
+05:51:21 <shapr> even more so with a Cg compiler.
+05:51:49 <shapr> I posted about PArr on lambda-the-ultimate.org today
+05:52:02 <shapr> maybe that will crank up some interest :-)
+05:53:08 <Boegel> hello everyone
+05:57:22 <Lemmih> Hey Boegel
+06:01:09 <Boegel> I'm having trouble with supporting a Plane object in my ray tracer :s
+06:05:10 <xkb> do you span the plane by its 2 vectors + normal?
+06:05:24 <Jan_w> I need some pre-calculated tables for a haskel puzzle solver, I implement them as lists  foo :: [Int] = bar, will they be cached automaticly ? I know the same values will be request millions of times
+06:06:29 <Boegel> xkb, I just use the Ax + By + Cz + D = 0 equation for a plane
+06:06:53 <Boegel> xkb: http://www.siggraph.org/education/materials/HyperGraph/raytrace/rayplane_intersection.htm
+06:07:18 <xkb> ah
+06:07:30 <xkb> I used that one 2.. for my java raytracer
+06:08:10 <Boegel> but I'm still testing, it's probably a weird error or so...
+06:08:16 <Boegel> s/error/bug
+06:08:56 <Boegel> xkb: what did you implement in your java ray tracer ?
+06:09:09 <xkb> simple sphere's and planes
+06:09:22 <Boegel> oh okay
+06:09:34 <Boegel> anyway, I hope I'll find what I do wrong...
+06:09:40 <xkb> me 2 :D
+06:09:48 <Boegel> xkb, can you show me a nice picture to test planes and spheres ?
+06:10:03 <xkb> hmm don't know if I have that here on my laptop
+06:10:07 <xkb> don't think so
+06:10:20 <xkb> It was a project of 3 years ago :d
+06:10:30 <Boegel> ow, okay :)
+06:11:09 <Boegel> xkb, have you seen my images ?
+06:11:15 <xkb> no
+06:11:17 <xkb> not yet
+06:12:05 <Boegel> xkb: http://studwww.ugent.be/~kehoste/thesisPublic/website
+06:12:56 <chucky> hello everyone
+06:12:59 <xkb> ah nice shadows
+06:13:26 <chucky> anyone here who's good at hs-plugins?
+06:13:32 <dons> what's up?
+06:13:50 <Boegel> xkb, idd, I like 'em too ;)
+06:14:04 <Boegel> it would be nice though to use a plane too..
+06:14:14 <dons> chucky: what's your hs-plugins question?
+06:14:15 <Boegel> then I could cast the shadows onto the plane...
+06:14:16 <xkb> yeah.. allows more complex scenes
+06:14:31 <chucky> dons: Trying to make HaskellDB use hs-plugins, but I can't seem to get load working
+06:14:35 <Boegel> xkb, I'm planning to support quadrics too, and other objects
+06:14:43 <chucky> I either get: (load: couldn't find symbol <<odbcConnect>>)
+06:14:53 <xkb> nice.. I would start with simple triangles then
+06:15:08 <xkb> you can always use triangulation on complex forms
+06:15:41 <Boegel> xkb, you mean support polygons to build large objects out of polygons ?
+06:15:49 <dons> chucky: not finding a symbol means that the module containing that symbol hasn't been loaded
+06:16:02 <xkb> Boegel, yeah
+06:16:20 <chucky> yes, but that's the only symbol in the file. :) And it's that file I'm trying to load
+06:16:34 <chucky> I do load "Database/HaskellDB/HSQL/ODBC.o" ["."] [] "odbcC\
+06:16:37 <chucky> onnect"
+06:16:45 <chucky> by the way
+06:16:52 <musasabi> It seems the format of interface files (with --show-iface) changed between 6.2.2 and cvs, and of course HAllInOne works with 6.2.2, but not 6.3 and my code does not compile with 6.2.2...
+06:17:23 <dons> chucky: ok, that looks reasonable. 
+06:17:44 <Boegel> xkb, okay, I'll try that
+06:17:49 <chucky> If I change the ["."] to [] I instead get: unknown symbol `__stginit_DatabaseziHaskellDBziHSQLziCommon_'
+06:18:00 <Boegel> xkb, but first I'll support planes and specular lighting
+06:18:13 <xkb> specular is quite easy
+06:18:17 <Boegel> xkb, then I can go amaze my promotor with the work I pulled
+06:18:20 <xkb> just adapt the lighting equation
+06:18:21 <dons> chucky: if you add -DDEBUG to hs-plugins config.mk you'll get verbose messages about what was loaded, which helps debugging
+06:18:23 <Boegel> xkb, yeah, like diffuse :)
+06:18:26 <xkb> material properties
+06:18:41 <xkb> Boegel, what level of education is this?
+06:18:51 <dons> hmm. is OBDC part of a library?
+06:18:52 <xkb> you are from Belgium right?
+06:19:07 <chucky> dons: Hmm I'll try that. BTW, this is using hs-plugins 0.9.6 and GHC 6.2.2. No problems with that?
+06:19:27 <chucky> dons: No but it loads stuff from hsql
+06:19:40 <dons> no problems. But you should update to the latest hs-plugins snapshot, "heatwave", new api, and bug fixes
+06:20:04 <dons> there was a bug with hierarchical paths, so maybe that is what's happening
+06:20:22 <dons> also, use 'nm' to check that the symbol you're looking for really is in the object
+06:20:23 <chucky> hmm I could try the CVS and the -DDEBUG thing and see what I find. :)
+06:22:15 <Boegel> xkb, yes
+06:22:27 <Boegel> xkb, it's for a final year thesis in a university
+06:22:38 <Boegel> xkb, but it's not just implementing the ray tracer
+06:22:51 <xkb> ah ok
+06:23:00 <Boegel> xkb, I have to prove properties of it, and show the advantage of programming it in a functional style
+06:23:17 <Boegel> xkb, I know it's not that hard, but the results you can get with it are quite stunning...
+06:27:00 <Boegel> xkb, if I count the lines of code (without documentation and empty lines), I have 150 lines to get the shadow result
+06:27:16 <xkb> thats very compact code indeed
+06:27:29 <Boegel> :)
+06:27:31 <xkb> and its way more easy to read then the equivalent C-code
+06:27:35 <xkb> for example
+06:27:51 <Boegel> and there's some stuff in it already to support plane objects
+06:34:35 <Boegel> xkb, I'm finding it quite hard to find a good example of a plane... I'm not quite familiar with the equation...
+06:35:03 <Boegel> if I want a slighty 'climbing' plane in the XZ plane of my scene, which coefficients should I use ?
+06:53:43 <musasabi> Created small perl script to correctly chase those imports if anyone wants.
+06:53:47 <musasabi> *a
+06:54:18 <Lemmih> What are you using it for?
+07:00:29 <chucky> dons: Are you still there?
+07:01:27 <dons> chucky: yep
+07:02:31 <xkb> If I have a function returning IO String, how can I display that String only
+07:02:43 <xkb> by keeping it in do context?
+07:03:08 <chucky> dons: I'm trying this using the snapshot heatwave and debugging info, but still no luck. I get:
+07:03:13 <chucky> Loading package base hsql ... linking ... done
+07:03:13 <chucky> Loading object Common Database BoundedList BoundedString Query Optimize PrimQuery FieldType HDBRec Sql HaskellDB haskelldb ... done
+07:03:16 <chucky> Fail: load: couldn't find symbol <<odbcConnect>>
+07:04:07 <dons> were all those objects supposed to be dependencies?
+07:04:23 <Lemmih> xkb: do string <- func;putStrLn string
+07:04:33 <chucky> seems reasonable yes
+07:04:42 <dons> they don't live in a library?
+07:05:14 <chucky> I'm not quite sure I'm following you now
+07:06:02 <dons> are those extra objects loaded normally part of a HSfoo.o type library, accessed via a -package foo flag?
+07:06:30 <chucky> yes
+07:06:42 <dons> what's that library called?
+07:07:13 <chucky> no wait. Some of these are from a library, hsql, and the others are part of HaskellDB
+07:08:14 <dons> sometimes, if the library and the objects in that library, are visible from the current directory, then ghc generates dependencies not on the library, but directly on the modules
+07:08:42 <dons> so instead of just relying on -package hsql, you instead end up with dependencies on all the .o files that make up that package,
+07:08:52 <dons> just because ghc can see them at compile time.
+07:09:03 <chucky> ok. But it seems to be doing things correctly. It loads the package "hsql", and all the dependencies it loads are part of HaskellDB
+07:09:11 <dons> ok. that's fine then
+07:09:21 <dons> so HaskellDB isn't a library, just a bunch of modules?
+07:10:00 <dons> what's that final object loaded - "haskelldb" ?
+07:10:12 <chucky> I was just thinking about that
+07:10:14 <chucky> I have no idea
+07:10:37 <chucky> I could have haskelldb as a package lying around as well. It might be confusing it
+07:10:42 <dons> hmm. when you compile the ODBC module, does it get a -package-name flag?
+07:12:07 <chucky> hold on...
+07:12:48 <dons> my guess is that the 'haskelldb' module is ODBC, but it is getting recorded as having a different name in the .hi file
+07:13:08 <dons> possibly due to a -package-name flag
+07:13:17 <chucky> sounds reasonable
+07:13:35 <kristnjov> is it possible to pattern match a [[Bool]] such as (t:ts:tss) where t is element 1, ts is element 2 and tss is element 3 or will it parse as ((t:ts):ts)?
+07:13:52 <dons> chucky: you can check with ghc --show-iface on ODBC.hi 
+07:14:08 <dons> that will produce the list of modules and packages hs-plugins expectes to be able to load
+07:14:24 <dons> ghc --show-iface | grep depend
+07:14:34 <dons> make sure that list matches what you expect to be able to load
+07:15:02 <dons> there could also be something weird happening with paths, is my other thought
+07:15:43 <chucky> it looks correct
+07:15:52 <dons> kristnjov: you could use ghc -ddump-parsed to see how it is parsed
+07:16:01 <kristnjov> dons, thanks but i figured it out
+07:16:30 <dons> chucky: hmm. ok, use 'nm' on ODBC.o to look for the symbol name you're after
+07:16:33 <dons> make sure it is defined
+07:17:06 <chucky> DatabaseziHaskellDBziHSQLziODBC_odbcConnect_entry
+07:17:15 <chucky> and two others like it
+07:17:22 <kristnjov> is there a prelude function which takes [1,2,3,4,5,6] and makes it [[1,3,5],[2,4,6]]? it should work for strings
+07:17:24 <chucky> and I want the function odbcConnect
+07:17:35 <dons> ok, I wonder if hs-plugins is correctly adding the path prefix?
+07:17:38 <dons> "DatabaseziHaskellDBziHSQLzi"
+07:17:59 <dons> you could move this object into the top level, recompile it, and see if it loads then
+07:19:06 <buggy> List> partition (even) [1,2,3,4,5,6]
+07:19:06 <buggy> ([2,4,6],[1,3,5])
+07:19:10 <buggy> Something like that?
+07:19:13 <dons> chucky: also, is the module internallly called: module Database.HaskellDB.HSQL.ODBC ?
+07:19:21 <buggy> Oh, you want alternating characters?
+07:19:24 <chucky> yes
+07:19:42 <buggy> Aha.
+07:21:40 <chucky> dons: Tried recompiling it at top level. No luck
+07:21:52 <dons> you'd have to change the module name if you did that
+07:21:56 <dons> to just ODBC
+07:21:58 <chucky> oh right
+07:23:49 <buggy> ok kristnjov, I believe you can just do that in a much easier list comprehension way
+07:24:05 <kristnjov> buggy, i'll try it out
+07:24:31 <kristnjov> to make it more clear, in case you misunderstood, i want to take every other element into separate lists
+07:25:29 <buggy> hm... I assumed you just meant 'splits up odd and even index elements so like "hello there" would be like ["hlotee", "el hr"]?
+07:25:45 <kristnjov> that's it. :)
+07:26:50 <kristnjov> but i'm not sure i know how to solve this one
+07:27:54 <buggy> i'm not too crash hot at haskell so i can't say what is elegant and what isn't but i wouldn't say my solution is particularly graceful
+07:28:34 <kristnjov> i'm thinking about using findIndex
+07:29:01 <buggy> that won't work correctly
+07:29:06 <buggy> it finds the first index of something
+07:29:18 <kristnjov> true
+07:29:19 <buggy> hm.. oh maybe not
+07:29:26 <buggy> either way it's crazy
+07:29:40 <kristnjov> it's odd that there is no prelude function for this
+07:29:51 <kristnjov> or any obvious function to use
+07:30:38 <Lemmih> When is it needed?
+07:30:43 <kristnjov> well now
+07:30:51 <Lemmih> I can't see why it should be useful.
+07:31:01 <kristnjov> obviously it would be, since i'm in need of it
+07:31:17 <buggy> lol, kristnjov: if you're interested, you can have a look at my solution but i guarantee you some people in this channel are going to whince
+07:31:26 <kristnjov> buggy, i'll take the chance
+07:31:27 <buggy> wince
+07:31:39 <buggy> alright.. i haven't tested it out so you can be the first to
+07:32:23 <Lemmih> kristnjov: Just because you need it doesn't mean it's particularly useful.
+07:32:44 <buggy> [[xs !! i | i <- [0,2..y]], [xs !! j | j <- [1,3..y]] where y = length xs
+07:32:50 <buggy> or length xs -1 even
+07:32:53 <kristnjov> Lemmih, well for example i've never had to use uncurry :|
+07:33:13 <sjanssen> kristnjov: the easiest approach would be to start with a function that takes every other element of a list, and then "mySplit xs = [everyother xs, everyother $ tail xs]"
+07:33:24 <buggy> and indeed the converse isn't true either, because it's useful doesn't mean you need it
+07:33:29 <Lemmih> kristnjov: It's very useful when you're mapping a function with the type :: a -> b -> c
+07:33:43 <kristnjov> Lemmih, but see, I haven't had any use for it
+07:33:51 <kristnjov> and the one i'm speaking of might be useful to others as well
+07:34:00 <Lemmih> How so?
+07:34:21 <kristnjov> well how not so?
+07:34:53 <Lemmih> Can you give an example on where it would be useful?
+07:35:58 <kristnjov> i have a list of elements which i'm going to columnize and putStr, so i thought it could be good to split up the list into two lists and then do unlines (zipWith (++) list1 list2)
+07:36:29 <buggy> How does one go about writing what would be multiline haskell statements in a single line
+07:36:38 <buggy> ie) I have two 'where' assignments
+07:36:48 <kristnjov> where can take two lines as well
+07:36:55 <kristnjov> and as many lines as you want
+07:37:13 <buggy> indeed, what i'm wondering is how i make it go in one line
+07:37:30 <kristnjov> why do you want to do that? i don't think there is such a way
+07:38:09 <Lemmih> buggy: 'x z where x = y' is the same as 'y z'.
+07:39:26 <Lemmih> kristnjov: Why don't you store the elements as [(a,a)]?
+07:40:04 <kristnjov> don't know.
+07:40:11 <kristnjov> but i don't feel like rewriting my code
+07:40:21 <kristnjov> because it took me a lot of time to create it :P
+07:40:36 <dons> Chucky: there could be a bug in hte .hi file parser when there are hierarchical names being loaded from a remote directory
+07:40:41 <dons> i'm looking into it
+07:41:34 <chucky> dons: ok
+07:46:20 <dons> chucky: what's the output of: ghc --show-iface OBDC.hi | head -1
+07:47:12 <buggy> lemmih, i mean something like this
+07:47:22 <buggy> (x == y where y = 2) where x = 4
+07:47:23 <chucky> __interface "haskelldb" Database.HaskellDB.HSQL.ODBC 1 where
+07:47:27 <buggy> er
+07:47:32 <buggy> Not like that
+07:47:38 <buggy> obviously x won't be defined then
+07:47:51 <buggy> just something like this x == y where y = 2 where x = 4
+07:48:00 <dons> chucky: yep. for some reason it's using "haskelldb" as the module name, instead of "Database.HaskellDB.HSQL.ODBC"
+07:48:03 <buggy> I want to be able to use two wheres in the one single line command
+07:48:40 <chucky> dons: Weird. Could this be due to me passing options indicating for it to build itself into the package haskelldb (yes most likely)
+07:48:49 <Lemmih> buggy: You don't need two where statements.
+07:49:06 <dons> ah! because the name 'haskelldb' is set via -package-name flag
+07:49:10 <dons> possibly other ways
+07:49:21 <dons> that field is the package-name field, anyway
+07:50:06 <dons> in what way were you telling it to be part of haskelldb package?
+07:50:33 <chucky> good question. :) I'm just using my makefiles that I haven't been looking at for a few months
+07:50:35 <Lemmih> buggy: 'where x=4; y=2' is valid. You can also separate them with a newline + indentation.
+07:52:03 <dons> chucky: ah. but I think i've found a bug in hs-plugins anyway.
+07:52:35 <dons> when a module lives down in a hierarchical name path, the mkModid function seems to be dropping the first patrt of the name
+07:53:21 <dons> so you can load it quite fine, but when hs-plugins searches for the symbol, it gets the prefix wrong
+07:53:22 <danols> could someone point me to a simple example of using the network class ?
+07:53:33 <Lemmih> The network class?
+07:53:35 <danols> i've been trying to find it on google but to no success
+07:54:02 <danols> Lemmih yes
+07:54:02 <dons> chucky: easy to fix. i'll get it done tomorrow (aussie time). should be in the cvs snapshots by tomorrow night.
+07:54:13 <danols> Lemmih i meant the library
+07:54:14 <chucky> ok. :) Great!"
+07:54:18 <Lemmih> danols: You probably mean the Network module.
+07:54:35 <danols> Lemmih yes, what is the proper name anywho ? module ?
+07:55:22 <Lemmih> danols: It's actually very simple (at least the high level interfase is). You can access the documentation here: http://haskell.org/ghc/docs/latest/html/libraries/network/Network.html
+07:55:56 <danols> Lemmih:  yes I've read through that but I am having a hard time starting up, i would like a code example 
+07:56:21 <danols> i'm trying to print handle <- recvFrom "www.yahoo.com" (PortNumber 80)
+07:56:25 <danols> but it just hangs there
+07:56:29 <Lemmih> Indeed.
+07:56:52 <danols> Lemmih so i must be doing something incorrect
+07:56:53 <Lemmih> You shouldn't use recvFrom and sendTo.
+07:56:59 <danols> Lemmih why ?
+07:58:33 <danols> Lemmih this is what I have to try to test it
+07:58:34 <danols> main = withSocketsDo $ do  
+07:58:34 <danols>      print "Starting" 
+07:58:34 <danols>      handle <- recvFrom "www.yahoo.com" (PortNumber 80)      
+07:58:34 <danols>      print "Worked" 
+07:58:34 <danols>      print (show handle)
+07:59:41 <Lemmih> handle <- connectTo "www.yahoo.com" (PortNumber 80)
+07:59:48 <musasabi> Simple Network Time Protocoll example in Haskell - http://www.cs.helsinki.fi/u/ekarttun/util/HSNTP/hsntp-0.1.tar.bz2
+08:00:01 <Lemmih> danols: Are you familiar with the HTTP protocol?
+08:00:12 <danols> lemmih no
+08:00:28 <danols> Lemmih i was thinking to recieve I need to sent a request command ?
+08:00:36 <Lemmih> Indeed.
+08:00:43 <danols> Lemmih makes sense
+08:02:05 <Lemmih> hPutStrLn handle "GET /" -- Somewhat naive but it works.
+08:02:51 <danols> which module is hPutStrLn ? (it's been at least a year last time I used haskell) is it IO ?
+08:03:35 <Lemmih> @index hPutStrLn
+08:03:37 <lambdabot> System.IO,IO
+08:03:52 <danols> ok brb
+08:05:01 <kristnjov> is there anything wrong with this code? everyOther (x:xs) = [ (head x, head xs) ] ++ (everyOther tail xs)
+08:05:14 <kristnjov> it's type [a] -> [(a,a)]
+08:05:52 <Boegel> kristnjov,  everyOther (x:xs) = (head x, head xs) : (everyOther tail xs)
+08:05:56 <Boegel> is faster, I think
+08:06:11 <kristnjov> well hugs seems to think of the function as a -> b -> c
+08:06:15 <Boegel> but why should anything be wrong with it ?
+08:06:18 <Lemmih> Indeed. (everyOther tail xs) => (everyOther (tail xs))
+08:06:25 <kristnjov> thanks Lemmih
+08:06:29 <Boegel> right :)
+08:06:53 <danols> Lemmih can I msg you private ?
+08:06:58 <Lemmih> Sure.
+08:07:03 <danols> k
+08:07:14 <Etaoin> head x assumes x is a list doesn't it? dunno if that's what you want
+08:08:04 <kristnjov> Etaoin, yeah i already fixed that
+08:08:35 <Etaoin> instead of head and tail, I guess you could do all the work in the pattern matching
+08:09:12 <kristnjov> perhaps, yet that was not what was wrong
+08:09:26 <Etaoin> yup
+08:09:51 <Lemmih> everyOther (x:y:rest) would probably be prettier.
+08:14:12 <xkb> If a function returns either a proces (IO a) or a "somestring" why does the unification algorithm insist on using IO [Char] instead of IO a?
+08:15:22 <Lemmih> xkb: Can you post the code on the wiki?
+08:15:40 <xkb> I do have it avail for download.. will that do 2?
+08:15:52 <Lemmih> Sure.
+08:16:23 <maihem> if you do return "somestring" from a function called by something expecting an IO a, the a will be [Char] because that is precisely what you are returning
+08:22:35 <kristnjov> why does hugs see this code as type [a] -> [b]?
+08:22:35 <kristnjov> everyOther x = ([ x!!i | i <- [0,2..(length x)-1] ], [ x!!i | i <- [1,3..(length x-1)] ])
+08:23:36 <kristnjov> i thought it was [a] -> ([a],[a])
+08:24:15 <kristnjov> ah nvm
+08:26:14 <peti> Good afternoon.
+08:26:48 <Lemmih> Hey peti
+08:29:50 <peti> Lemmih: Seems to be quiet this afternoon. :-)
+08:30:00 <peti> Everybody has something useful to do but me, it appears ...
+08:31:03 <Lemmih> peti: My unicycle is punctured so I have way too much IRC time /-:
+08:32:01 <peti> Lemmih: What is a unicycle? It sounds like a bike with one wheel only, but that can't be true, can it?
+08:32:28 <kristnjov> peti, that's it
+08:32:38 <Lemmih> It is indeed a bike with only one wheel (-:
+08:32:47 <kristnjov> he and shapr seem to unicycle a lot (if they're not the same person)
+08:32:47 <peti> Lemmih: You're riding a bike with only one wheel? 
+08:32:55 * peti thought only people in movies would do that. :-)
+08:33:19 <peti> Lemmih: How often did you fall until you had learned how to do it?
+08:33:45 <kristnjov> i thought only people working at circus did that :)
+08:34:45 <peti> Has anyone used Cabal to build an application rather than a library?
+08:35:31 * peti has to decide whether to write a makefile now or not. 
+08:35:53 <Lemmih> peti: Unicycling is not as difficult as it sounds.
+08:38:16 <peti> Lemmih: Well, I won't even use a normal bike without wearing a helmet, so it's probably not for me. :-)
+08:44:48 <tic> tja da
+08:44:49 <tic> davve. :)
+08:45:53 <sond> tja
+08:50:58 <xkb> when ld gives undefined symbols during linking, I should set the path?
+08:57:01 <peti> xkb: What kind of errors do you get?
+09:00:41 <stef_> hi, I am learning haskell and I am stuck at the very beginning. I run hugs and type "pi = 3.14" and get ERROR - Syntax error in input (unexpected `=')
+09:01:16 <stef_> is there somewhere sample of hugs sessions?
+09:03:21 <peti> stef: Take a look at <http://haskell.org/tutorial/>.
+09:03:33 <xkb> peti, undefined symbols
+09:04:00 <peti> xkb: Are they coming from missing 3rd party libraries? Or from your Haskell modules? 
+09:04:34 <stef_> peti: I am typing straight form a tutorial :(
+09:04:58 <buggy> stef, to start off
+09:05:13 <buggy> try type these commands: '2 == 2' '2 == 4' '2 < 4' 
+09:05:29 <peti> stef: You cannot enter programs directly into Hugs. You have to write your program into a file, say "test.hs", and then load it into Hugs with ":l test.hs".
+09:05:29 <buggy> note how there are two equal signs
+09:05:56 <stef_> peti: thx
+09:06:12 <stef_> is there some interactive mode to start with?
+09:07:05 <peti> stef_: You can use your programs interactively, yes. That's what Hugs does. But you cannot _write_ the program in Hugs directly.
+09:07:52 <stef_> so that preclude the use of '='  because it is writing a program ?
+09:08:00 <stef_> where is the boundary?
+09:08:37 <peti> stef_: Yes, the statement 'foo = ...' defines a function 'foo'. 
+09:09:31 <stef_> is there a interpreter I can run on linux mandrake that avoid the step of editing files. At this point this is what I need.
+09:10:10 <stef_> I am an experirienced programmer, but novice with functional languages
+09:10:45 <stef_> and I want to grok that paper about the packrat compile that gives haskell code.
+09:11:35 <peti> stef_: No, you need to write the code you want to run into a file, then load that into the interpreter. Hugs is a Haskell implementation, not an IDE. :-) If you have Emacs, then you can run Hugs within Emacs. That reduces the overhead of switching between Hugs and your text editor quite a bit.
+09:12:15 <stef_> I am using emacs :)
+09:12:53 <peti> Then you might find <http://haskell.org/haskell-mode/> useful. It makes development rather convenient, IMHO.
+09:13:17 <stef_> thx, that's probably what I need
+09:13:42 <tromp> you can define things with ghci
+09:13:57 <xerox> haskell mode isn't in emacs by default?
+09:14:06 <stef_> yes it is there
+09:14:12 <xerox> ah okie
+09:14:12 <tromp> using the special syntax let pi = 3.14
+09:14:13 <stef_> version 1.44
+09:15:42 <xkb> peti, haskell modules like Control.Exception and my own
+09:15:58 <peti> xkb: Which GHC version are you using?
+09:16:31 <peti> xkb: Older versions might require you to specify "-package xxx" if you're using libraries beyond "base".
+09:16:46 <stef_> thx peti
+09:17:01 <peti> stef_: Good luck. :-)
+09:22:14 <danols> anyone know why this is hanging ? ( as if waiting for input )
+09:22:15 <danols> main = withSocketsDo $ do  
+09:22:15 <danols>      print "Starting" 
+09:22:15 <danols>      file <- openFile filename WriteMode 
+09:22:15 <danols>      hSetBuffering file NoBuffering 
+09:22:15 <danols>      stream <- connectTo "www.mnx.ca" (PortNumber 80)      
+09:22:17 <danols>      hSetBuffering stream LineBuffering 
+09:22:19 <danols>      hPutStrLn stream "GET /img/title.jpg HTTP/1.0"      
+09:22:21 <danols>      result <- hGetContents stream 
+09:22:23 <danols>      hPutStr file (take 100 result) 
+09:22:25 <danols>      hClose file 
+09:22:42 <danols> it works if i'm not specifing a specific file
+09:23:55 <xkb> peti, 6.2.1
+09:24:21 <peti> danols: My guess is that hGetContents isn't fully evaluated when you close the file. 
+09:24:45 <danols> peti that's what i'm thinking too but if I just request "GET /" it works
+09:24:46 <danols> hmmm
+09:24:47 <peti> xkb: Hmm, then that shouldn't be a problem; 6.x loads packages automatically.
+09:24:58 <xkb> its on mac though
+09:25:09 <peti> danols: Have you tried a different buffering mode? 
+09:25:11 <danols> peti is there a HTTP moulde for haskell already ?
+09:25:26 <danols> peti hmmm, which one do you recommend ?
+09:25:32 <peti> danols: Yes, I remember reading about that. 
+09:26:14 <peti> peti: BlockBuffering, maybe? Or LineBuffering, if you write lines anyway.
+09:26:32 <peti> Heureka! Try hFlush'ing the output stream. Maybe that helps.
+09:26:34 <danols> makes sense
+09:28:13 <stef_> petit: is there an haskell manual in gnuinfo format?
+09:29:00 <peti> peti: I wouldn't know any. There is plenty of reference documentation, but that's all HTML.
+09:30:45 <stef_> oops, sory  s/petit/peti/ :)
+09:31:25 <peti> stef_: Nevermind. :-)
+09:50:29 <bourbaki> moin
+09:50:39 <stepcut> morning
+09:53:12 <danols> i'm really rusty 
+09:53:18 <danols> how does one do a while loop ?
+09:53:58 <bourbaki> the magicword is tailrecursion
+09:54:25 <danols> i see
+09:54:28 <danols> brb
+10:36:41 <xkb> how do you construct something of the following type: data Entry = Entry {key::String, value::String}
+10:36:57 <stepcut> (Entry "key" "value")
+10:37:08 <xkb> ah.. without the () or {}
+10:37:10 <xkb> thanks
+10:37:19 <stepcut> or: Entry { key="key", value="value")
+10:37:21 <stepcut> (i think)
+10:38:32 <stepcut> err, the closing brace should be curly in the second example :)
+10:38:45 <xkb> :D
+10:38:49 <xkb> It works.. thank you
+10:39:16 <stepcut> no problem
+10:39:46 <xkb> now to find out why I get an unkown exception instead of the one I was expecting
+10:40:02 <stepcut> using dynamic exceptions ?
+10:40:10 <xkb> yes
+10:40:22 <stepcut> are you using catch or catchDyn ?
+10:40:29 <xkb> catchDyn
+10:40:50 <stepcut> that happens to me a lot :)
+10:41:01 <xkb> and Im matching on the type I defined
+10:41:20 <stepcut> what is the type you defined 
+10:42:04 <xkb> 2 exceptions in total
+10:42:30 <xkb> BError String
+10:42:37 <xkb> and DBError String 
+10:43:12 <xkb> | DBUndefined
+10:50:31 <maXlo> hello
+10:50:53 <xkb> hi
+10:50:59 <stepcut> and what happens when you run this ?
+10:51:16 <xkb> if the correct key i.e. "test" it returns the enty
+10:51:25 <xkb> and otherwise Fail: unknown exception
+10:51:58 <xkb> and that should be "Business retrieval failed"
+10:55:58 <stepcut> ok
+10:56:04 <stepcut> i have an idea
+10:56:22 <xkb> I think its one of the DynExceptions that doesnt match
+10:56:41 <stepcut> in catchError, if the DatabaseError is DBError, you reraise the exception as a BError, but you don't catch BError, do you ?
+10:57:12 <maXlo> anyone ones how to convert "1" to 1?
+10:57:17 <maXlo> i.e., string to Integer?
+10:57:22 <CosmicRay> maxlo: (read "1")
+10:57:25 <maXlo> because:
+10:57:27 <maXlo> toInteger "1"
+10:57:27 <maXlo> ERROR - Cannot infer instance
+10:57:27 <maXlo> *** Instance   : Integral [Char]
+10:57:27 <maXlo> *** Expression : toInteger "1"
+10:57:40 <stepcut> any uncatch dynamic exceptions will become an unknown exception
+10:57:41 <maXlo> CosmicRay:  read "1"
+10:57:42 <maXlo> ERROR - Unresolved overloading
+10:57:42 <maXlo> *** Type       : Read a => a
+10:57:42 <maXlo> *** Expression : read "1"
+10:57:44 <CosmicRay> maxlo: you're running it in the interpreter where it doesn't know what number to make it
+10:57:54 <CosmicRay> maxlo: in a real program, it will convert it to whatever kind of number you need
+10:57:59 <xkb> stepcut, hmm looking at the catch now
+10:58:01 <CosmicRay> maxlo: you can try (read "1")::Integer
+10:58:10 <maXlo> I need an Int or an Integer
+10:58:24 <xkb> stepcut, I do.. in showError in cli.lhs
+10:58:30 <maXlo> i am in a hugs console, but i will run it using runhugs
+10:58:41 <maXlo> CosmicRay:  ok, let me check it
+10:58:48 <xkb> stepcut, match on BError s
+10:59:06 <stepcut> xkb: ah, indeed you do, hold on
+10:59:33 <xkb> and it throws a regular error on mismatch indicating *real* faillure
+11:00:14 <maXlo> CosmicRay: it works fine, thanx!!!
+11:04:04 <stepcut> xkb: found it
+11:04:10 <xkb> cool :D
+11:04:32 <stepcut> line 35 in Business.lhs
+11:04:53 <xkb> the closing bracket?
+11:05:14 <stepcut> throwDyn BError "Business retrieval failed" will be evaluated as:  (throwDyn BError) "Business retrieval failed"
+11:05:35 <xkb> ahhh
+11:05:42 <xkb> hence the unkown exception
+11:06:05 <stepcut> so throwDyn will throw a dynamatic exception with the type (String -> BusinessError), but you only catch errors of type BusinessError :)
+11:06:33 <stepcut> You will likely make this mistake several more times when using dynamic exceptions, because the type-checker does not catch it for you :-/
+11:06:36 <xkb> stepcut, yes.. you are right.. I changed it and now its showing Right "error msg"
+11:06:46 <stepcut> @type throwDyn
+11:06:52 <lambdabot> bzzt
+11:07:01 <stepcut> @type Control.Exception.throwDyn
+11:07:02 <lambdabot> Control.Exception.throwDyn :: forall b exception.
+11:07:02 <lambdabot> 			      (Data.Typeable.Typeable exception) =>
+11:07:02 <lambdabot> 			      exception -> b
+11:07:38 <stepcut> throwDyn magically does whanever is needed to make the type checker happy, even if it gets the wrong answer :-(
+11:15:49 <CosmicRay> ah.
+11:15:51 <CosmicRay> typeables
+11:15:57 <CosmicRay> that's on my list of things to learn about today :-)
+11:25:51 <basti_> hi
+11:26:48 * esap is again struggling with a ghc-6.2.2 panic: solveDerivEqns: probable loop.
+11:27:11 * basti_ would panic there too
+11:27:37 <esap> Something related to Data.Generics and deriving Typeable.
+11:27:49 <bourbaki> 4DONT PANIC!
+11:27:59 * esap panics.
+11:28:04 <bourbaki> :)
+11:28:14 <basti_> 42
+11:28:38 <bourbaki> look into the encyclopedia galactica
+11:28:50 <esap> ghc prints a huge list of stuff after the panic as a debug info.
+11:28:57 * esap had to break it.
+11:29:34 <basti_> that sounds kinda like you made a type that is "recursive" in some way.
+11:29:38 <basti_> Maybe with classes.
+11:29:56 <esap> Heh, my types are recursive in more than one way.
+11:30:10 <esap> It's a parse tree of a compiler, it should be recursive.
+11:30:15 <basti_> i mean like, uhm
+11:30:19 <basti_> looped.
+11:30:27 <basti_> A is a B which is a C which is an A
+11:30:40 <basti_> non-primitive-recursive so to say
+11:30:59 <arauko> I think i already asked this, but i was away so i couldn't see any response, is there any ay to develop GUI applications on haskell?
+11:31:29 <esap> arauko: There are many GUI toolkits, depending on what you want to do.
+11:31:46 <basti_> i think wxhaskell would be worth a try...
+11:31:53 <arauko> esap, the most basic toolkit would be fine.
+11:32:04 <arauko> Ok, thanks.
+11:32:16 <basti_> but it can be a pain in the a__.
+11:32:22 <basti_> to compile and to maintain.
+11:32:46 <arauko> Thats not good.
+11:33:08 <basti_> but if you can do that yourself, go and try
+11:33:41 <basti_> i think for some binary distributions there are binary libraries
+11:34:21 <musasabi> gtk2hs is nice too
+11:43:45 <esap> hmm.. the loop went away when I added couple of missing deriving (Data,Typeable) occurences.
+11:43:58 <basti_> uh
+11:44:33 <esap> I guess when they were missing, it had to go through all the other instances as well to find a match, then tripped at finding those.
+11:46:10 * esap is clearly writing too complex data structures.
+11:46:22 <bourbaki> esap kiss ;)
+11:46:28 <esap> hehe
+11:46:55 <esap> I'm trying, it's not that simple in this case.
+11:47:26 * esap thinks this is already very simple. Fits in one file that's only 170 lines long.
+11:47:41 <bourbaki> what are you doing that requires you to do it that way if i may ask?
+11:48:28 <esap> Well that's a parse tree for my compiler. It tries to implement category theory [to be short, I have all kinds of interesting stuff there].
+11:48:50 <bourbaki> oh sounds cool
+11:49:01 <bourbaki> so you write programs as categories?
+11:49:30 <esap> yes. categories map to modules (this is almost the case in Haskell as well)
+11:49:42 <Philippa> esap: we may or may not have similar ideas - I'm playing around with a design for something based on removing the pure/arr combinator from arrows
+11:50:07 <basti_> o.o
+11:50:16 <bourbaki> esap can you do dynamic programs with that?
+11:50:29 <esap> bourbaki: depends on your definition of dynamic :-)
+11:51:28 <bourbaki> esap like adding and getting rid of arrows in diagrams
+11:51:46 <basti_> did you ever hear about things that are "not to be done"?
+11:51:56 <esap> bourbaki: oh, refinement?
+11:52:03 <bourbaki> im still woriking on my stuff and thats pretty much what youre doing
+11:52:10 <musasabi> Is readMVar really really safe?
+11:52:19 <bourbaki> esap maybe thats what its called ie
+11:52:36 <esap> philippa: That sounds interesting.
+11:52:37 <bourbaki> esap i want to implement a stack by adding arrows to my diagram
+11:53:21 <bourbaki> Philippa why do you wanna get rid of pure?
+11:53:22 <esap> bourbaki: refinement is a way of building programs in very small iterations, such that you can only implement what you need.
+11:54:05 <bourbaki> esap then i guess we are talking about different things i guess you are talking about haveing a big diagram that gets pruned to what you want right?
+11:54:32 <esap> bourbaki: no, you never build the whole big thing.
+11:55:30 <bourbaki> esap and how would you add an arrow in a functor?
+11:55:49 <esap> bourbaki: arrow in a functor?
+11:56:22 <esap> bourbaki: you mean that you'd like to extend the domain of the functor?
+11:56:27 <Philippa> bourbaki: because then you can implement your 'base' semantics as just another category
+11:56:42 <Philippa> (->) as an arrow straight-off-the-bat
+11:57:03 <Philippa> then pure is just an arrow transformer's lift, if that makes sense
+11:57:07 <bourbaki> esap add an arrow to a category with a functor
+11:57:20 <bourbaki> i see pure like that allready
+11:57:31 <Philippa> sure, but it'd be nice to have it literally that
+11:57:34 <bourbaki> thats why i have a erup :)
+11:58:13 <esap> bourbaki: A functor adds all arrows that are in the domain category, not just one (unless the category has only one arrow :-)
+11:58:53 <bourbaki> esap yes but i want to have more arrows in the new diagram then in the old
+11:59:18 <Philippa> bourbaki: heh :-) Part of why I want to do this is so that my base semantics doesn't necessarily have to be Haskell - say hello to satan's own metalanguage, if you like
+11:59:43 <Philippa> I mean, lisp is a pretty trivial example in that framework, arrows insist everything supports cons anyway :-)
+12:00:06 <bourbaki> :)
+12:00:07 <esap> bourbaki: maybe have a functor from F : CxD --> E ?
+12:00:44 <bourbaki> esap ok that makes sense but i think for that kind of operations i will change then to topology i guess
+12:00:45 <esap> bourbaki: s/from//
+12:01:06 <Philippa> but I'd really like to play with using Haskell to manipulate programs that're impure as hell, this seems a nice way to try it
+12:01:20 <Philippa> or else to build something close
+12:01:50 * Philippa wonders how hard it'd be to build a category to match the new GENERIC language (mainline) GCC's back end uses
+12:02:20 <bourbaki> esap ?
+12:02:45 * esap is not keeping up with all the discussion :-)
+12:03:07 <bourbaki> esap oh wait a sec before you vanish again
+12:03:21 <bourbaki> esap how would you implement a diagram that manipulates itself?
+12:03:26 <esap> I'm not vanishing now anywhere for a couple of hours.
+12:03:56 <esap> bourbaki: diagrams are pretty static things.
+12:04:45 <esap> bourbaki: But of course, you can build natural transformations to map between diagrams.
+12:04:46 <bourbaki> esap hm that was my impression also except if you use functors which cant be part of the diagram itself
+12:05:22 <esap> bourbaki: Some functors can be part of the diagram, if your category supports limits.
+12:05:33 <bourbaki> esap oh how!?
+12:05:50 <bourbaki> esap and these functors are mapping the diagram itself?
+12:06:16 <esap> bourbaki: limit is usually taken of a functor [i.e. a diagram].
+12:06:54 <esap> bourbaki: but it might actually not be possible to embed a limit of the category itself into the same category.
+12:07:11 <bourbaki> esap ah ok but thats not really what i want i guess , thats what my impression is also
+12:07:13 <esap> bourbaki: and limit is an object of the category.
+12:07:20 <bourbaki> i tortured my brain to find a way to do that
+12:08:08 <bourbaki> esap ive build a neural network with arrows my implementation of it that is now im searching for a way to adjust the edges of the network
+12:09:04 <bourbaki> but i guess im doing something like makeing all functions of a type like (network,foo) -> (network,bar) such that every edge in the network itself can modify the network
+12:09:13 <esap> bourbaki: do you mean 'edges' as in 'edges vs. vertices' or edges as in 'edges vs. center'? :-)
+12:09:20 <bourbaki> and just discard the old network on an outer structrue
+12:09:36 <bourbaki> i mean edges as in arrows 
+12:10:41 <esap> bourbaki: ok, so you want to manipulate meta-information about the network itself via monadic state?
+12:10:41 <bourbaki> the nodes in my neural networks are just domains and the edges are functions i write before and lift them into the functions space then use the basice arrow operators to build the network function
+12:11:19 <bourbaki> esap something like that yes but i will try to implement that in the same way the network itself is implemented
+12:12:57 <esap> bourbaki: Hmm,, just a thought, have you tried to model that as a coalgebra in Cat? I'd expect it might produce something like that.
+12:13:45 <bourbaki> esap isnt a coalgebra and a state monad quite the same?
+12:14:14 <bourbaki> esap at least according to a paper i found sometime that dealt with coalgebras and states which looked quite like that
+12:14:55 <esap> bourbaki: state monad is a kind of coalgebra, yes.
+12:14:57 <bourbaki> esap but the more i think about this self refferenceing thing the more i wonder how objects work in languages like c++ :)
+12:15:27 <esap> bourbaki: objects are not really that complicated
+12:15:33 <bourbaki> esap do you see anything where you could help me with your implementations there?
+12:16:10 <bourbaki> esap if you see an object as a diagram then a function like set foobar would just modify another arrow in that diagram
+12:16:37 <Philippa> bourbaki: they work by being a bunch of syntactic sugar on top of C, HTH HAND :-)
+12:16:42 <bourbaki> esap but thats not possible cause it cant deal with self refferenceing
+12:16:57 <bourbaki> i just sat this :)
+12:17:08 <bourbaki> c and java and the like scare me
+12:17:20 <bourbaki> sat = say
+12:18:04 <esap> bourbaki: Maybe you don't really want self-reference. Try to separate the meta-level from the 'object' level, then define a mapping between those two.
+12:18:56 <Philippa> bourbaki: C's less scary than Java in a way. It's more honest.
+12:18:56 <bourbaki> esap what i want to have in the end is something that allows you to draw diagrams that implement programs
+12:19:04 <esap> bourbaki: The problem is, I think what you want is something like a 'collection' of categories, such that you have some mechanism to choose which one you're using.
+12:19:30 <bourbaki> esap the main idea is that someone who cant really program can draw such a program and a programmer implements the functons in between the nodes
+12:19:36 <Philippa> er, stupid question: are we not discussing something equivalent to yampa's switches?
+12:19:55 <bourbaki> i think yampa switches arent what i want
+12:20:19 <bourbaki> i just cant come up with an idea to do backpropagation in my network with these
+12:21:06 <bourbaki> the backprop is something like an endofunctor on networks i think
+12:22:38 <bourbaki> but basically thats why i started to look at diagrams also as graphs (topologically)
+12:23:33 <bourbaki> hi Boegel
+12:23:52 <Boegel> hi
+12:24:06 <bourbaki> the pictures start to look better every day :)
+12:24:13 <Boegel> ow, ok :)
+12:24:14 <Boegel> thx
+12:24:37 <Boegel> I'm having trouble with my plane object though...
+12:24:48 <Boegel> but I think there's something wrong with my shadows too...
+12:25:21 <esap> bourbaki: I don't probably quite understand what the real problem there is. I'm thinking either ordinary functors or natural transformations should solve the problem.
+12:25:45 <bourbaki> esap yes my prob was just to have it in the same diagram
+12:26:45 <esap> bourbaki: why do you need it to be in the same diagram?
+12:27:50 <bourbaki> esap as i said the idea is to make is accesable for non programmers i want to use it for ai stuff and my intuition tells me its good when youre able to just draw something like that and then implement it
+12:28:21 <bourbaki> esap ie like in a state machinge you want to say that if you are in this and that state you want to add something
+12:29:13 <bourbaki> Boegel looked into perlin noise?
+12:29:39 <bourbaki> Boegel www.magic-software.com has nearly all intersection tests in can think of btw
+12:31:26 <esap> bourbaki: that just means you should divide your world into layers based on size of your diagrams [or something like that] and then build functors from categories representing smaller diagrams to categories representing larger diagrams.
+12:32:46 <bourbaki> esap hm maybe youre right
+12:33:57 <esap> bourbaki: You don't want to try to build a single category that would explain that all, I don't think it's possible. Think of Cat category after you've done those layers.
+12:34:33 <bourbaki> esap you are right in the way of splitting it to smaller diagrams
+12:34:47 <bourbaki> the idea was to enable you to glue these things together though
+12:34:56 <esap> bourbaki: what kind of glue?
+12:34:57 <bourbaki> to larger programs
+12:35:00 <Boegel> bourbaki, thx, I'll look into it
+12:35:03 <bourbaki> esap as in topology
+12:35:19 <Boegel> bourbaki, haven't looked into perlin noise yet
+12:35:28 <bourbaki> esap X + Y / ~ where ~ is a function that tells you which nodes are the same
+12:35:37 <Boegel> but I'm planning to do that after intersecting planes and using specular reflection
+12:35:51 <bourbaki> Boegel im really looking forward to this
+12:36:10 <bourbaki> X and Y are diagrams
+12:36:13 <esap> bourbaki: ok, but that's a bit different thing.
+12:36:33 <bourbaki> esap my idea is that diagrams are just graphs and have a topology
+12:37:03 <bourbaki> esap that way you can also crunsh subnetworks hence your limit to a single node
+12:37:14 <bourbaki> or a single arrow 
+12:38:23 <esap> bourbaki: the equivalence class stuff makes things somewhat more complicated.
+12:38:55 <Boegel> bourbaki, why ?
+12:39:07 <bourbaki> esap well why? it makes things easy imho cause you wont be able to plug programs together in specific places othewise
+12:39:15 <bourbaki> Boegel cause i think it will look really cool then
+12:39:17 <bik> I have a data Employee {blah::String, etc..) but I can't figure out how to compile a list of these. when I try to add it to the empty list ala []:record hugs doesn't like it
+12:40:29 <esap> bourbaki: well there are other ways of doing such things, but I guess you can do it with the equivalence classes approach as well.
+12:40:31 <xkb> bik, Employee "FirstName" "lastName"
+12:40:33 <Boegel> bourbaki, I can't find anything on intersection between ray and plane in magic-software.com ?
+12:40:34 <bourbaki> esap and the crunshing thing with the limit for that thing i plan that the original subgraph is somehow stored in a tuple or such
+12:41:00 <bourbaki> Boegel hm sec
+12:41:01 <Boegel> bourbaki, probably, but implementing the raytracer isn't the only thing I need to do
+12:41:04 <bik> xkb - I've gotten that far, but I can't figure out how to make a list of those records, ie employee1:employee2:xx
+12:41:21 <xkb> bik, let me try something :d
+12:41:44 <esap> bourbaki: you need to remember that whenever you have equivalence classes, you also add new reductions to the system, which makes it more complicated. But if you need that, then you should use it.
+12:41:54 <bourbaki> Boegel no but it gives things more strucutre that way :) you also could modify your normal with that when you make something like the perlin noise normal space
+12:42:40 <bourbaki> esap ? the idea is when you use the ~ then you just build a new diagram that contains both
+12:43:38 <esap> bourbaki: yes, but the ~ already causes you to need to identify the objects that you want to combine.
+12:44:12 <bourbaki> esap i see it as an extended version of contaternateing two automatons
+12:45:24 <bourbaki> esap i also want to implement quotient spaces on programs somehow (i guess the limit thing you pointed out the other day will help there as well)
+12:45:29 <esap> bourbaki: yes, I suppose it is. The reduction comes because to build the equivalence class, you basically need to have an algorithm for 'normalizing' each element of the equivalence class such that you can compare for equality.
+12:46:07 <bourbaki> esap ah ok as i said in this case im talking about graphs or the graphical view of the diagrams
+12:46:14 <esap> bourbaki: quotient spaces on programs? They're already implemented :-)
+12:46:38 <bourbaki> i do that also to build diagrams that behave like generators of other programs
+12:46:53 <esap> bourbaki: it's 'eval' function that implements the quotients...
+12:47:05 <bourbaki> esap heh :) i want to identify small common structures that way like loops and so
+12:48:18 <bourbaki> esap the idea behind that is that you can abstract more from the structure to look at what you really need thats what i refer to as zoom
+12:48:57 <Boegel> bourbaki, magic-software doesn't provide much help
+12:49:06 <esap> bourbaki: ok, I guess it's basically where I started with my huge compiler project. I wanted to implement the whole hierarchy of languages with different power.
+12:49:17 <Boegel> but there's probably something wrong with my normal orientation or something like that...
+12:49:19 <bourbaki> Boegel oh sorry i guess the site changed then :
+12:49:20 <bourbaki> (
+12:49:24 <Boegel> I'll find it, don't worry ;)
+12:49:42 <bourbaki> esap :)
+12:51:05 <bourbaki> esap i hope i will someday release what i do and more so i hope that someone will understand it but if the first thing applies ill point you to the download link :)
+12:51:28 <esap> hehe
+12:51:47 <bourbaki> im not too fond of finishing my study really
+12:52:03 <bourbaki> got too boreing i need something new
+12:53:35 <bourbaki> i get interested in biology :)
+12:53:50 <esap> finishing things is a good thing [like I was a good example of that, I've only made this same compiler for 5 years and it doesn't compile :-)
+12:54:12 <bourbaki> heh
+12:54:23 <bourbaki> yeah well its also just something like 2 courses i need
+12:54:32 <bourbaki> and 3 exams to finish
+12:54:59 <bourbaki> but its not thrilling anymore i need something new
+12:55:03 * esap did get my master's though before I was too deeply involved with this thing.
+12:55:25 <bourbaki> i dont have my bsc yet :)
+12:56:02 <esap> bourbaki: I got through the boring parts by taking at least two advanced courses every year I took one boring one.
+12:56:31 <bourbaki> i did 10 courses in the first semester :)
+12:56:39 <bourbaki> that is like 50% of the whole study ;)
+12:57:03 <bourbaki> throughout all semesters
+12:57:16 * esap did a lot as well on first three years, then the speed dropped quite dramatically.
+12:57:46 <bourbaki> yeah mine drops to 0 :) i want to do cool stuff like the thing i do for my thesis
+13:03:13 <bourbaki> i guess im gonna go for games again :)
+13:03:21 <esap> games?
+13:03:40 <bourbaki> yep im a former pro game progger
+13:03:58 <bourbaki> just quite becoase of some business shit that happened at my placs
+13:04:00 <bourbaki> *place
+13:04:08 <esap> I've been doing some 3d graphics work at one point.
+13:04:18 <bourbaki> ah nice 
+13:04:37 <bourbaki> i guess id rather like to do the game design now
+13:04:41 <bourbaki> and code where its needed
+13:04:56 <esap> Yea, business constraints are not very good for software companies
+13:05:21 <xkb> Why does Cons (:) not work for data Employee =Employee {string::name} etc
+13:05:39 <xkb> 	data Employee = Employee {name::String, lastname :: String}
+13:05:44 <esap> xkb: what do you mean it doesn't work?
+13:05:51 <xkb> it gives a type error
+13:06:03 <xkb> the Employee doesnt match [a]
+13:06:06 <xkb> in hugs
+13:06:14 <esap> xkb: try Employee ('c':'a':[]) ('x':'y':[])
+13:06:37 <esap> xkb: it does work.
+13:06:52 <xkb> ah that does
+13:06:57 <xkb> why does the other fail?
+13:07:07 * esap doesn't know which one fails.
+13:07:21 <xkb> esap,  [(Employee "blah" "blah")] : ( ( Employee "jip" "jan"))
+13:07:31 <xkb> hmm to much ()
+13:07:34 <musasabi> Is there a good abstraction for a circular buffer in haskell ?
+13:08:34 <esap> xkb: the second argument of ':' is a list, not the first one.
+13:09:12 <xkb> hmm need a smaller resolution ;-)
+13:10:18 <xkb> esap, thanks
+13:10:21 <esap> musasabi: maybe state monad is close, you need to add some operations
+13:11:03 <esap> musasabi: I mean Control.Monad.State
+13:11:30 <musasabi> hmm could that live inside a datastructure?
+13:12:00 <Lemmih> @seen shapr
+13:12:00 <lambdabot> shapr is in #darcs, #webwitches and #haskell.se.
+13:12:04 <esap> musasabi: sure why not?
+13:12:31 <bourbaki> esap maybe i should change to the dark side :) the management that is ;)
+13:12:43 <musasabi> I'll try to implement that.
+13:14:05 <esap> bourbaki: heh, well I guess the only difference between management and 'real' work is that management handles people, not software.
+13:14:54 <bourbaki> esap dang :) and a bit of money i guess also ;)
+13:16:12 <esap> bourbaki: well ok, but that could be thought of managing people :-)
+13:16:30 <bourbaki> im quite good at manageing ppl
+13:16:41 * esap is not at all good at managing people.
+13:22:32 * Oejet_ is very good at yelling at people.
+13:22:39 <bik> my god this is frustrating. 
+13:23:20 <bik> is it typical to want to tear your hair out when learning this language? the simplest things seem so opaque
+13:23:47 <Lor> What are you using? Hugs, ghc or helium?
+13:23:51 <bik> hugs
+13:25:06 <Lor> The error reports can admittedly be quite confusing.,
+13:27:21 <esap> bik: It seems hard at the beginning, because Haskell does tell you about almost every problem your program has. And it comes as a surprise to many people that their code has so many problems :-) But once the basic understanding is there, it'll be much easier.
+13:27:21 <bik> it's very humbling
+13:28:52 <Lor> bik, are you giving type annotations to your functions?
+13:28:53 <esap> bik: And also, the model of programming is somewhat different than in conventional programming languages, which might cause additional confusion, if you need to learn a new paradigm as well.
+13:30:26 <esap> bik: But every minute you spend with it is worth the trouble.
+13:30:56 * esap changed my whole style of programming [even when I code with C++] when I learned Haskell.
+13:31:18 <CosmicRay> bik: try http://www.isi.edu/~hdaume/htut/
+13:31:29 <CosmicRay> bik: if you are new to FP, there's also something at ibm developerworks.
+13:31:31 <CosmicRay> also.
+13:31:31 <CosmicRay> ask us.
+13:31:36 <CosmicRay> if you have any questions, ask.
+13:33:20 <bik> I appreciate all the help
+13:34:37 <CosmicRay> bik: also there is a wiki at www.haskell.org/hawiki
+13:34:42 <CosmicRay> example code often can help
+13:37:22 <bik> :r
+13:37:24 <bik> whoops
+13:37:45 <Jan_w> is it "Both I and a fellow student " or Both me and a fellow student" ?
+13:38:06 <CosmicRay> A fellow student and I
+13:38:11 <Jan_w> i thought the latter
+13:38:21 <CosmicRay> you are supposed to put yourself last
+13:38:23 <Jan_w> but word's spelling says otherwise :)
+13:38:29 <Jan_w> ok
+13:38:42 <Matt-W> Word is frequently wrong
+13:38:56 <Jan_w> i know, thats why i ask
+13:38:57 <Jan_w>  :)
+13:39:11 <Jan_w> why is "A fellow student and me" wrong ?
+13:39:18 <Jan_w> or is "I" just better ?
+13:39:21 <Matt-W> because it's 'a fellow student and I'
+13:39:32 <Matt-W> I can't explain it exactly, but it's to do with cases
+13:39:42 <CosmicRay> jan_w: well, I should qualify that...  Both of these are correct: "A fellow student and I went down to the bar last night."  "The bartender removed a fellow student and me from the premises."
+13:39:43 <Jan_w> Matt-W: is there a rule for that?.. ok you can't explain
+13:39:46 <Matt-W> I never learned English grammar properly
+13:39:48 <bik> you should be able to remove the "a fellow student and" and still have it grammatically correct
+13:40:19 <CosmicRay> "I" if it's the subject of the sentence, "me" if it's the predicate -- just as if you had a singular.
+13:40:20 <Jan_w> bik: ok 
+13:41:12 * Matt-W got a book on category theory today
+13:41:26 <esap> matt: which one?
+13:41:53 <CosmicRay> Jan_w: does that make sense?
+13:41:58 <Matt-W> the foundations of computing one, by Pierce
+13:42:13 <CosmicRay> Jan_w: oh, and btw, the first rule of English grammar is that all rules of English grammar have many exceptions :-)
+13:42:14 <Jan_w> CosmicRay: yep, thanks!
+13:42:52 <CosmicRay> english is sort of the perl of the world.  a little bit of everything. :-)
+13:42:53 <Jan_w> CosmicRay: hehe, that's where dutch is different, many rules, but fewer exceptions :)
+13:43:08 <stef_> that would be too simple, that whould read "most rules" :)
+13:43:12 <CosmicRay> I suspect that is similar to German, which I know a bit of
+13:44:03 <stef_> s/whould/should/
+13:44:41 <Matt-W> stef_: or just realise that the first rule means that there are also exceptions to the first rule
+13:45:02 <stef_> :)
+13:45:08 <Etaoin> I think the rule is that if you are the object of the verb, use "me" and if you're the subject use "I"
+13:45:32 <Matt-W> I am going to go and read about category theory
+13:45:42 <Matt-W> this is probably unwise as I'm not really awake, but I'll try anyway
+13:45:51 <Matt-W> [gone]
+13:46:26 <CosmicRay> heh
+13:48:22 <CosmicRay> so bik, what are you having trouble with in haskell?
+13:48:42 <bik> at the moment it's all IO monad stuff
+13:48:47 <CosmicRay> yeah
+13:48:53 <CosmicRay> ok here's the quick version
+13:48:57 <CosmicRay> 1. put IO stuff in a do block
+13:49:09 <CosmicRay> 2. you must read using the x <- getChar type syntax
+13:49:28 <CosmicRay> 3. use "return foo" if you're returning a plain value out of a do block
+13:49:41 <CosmicRay> 4. once you've got that, you can move on to the more advanced stuff
+13:52:30 <bik> I keep getting type errors, that are basically IO [blah] does not equal [blah]
+13:52:41 <CosmicRay> can you give an example?
+13:53:06 <CosmicRay> that probably means, btw, that you are forgetting to use <- to get stuff "out" of the IO
+13:53:46 <bik> so anything inside do is io
+13:54:08 <CosmicRay> every statement inside the do returns something of an IO type
+13:54:13 <CosmicRay> the do itself returns something of an IO type
+13:54:45 <CosmicRay> the x <- getChar type of thing is how you get the value "out" of the IO
+13:55:06 <bik> right. I think I'm not designing these functions with the right things in mind
+13:56:49 <bik> and consequently trying to do too much inside of do blocks
+13:58:33 <CosmicRay> yup, the do blocks should basically just send bits of data between the outside world and the non-IO haskell functions
+14:00:19 <waltz> Note: There are no spaces between (a) punctation mark(s) and a word (e.g. string ? <- Incorrect. Correct -> string?).
+14:00:54 <CosmicRay> waltz: you're talking about English here?   If so, that's correct.
+14:01:15 <waltz> Quite frankly I don't see why peopel do that !
+14:01:29 <waltz> Does it not look awkward ?
+14:01:36 <CosmicRay> waltz: the usual rule is two spaces after the end of a sentence (period, question mark, or exclamation mark), though one space works too.
+14:01:38 <bik> so a return in a do block, just returns that item to the outside of the do block?
+14:01:39 <CosmicRay> waltz: it does.
+14:01:53 <waltz> :)
+14:01:59 <CosmicRay> bik: yes.  What "return" does is boxes something up inside an IO.
+14:02:08 <CosmicRay> so "return 5" will return IO 5
+14:02:19 <CosmicRay> so you don't always have to do that.
+14:02:40 <CosmicRay> for instance, if the last thing in your do statement is getChar, and that's what you want to do, you can just say "getChar" instead of "x <- getChar; return x"
+14:02:50 <CosmicRay> since getChar itself returns an IO Char
+14:03:26 <CosmicRay> you have to use return fairly regularly since a do block has to return an IO (something)
+14:06:41 <Boegel> hello mitchkov ! :)
+14:06:53 <mitchkov> yo Boegel
+14:07:03 <Boegel> does somebody besides shapr know how to give a proper tour to mitchkov ?
+14:07:46 <Boegel> CosmicRay ? desrt ? kosmikus ?
+14:07:51 <Boegel> Lemmih ?
+14:08:18 <Boegel> anyway, mitchkov, I believe you have a question for #haskell :)
+14:09:33 <mitchkov> i want to create a list, taking all elements out of a DAT-file, but no idea how to do that and how to use that list as a 'local variable' 
+14:10:25 <Boegel> help the guy ! (cause I don't know either)
+14:10:51 <Boegel> maybe he could use a constant function or so ? that gives the list back every time he needs it ?
+14:12:12 <Lemmih> mitchkov: DAT-file?
+14:12:50 <mitchkov> uhu a data file with extention DAT
+14:13:03 <Boegel> but what is in that DAT file ?
+14:13:15 <Boegel> bytecode ? text ?
+14:13:28 <Lemmih> 'readFile path >>= return . read' will read a file and parse it to a desired format.
+14:14:08 <Boegel> Lemmih, what does >>= do ? I don't know that syntax
+14:14:52 <Lemmih> It's the same as: do input <- readFile path; return (read input)
+14:16:15 <Boegel> some kind of pipe then Lemmih ?
+14:16:22 <Lemmih> It's called 'bind' and is a function in the Monad class.
+14:18:50 * CosmicRay looks back in
+14:22:22 <Boegel> Lemmih, how can he read in that file, and then use the list he gets over different functions ?
+14:22:36 <Boegel> without forcing it to read from the file every time
+14:23:18 <Lemmih> 'readFile path >>= return . map fn . read'
+14:25:00 <Boegel> yeah sure, that will work for one function, right ?
+14:25:35 <Boegel> but what if he needs that list (and not the elements of it) in different functions...
+14:26:17 <Etaoin> you'd have to pass it as an argument to the functions I think
+14:26:47 <Boegel> but then it won't read from the file again ?
+14:26:54 <Lemmih> I can't remember if there's function like that in the Prelude.
+14:33:27 <CosmicRay> you have to use IO as a driver in Haskell
+14:33:28 <CosmicRay> do
+14:33:36 <CosmicRay> x <- readFile path
+14:33:42 <CosmicRay> func1 (x)
+14:33:46 <CosmicRay> func2 (x)
+14:33:50 <CosmicRay> like that.
+14:33:56 <CosmicRay> or make func1 call func2 as appropriate
+14:43:51 <shapr> I'm back for short moments of distraction.
+14:44:01 <shapr> hoi mitchkov 
+14:45:21 <shapr> I have a Template Haskell question, what's the current name of rType?
+14:46:17 <shapr> or, can I still get a THSyntax from a type?
+14:50:15 <stepcut> shapr: no idea
+14:50:47 <shapr> stepcut: I found this - http://www.haskell.org/pipermail/template-haskell/2003-September/000172.html
+14:51:19 <shapr> and I realized that a THSyntax description of a type is as good as the real thing, and that might be an easy way to implement mobile types.
+14:52:15 <stepcut> hrm
+14:52:24 <shapr> musasabi: around?
+14:52:31 <bik> ok, I think I know why this doesn't work, but I can't visualize how to fix it: 
+14:52:36 <bik> printDB (x:xs) = 
+14:52:39 <bik>    do putStrLn ("number:  " ++ show (number x))
+14:52:45 <bik>       printDB xs
+14:54:27 <shapr> stepcut: does that look like a sane implementation of mobile types?
+14:55:07 <stepcut> stepcut: how is that more useful than typeOf  ?
+14:56:29 * shapr looks at typeOf
+14:56:29 * stepcut is talking to himself apparently
+14:56:33 <shapr> :-)
+14:57:24 <stepcut> the problem is, you can go from a -> Type, but you can only go from Type -> a, if you can figure out the type of a at compile time
+14:57:54 <shapr> that's okay, I can fake it with hs-plugins
+14:58:10 <stepcut> hrm
+14:58:11 <shapr> I was just stuck on trying to pull a 'real' typeRep out of the type-table.
+14:59:22 <stepcut> you want some sort of incremental compiler ?
+14:59:30 * shapr considers that
+14:59:35 <shapr> that's a really cool idea.
+14:59:51 <shapr> no, I just want to distribute part of a computation to another RTS
+15:00:36 <shapr> but I admit, your idea is really spiffy.
+15:00:41 <stepcut> :p
+15:01:09 <shapr> especially since I've been looking at Duncan Coutts' Partial Evaluation with Template Haskell lately.
+15:01:14 <stepcut> You can distribute part of the computation to another RTS, if both sides know about the data types in advance
+15:01:34 <shapr> and if they don't know about the data types in advance
+15:02:06 <shapr> can I pull out a Type, send it to the other RTS, and bootstrap that with hs-plugins?
+15:02:07 <peti> Hey!
+15:02:10 * peti has good news.
+15:02:12 <shapr> guten abend peti 
+15:02:17 <shapr> what's the news?
+15:02:23 <peti> shapr: telnet peti.cryp.to smtp
+15:02:41 <shapr> my ISP blocks port outgoing port 25 
+15:02:57 <peti> shapr: Shall I run a copy on a higher port for you? :-)
+15:03:02 <stepcut> then, you could send the type via the 'Type', but then you would have to work with it at that level. Using generics or something. Or perhaps dynamically generate a new module that knows about the new type, compile it, and load it (via hs-plugins)
+15:03:20 <shapr> stepcut: but it would work, right?
+15:03:28 <peti> shapr: My point is, the MTA is up and running. It's losing e-mails left and right as we chat -- and it's written in Haskell. Yay.
+15:03:36 <shapr> losing e-mails?
+15:03:40 <stepcut> shapr: it might ...
+15:03:41 <peti> Just kidding.
+15:03:43 <shapr> whew
+15:03:46 <peti> It's refusing spam, actually.
+15:03:49 <shapr> oh cool!
+15:03:51 <peti> And quite a lot!
+15:03:59 <shapr> yes, I get a lot of spam too.
+15:04:03 <stepcut> shapr: what useful things could you do to a data-type that you have never seen before ?
+15:04:16 <shapr> stepcut: whatever the other RTS asks me to?
+15:04:42 <stepcut> stepcut: but how would it ask ? Would the remote RTS also send functions ?
+15:04:56 * shapr thinks about that
+15:05:15 <stepcut> stepcut: or would it just say, map this function you already have, over this data type you have never seen before ?
+15:06:07 <shapr> I don't know
+15:06:47 <shapr> peti: no help command =)
+15:07:10 <peti> shapr: That's not right. Help is mandatory, of course there is a help command. *grin*
+15:07:16 <shapr> no VRFY
+15:07:26 <shapr> that's smart :-)
+15:07:54 <stepcut> The generics stuff let's you right functions, like map, fold, show, read, etc, for data types that you have never seen before. It might be possible build on top of that system so that the central RTS could decompose a data structure into a DataType, send it to a remote RTS, which calls from generic functions and returns the modified DataType, and then the central RTS recomposes the DataType back into the original type
+15:08:19 <peti> shapr: I see you gave up. :-)
+15:08:29 <shapr> I'm still talking to it...
+15:08:53 <peti> Looks like I'll have to give you a short reminder of SMTP syntax. :-)
+15:08:59 <shapr> yes, my brain is fried
+15:09:23 <peti> mail from:<...>, rcpt to:<...>, data --  _no_ space after the colon
+15:10:07 <peti> It's already rejected dozens of spam mails just because it doesn't make _any_ compromise with the syntax. It's quite obvious: The spammers mail tools are full of bugs. 
+15:10:14 <shapr> yup
+15:10:42 <peti> This is what it looks like here: 
+15:10:52 <peti> Hmm, did that paste work?
+15:10:56 <shapr> no?
+15:11:02 <peti> Oct 26 00:11:44 peti postmaster[9729]: SID 15: Input "mail from: shae\r\n"
+15:11:02 <peti> Oct 26 00:11:44 peti postmaster[9729]: SID 15: EventHandler (SyntaxErrorIn "MAIL") [] 501
+15:11:10 <shapr> heh
+15:12:11 <peti> Now all that's missing is some documentation how to install it, and then it can be used.
+15:12:32 <peti> If you have sendmail (or some other MTA) installed and configured, you can also relay, etc.
+15:12:44 <peti> I need a spooler before I dare to deliver myself, too.
+15:12:58 <shapr> spooler?
+15:13:06 <shapr> oh
+15:13:16 <peti> I don't want to tell the peer "I got it", and then I crash before I can deliver it.
+15:13:30 * peti just realizes he's talking about the MTA as I.
+15:13:37 <peti> See how much this program means to me. :-)
+15:13:42 <shapr> heh :-)
+15:13:45 <peti> It's my first real Haskell program, actually!
+15:13:55 <shapr> hsemail seems quite real to me.
+15:13:59 <shapr> I've used it a lot.
+15:14:07 <peti> Well ... that's a library, not a real application. 
+15:14:16 <shapr> spam filter, mailing list search webapp, etc
+15:14:43 <peti> You are really using that? Amazing. I didn't think it the parsers would work. :-)
+15:15:14 <peti> Anyway ... if you want to run postmaster for your site, then you can. 
+15:15:15 <shapr> it's quite picky, but it works
+15:15:28 <shapr> I'll start running it on my desktop first
+15:15:57 <peti> Sure. If you accept mail only locally, you don't need anything else. The only thing it can't do right now is deliver outbound via SMTP.
+15:16:12 <stepcut> shapr: in any case, I am writing a short paper about my serialize/deserialize code, in which I try to explain the problems you will run into trying to do serialize/deserialize code
+15:16:27 <shapr> stepcut: prelim version online? something I can read?
+15:16:59 <Boegel> new images: http://studwww.ugent.be/~kehoste/thesisPublic/website
+15:17:33 <stepcut> shapr: not yet, I only have two paragraphs. It's very hard to write about :)
+15:17:58 <stepcut> shapr: the crux of the problem is very simple though
+15:18:01 <shapr> one thing that helps me write is to chat about it with others
+15:18:18 <shapr> if it's on irc, I can refactor the logs into useful text.
+15:19:06 <stepcut> imagine you have a function, serialize :: a -> (String,String)
+15:19:42 <shapr> Boegel: nice improvements, when do I get a better rendered pokemon? =)
+15:19:48 <stepcut> the tuple is (the type, the value)
+15:20:04 <Boegel> shapr, when my shadows work properly :p
+15:20:20 <Boegel> no tour for mitchkov :s
+15:20:27 <stepcut> now, you also want a deserialize :: (String, String) -> a
+15:20:31 <Boegel> I guess he's too busy with the girls :p
+15:20:38 <Boegel> (he's a friend of me from school)
+15:20:42 <shapr> bourbaki: sorry, I'm tired today :-)
+15:21:01 <stepcut> so, you might call, deserialize ("Int","1"), and hope to get back a value (1 :: Int)
+15:21:20 <Boegel> bourbaki, what's the name of that nifty texture function ?
+15:21:28 * Boegel forgot :s
+15:22:02 * Boegel remembers again : perlin noise !
+15:22:43 <stepcut> shapr: that works fine, if you use deserialize someplace that expects and integer
+15:22:55 <stepcut> like: 1 + (deserialize("Int","1"))
+15:23:32 <stepcut> shapr: but, i that case, you don't even need the ("Int",_) part, because the context mandates that "1" must deserialize to a Int
+15:23:58 <stepcut> shapr: but what you really want to do is maybe something like: print $ deserialize ("Int","1")
+15:25:00 <stepcut> shapr: but in that context, the type checker can not figure out what the return type of deserialize is at compile time, so it can not figure out which instance of show to use, so it throws an error
+15:25:06 <peti> stepcut: What do you need the type parameter for to begin with? Can't I just say (deserialize(a) :: Int) and that's it?
+15:25:36 <shapr> Ã“la marcot, how can we assist you?
+15:25:50 <marcot> shapr: hello, here people are very nice.
+15:25:59 <shapr> We try :-)
+15:26:16 <stepcut> peti: only if you know it will be an int ahead of time. What if it could be an Int, Float, or Char ?
+15:26:16 <marcot> shapr: I'm here just to read the users doubts and maybe learn with some of them.
+15:26:45 <marcot> shapr: I'm a newbie at Haskell, I'm studing it with the Simon Thompson's book.
+15:26:56 <shapr> marcot: that's a good book.
+15:26:58 <peti> stepcut: So you want the user to be able to deserialize a type about which he has no idea what it is?
+15:27:26 <marcot> shapr: have you ever read it? What about the Introdution to Funcional Programming using Haskell ? (I forgot the author)
+15:27:41 <shapr> Yes, I learned Haskell from Simon Thompson's book.
+15:28:01 <stepcut> peti: no, I was about to get to this. It would be nice to have a deserialize type class, and you can attempt to deserialize values for which you have class instances
+15:28:15 <stepcut> deserialize :: (String, String) -> Maybe a
+15:28:34 <peti> And 'a' would be, say, (Show a)?
+15:28:47 <stepcut> peti: could be
+15:28:51 <marcot> shapr: do you know this other one?
+15:28:52 <peti> I see. 
+15:29:00 <peti> That would indeed be very nice.
+15:29:03 <stepcut> peti: more likely Read a
+15:29:07 <shapr> marcot: which other one?
+15:29:08 <Boegel> I'm out, taking a nap
+15:29:12 <Boegel> bye everyone !
+15:29:16 <shapr> g'night Boegel!
+15:29:29 <marcot> shammah:  Introdution to Funcional Programming using Haskell
+15:29:38 <stepcut> peti: lets say you had this: deserialize :: (Read a, Show a) => (String, String) -> a
+15:29:48 <shapr> marcot: who is the author?
+15:29:51 <stepcut> (and it throughs an exception if deserialization fails)
+15:30:07 <shapr> peti: hey, you going to announce postmaster 0.1 ?
+15:30:08 <stepcut> then you could do: print $ deserialize ("Int","1") 
+15:30:30 <marcot> Bird Wadler
+15:30:39 <stepcut> peti: only, you can't, because the compiler still wants to know at compile-time which instance of show will be used
+15:30:44 <shapr> oh, I've heard about that book, but I haven't read it.
+15:30:58 <shapr> I did meet both Bird and Wadler last year :-)
+15:31:04 <peti> shapr: Do you think it makes sense to announce it without _any_ docs? I'd love to announce it so that people can contribute code, but I wonder whether I'd rather wait until there's more substance than just the sources. Or not?
+15:31:06 <shapr> They seem *very* smart.
+15:31:17 <stepcut> so even though deserialize can only returns values for which there are instances of (Show a), the compiler will still complain...
+15:31:26 <shapr> peti: release early and often :-)
+15:31:41 <Philippa> peti: I released Flippi sans docs - though usually I can explain enough to folks in a paragraph that they don't need docs...
+15:31:50 <Philippa> it's not exactly a big codebase atm
+15:31:55 <peti> stepcut: I'm wondering: What would you need 'read' for? The type is stored as a String, or not?  Then I can 'read' it to begin with, I don't need deserialize?
+15:32:16 <peti> shapr: You convinced me. :-)
+15:32:32 <marcot> shapr: =) Nice... I'll read it when I finish the Thompson's one.
+15:32:58 <marcot> shapr: I'm working with a girl that is writing her thesis, so she is paying me to learn Haskell and them help her.
+15:33:04 <shapr> marcot: wow cool!
+15:33:09 <shapr> marcot: what's the thesis about?
+15:33:21 <marcot> shapr: And I'm really linking functional programming. It's about geoprocessing.
+15:33:53 <shapr> oh, cool
+15:34:13 <stepcut> peti: in general you don't need read, that deserialize example used read/show for turning a value into a string and back. The advantage of deserialize over read is that read needs to know which type it is reading ahead of time, whereas deserialize does not need to know, because the type is encoded along side the value
+15:34:15 <monochrom> Can I get paid for writing her thesis?
+15:34:36 <stepcut> peti: but, it turns out, you can't actually do that, because you can not statically type check it
+15:34:38 <peti> stepcut: I see. 
+15:35:16 <peti> stepcut: Could you use Data.Generics.cast on the type you've obtained from deserialize?
+15:35:45 <shapr> whoa, one of my paying clients actually wants to try out curryspondence...
+15:36:07 <Philippa> cool
+15:36:32 <shapr> they're using ezmlm, and converting to mailman.
+15:36:55 <peti> shapr: What is "curryspondence"?
+15:36:56 <stepcut> peti: i don't think so
+15:37:09 <shapr> peti: it's the mailing list search webapp I wrote with your library =)
+15:37:13 <stepcut> peti: cast is just: cast :: a -> b, right ?
+15:37:17 <peti> shapr: Oh. Cool. :-)
+15:37:21 <peti> stepcut: a -> Maybe b
+15:37:29 <shapr> it's just hsemail + haskelldb + wash
+15:38:00 <shapr> and it was only a few hours of hacking
+15:38:44 <peti> shapr: That's good to know. I'll need something like that in a few weeks. 
+15:38:54 <shapr> boy, I better clean it up =)
+15:39:04 <shapr> it still has a few big bugs
+15:39:12 <peti> shapr: So has hsemail. :-)
+15:39:48 <Philippa> heh
+15:39:49 <stepcut> peti: i think using cast means that you know the type at compile time, so you might as well just use read
+15:40:19 <peti> stepcut: No, cast works on any Typeable data type. You don't need to know what it is.
+15:40:39 * peti has used that to write a generic but type-save environment a la Unix env vars.
+15:41:37 <peti> stepcut: Ah, found it .... the signature is: "cast :: (Typeable a, Typeable b) => a -> Maybe b"
+15:42:47 <shapr> @index cast
+15:42:47 <lambdabot> Data.Dynamic,Data.Generics,Data.Generics.Basics,Data.Typeable
+15:42:53 <peti> Equally useful is 'typeOf', which gives you the name of a type at runtime.
+15:42:57 <shapr> @type Data.Typeable.cast
+15:42:58 <lambdabot> Data.Typeable.cast :: forall b a.
+15:42:58 <lambdabot> 		      (Data.Typeable.Typeable b, Data.Typeable.Typeable a) =>
+15:42:58 <lambdabot> 		      a -> Maybe b
+15:43:09 <peti> Incredible. :-)
+15:43:32 <peti> @type URL
+15:43:33 <lambdabot> bzzt
+15:43:36 <peti> hehe
+15:43:51 <shapr> @index URL
+15:43:51 <lambdabot> Text.Html
+15:43:56 <shapr> @type Text.Html.URL
+15:43:57 <lambdabot> bzzt
+15:44:00 <shapr> ??
+15:44:07 <shapr> umm
+15:44:12 <peti> @type URL -package network 
+15:44:13 <peti> :-)
+15:44:13 <lambdabot> bzzt
+15:44:18 <shapr> ohh
+15:44:29 <shapr> it doesn't have any -package statements in the invocation
+15:44:35 <peti> I thought so. :-)
+15:44:50 <peti> shapr: Did you write that thing?
+15:45:17 <shapr> nah, Pseudonym wrote lambdabot. I've written some plugins for lambdabot, and I'm hosting it too.
+15:45:26 <shapr> @listmodules
+15:45:26 <lambdabot> I have the following modules installed: ["base","cmafihe","dict","dummy
+15:45:26 <lambdabot> ,"dynamic","eval","hello","karma","quote","seen","state","system","topic
+15:45:26 <lambdabot> ,"type"]
+15:45:42 * peti thinks lambdabot is rather cool.
+15:46:18 <shapr> let's see if the dynloading works...
+15:46:25 <shapr> @dynamic-reload type
+15:46:25 <lambdabot> module reloaded
+15:46:33 <shapr> @type URL
+15:46:34 <lambdabot> bzzt
+15:46:37 <shapr> umm
+15:46:47 <shapr> @type Network.URL
+15:46:48 <lambdabot> bzzt
+15:46:52 <peti> shapr: Can I DCC arbitrary Haskell modules to it and it will execute them? *grin*
+15:46:56 <shapr> heh, no!
+15:47:04 <shapr> there is a full ghci plugin
+15:47:09 <shapr> but it's way too scary
+15:47:21 <shapr> all of the access control experiments failed
+15:47:43 <shapr> first there was the one that checked for IO in the type sig, and refused that
+15:48:09 <shapr> you could get around that about six different ways
+15:48:12 <shapr> expQ in template haskell
+15:48:19 <shapr> unsafeCoerce
+15:48:23 <shapr> um, that's all I can think of...
+15:48:26 <peti> shapr: unsafePerformIO will bite you there. And if someone wrote the .so file in C, manually, then all doors would be open anyway.
+15:48:45 <shapr> unsafePerformIO was manually disallowed
+15:48:57 <peti> Ah, it compiled the source itself?
+15:48:59 <shapr> on the good side, lambdabot has a nice lambda calculus interpreter
+15:49:12 <shapr> @eval map (\x -> x + 1) [1,2,3,4]
+15:49:12 <lambdabot> [2, 3, 4, 5]
+15:49:18 <peti> Very nice.
+15:49:37 <shapr> I've only written small bits and pieces
+15:49:51 <shapr> pesco wrote TypeModule
+15:50:05 <shapr> Riastradh wrote KarmaModule
+15:50:07 <shapr> it's all in the docs...
+15:50:12 <peti> shapr: What would happen if I said "iterate (+1) 0"?
+15:50:24 <kristnjov> @eval iterate (+1) 0
+15:50:25 <lambdabot> (line 1, column 10):
+15:50:25 <lambdabot> unexpected "+"
+15:50:25 <lambdabot> expecting simple term
+15:50:37 <shapr> you could try @eval (\x -> x x) (\x -> x x)
+15:50:39 <peti> @eval cycle 1
+15:50:39 <lambdabot> type error
+15:50:47 <peti> @eval cycle [1]
+15:50:52 <peti> Got it.
+15:51:02 <lambdabot> out of fuel - use @resume to continue
+15:51:25 <peti> Hmm.
+15:51:28 <shapr> :-)
+15:52:19 <shapr> btw, there are a few security flaws in lambdabot that I've discovered.
+15:52:25 <stepcut> !
+15:52:34 <shapr> But I leave them open until someone actually finds them ;-)
+15:52:38 <stepcut> haha
+15:52:56 <shapr> the whole point of lambdabot is to be a code-toy for learning Haskell.
+15:53:06 <shapr> write a plugin, patch a hole, or whatever.
+15:53:24 <stepcut> add a hole
+15:53:27 <shapr> heh
+15:53:30 <kristnjov> @eval quit
+15:53:30 <lambdabot> unbound variable: quit
+15:53:32 <kristnjov> hehe
+15:53:34 <peti> Get k-lined ... :-)
+15:53:49 <peti> @eval error "bye"
+15:53:49 <lambdabot> unbound variable: error
+15:54:06 <kristnjov> @eval return 1
+15:54:06 <lambdabot> <<EM Dynamic -> EM Dynamic>>
+15:54:14 <kristnjov> is that a security flaw?
+15:54:21 <shapr> I encourage people to look through the sources and find the holes.
+15:54:32 <peti> @eval runInteractiveProcess "/bin/sh" [] Nothing Nothing Nothing
+15:54:34 <lambdabot> unbound variable: runInteractiveProcess
+15:54:36 <kristnjov> so it's open source eh?
+15:54:39 <shapr> yup
+15:54:50 <kristnjov> what language?
+15:55:06 <shapr> Haskell!
+15:55:17 <kristnjov> lambdabot is written in haskell you say?
+15:55:18 <emu> assembly!
+15:55:31 <emu> COBOL!
+15:55:32 <shapr> well, it is the #haskell channel...
+15:55:34 <kristnjov> asm coding an irc bot would be fun
+15:55:44 <emu> kristnjov: the sort of fun that a C++ programmer enjoys, i guess
+15:56:19 <peti> emu: Don't remind me. I've wasted years of my life coding in C++.
+15:56:49 <shapr> At the moment, I'd go for Haskell + C--
+15:56:52 <emu> I realized that C++ was retarded about 4 1/2 years ago... I almost stopped programming entirely
+15:57:32 <peti> shapr: Is C-- any good? Isn't that a Microsoft language? Or was that C#?
+15:57:36 <emu> that's C#
+15:57:43 <emu> C-- is supposed to be a compiler target language
+15:57:45 <shapr> C-- is a Simon Peyton-Jones project.
+15:58:01 <shapr> http://www.cminusminus.org/
+15:58:04 <emu> rather than using C
+15:58:25 <shapr> 'portable assembly'
+15:58:47 <emu> except that it also does register allocation, i believe
+15:58:51 <emu> and memory too?
+16:00:17 <peti> Hmmm, looks like a language for compiler writers, not for end users?
+16:00:26 <shapr> right!
+16:00:47 <emu> it's one answer to the Universal IR problem
+16:01:06 <peti> The first thing I heard about purely functional languages was that they are used by people who write compilers for other functional languages. :-) Curiously enough, there is a lot of truth in that statement. 
+16:02:07 <shapr> I sure do like FP.
+16:02:45 <peti> shapr: So do I! But it's interesting how you have more Haskell compilers and language variants than _applications_.
+16:02:52 <shapr> I think writing a new mini-language is one good solution to a task. And that solution is easier with FP.
+16:03:23 <shapr> GHC is Haskell from what I can see.
+16:03:38 <shapr> But I'm sure I'll use nhc and Hugs when I get a linux phone.
+16:04:17 * Jan_w has been using Haskell for some months now, I've solved more complex problems then I've ever seen being solved by computers in practice, thats nice, but I can't really imagine I would ever need Haskell for any of my clients.. their problems just aren't that complex :)
+16:04:51 <Philippa> Jan_w: that and the libs for doing boring everyday stuff just aren't that great yet
+16:04:54 <Jan_w> What would be practical situation where Haskell (or FP in general) would be of use
+16:05:01 <Philippa> otherwise you'd "need" it just to get it done quick
+16:05:02 <peti> shapr: nhc is supposed to make binaries which need fewer system resources than ghc, righc?
+16:05:26 <Philippa> variants on parse/frig/prettyprint are good - CGIs may or may not be a good example
+16:05:50 <Philippa> from what little I know nhc's supposed to optimise on space, yeah
+16:05:54 * peti has written CGIs in Haskell. And got paid for it, too. I thought it was much easier than doing it in C++.
+16:05:57 <shapr> peti: yes, but the binaries are slower.
+16:06:57 <Philippa> well yeah, CGIs in C++ = torture
+16:06:57 <Jan_w> It's just that most applications seem more like interfaces to databases to store information, and calculations are mostly basic * and / :)
+16:07:10 <shapr> I got paid to convert 45mb of ms.doc files into a custom XML flavor. I used HXmlToolbox to do it in three days.
+16:07:20 <Philippa> Jan_w: there you can use Haskell as an aid to knowing you've got it right - static typing and all that
+16:07:26 <Philippa> plus it's easy to build complicated queries and the likes
+16:07:28 <peti> What baffles me is how GHC and friends come with mind-boggingly complex type systems, higher-order functions, existentially qualified data types ... but manage to have a completely broken I/O library. That's just weird. The esotheric stuff is fantastic, but the simple library functions, which C got right decades ago, are broken. How is that possible?
+16:07:47 <Philippa> because not enough people use those
+16:07:49 <Philippa> which is a shame
+16:07:54 <shapr> but we can change that.
+16:08:01 <Philippa> thing is, all the people who really /needed/ it will've just FFIed in the C funcs
+16:08:05 <shapr> peti: on the other, you can't fix C's type system =)
+16:08:40 <peti> Don't get me wrong, I'm not complaining. Haskell is great. 
+16:08:46 <Philippa> C's type system is great for what it is
+16:08:58 <Philippa> ie enough that it knows which actual operations you want it to perform and useless beyond that
+16:09:11 <shapr> Haskell was designed to be a research language, easy to change because your users are researchers too.
+16:09:18 <peti> But while writing the MTA I noticed that it's still a _long_ road until it may be used commercially.
+16:09:23 * Philippa nods
+16:09:40 <Philippa> gimme IO and a good GUI lib. Any more wishlist beyond that?
+16:09:51 <shapr> break IO into bits
+16:10:08 <shapr> it does too much
+16:10:26 <peti> Philippa: a real network library. 
+16:10:34 <shapr> Actually, I could come up with a huge list of things to fix in Haskell. It's still my favorite language.
+16:10:52 <shapr> I do want better network libs.
+16:11:01 <shapr> peti: seen Fudget's InternetLib?
+16:11:14 <shapr> I think that has potential.
+16:11:20 <peti> shapr: Does it work with GHC 6? I thought it was only for the older versions?
+16:11:36 <shapr> g'day Pseudonym 
+16:11:41 <Pseudonym> G'day.
+16:11:51 <shapr> peti: I think it might require Fudgets, but I'm pretty sure it works with ghc6
+16:11:52 <Pseudonym> I think it's past my bedtime.
+16:11:57 <shapr> mine too.
+16:12:05 <bik> I think I need to put this program down
+16:12:12 <peti> shapr: Do you have an URL?
+16:12:18 <shapr> bik: put the code down and come out with your hands up!
+16:12:27 <shapr> The SyntaxPolice have you surrounded!
+16:12:31 * peti read the Fudgets dissertation some time ago, but that didn't sound as if the code was really mature. 
+16:12:33 <Pseudonym> I've got an arrow here and I'm not afraid to use it!
+16:12:39 <shapr> peti: http://www.cse.ogi.edu/~hallgren/untested/
+16:12:43 <shapr> Pseudonym: oh really?
+16:12:47 <Pseudonym> peti: It wasn't at the time the dissertation was written.
+16:12:54 <shapr> but that was 1995
+16:13:06 <shapr> anyway, I want Yampa now =)
+16:13:10 <shapr> yay Yampa!
+16:13:21 <peti> Hehe. All the while we chat, Postmaster is refusing spam left and right.
+16:13:22 <shapr> the latest Fruit looks way cool
+16:13:35 <Pseudonym> How good is yampa with respect to dynamically changing topology?
+16:13:49 <shapr> it's excellent at that
+16:14:01 <Pseudonym> Hmmm.
+16:14:04 <Pseudonym> Might have to check it out.
+16:14:24 <shapr> for example, each alien in Yampa Arcade's Space Invaders is an arrow in a collection
+16:14:39 <shapr> each missile fired is an arrow with a relatively short lifespan
+16:14:48 <shapr> and of course, they all have their own interactions with each other.
+16:15:19 <shapr> Pseudonym: you want yampa invaders warez that build with ghc6.3 ?
+16:15:35 <Pseudonym> Yeah.
+16:15:53 <shapr> warez because I couldn't find the real source, so I unfairly used my r00t access to www.haskell.org to rip it out of a non-public cvs repo
+16:16:02 <Pseudonym> Ah.
+16:16:07 <Pseudonym> Hmmm.
+16:16:11 <Pseudonym> Who wrote it?
+16:16:12 <shapr> it's probably the real released source...
+16:16:13 <Pseudonym> Do you know?
+16:16:16 <shapr> yes
+16:16:23 <shapr> antony courney, henrik nilsson, etc
+16:16:25 <shapr> the yampa team
+16:16:31 <Pseudonym> Ah, OK.
+16:16:50 <peti> Hmpf. The internet lib needs its own make? 
+16:17:04 <shapr> peti: yes, and I still haven't gotten it to install...
+16:17:09 <Pseudonym> Now all I need is GHC 6.3. :-)
+16:17:31 <shapr> I'm only using 6.3 because the ghc-cvs debs already have HGL
+16:17:59 <shapr> and it's a pain to do ghc -> green-card -> hsx11 -> HGL
+16:18:00 <peti> Aargh. And sure enough it comes in binary only. :-(
+16:18:09 <shapr> what's binary only?
+16:18:15 <peti> This humake thing.
+16:19:03 <shapr> I hadn't heard of it before I got hold of internetlib
+16:19:04 <Pseudonym> Should probably update my cvs tree.
+16:19:34 <shapr> yampa invaders should work fine with 6.2.* as long as you have hsx11 and HGL installed
+16:21:22 <Philippa> shapr: latest fruit? That the wxfruit thing or something else?
+16:22:15 * peti is off to bed, too.
+16:22:47 <peti> shapr: I'll let you know once there are _some_ docs available, so that you can try Postmaster, okay?
+16:23:16 <shapr> peti: sure
+16:23:18 <shapr> thanks
+16:23:38 <peti> shapr: Let's see if you still thank me after losing a dozen e-mails. :-)
+16:23:45 <shapr> Philippa: I've been reading Antony Courtney's Fruit thesis
+16:23:51 <peti> Alright. Good night everyone!
+16:23:55 <shapr> g'night :-)
+16:24:19 <shapr> I'm trying to find everything I can that relates to use of arrows in actual Haskell code.
+16:24:26 <shapr> sadly, that's a very small amount of literature.
+16:29:13 <Jan_w> i don't really get arrows, what's so special about them?
+16:30:34 <shapr> monads++
+16:31:01 <Jan_w> i'm reading http://www.haskell.org/arrows/syntax.html but it seems you can already do this without arrows
+16:31:10 <Jan_w> is it just a smarter syntax ?
+16:31:12 <shapr> personally, I'm trying to first use them, and then overuse them, and then at some point I'll realize when it's overkill and when it's not.
+16:31:36 <shapr> monads are 'just syntax' too.
+16:31:55 <Pseudonym> Arrows are a generalisation of monads.
+16:33:20 <Oejet_> shapr: How easy is it to use HGL from the GHC CVS compared to the latest release of GHC?
+16:33:21 <Philippa> Jan_w: "I don't really get <anything that's not a lambda>, what's so special about them?" :-)
+16:34:04 <shapr> Oejet_: no clue, never tried. was thinking that an svglib binding might actually be better.
+16:35:36 <Oejet_> shapr: But you were only using 6.3 because it had HGL. What did that mean then?
+16:36:02 <Jan_w> how is monads pronounced ? mo-nats?
+16:36:31 <shapr> Oejet_: ghc-cvs debs come with hsx11 and hgl built-in already. ghc6 debs do not.
+16:37:10 <shapr> since it takes >30 minutes to build and install green-card, hsx11, and hgl,  I took the thirty second solution and used ghc-cvs.
+16:37:48 <Jan_w> somehow, i feel like pronoucing "mo-nayds" but i dont know why because thats just not what it says :)
+16:37:57 <Oejet_> shapr: So you are using them as libraries to build programs depending on them, and not writing OpenGL code yourself?
+16:39:24 <Jan_w> well, anywho :) goin to get some sleep, night all
+16:39:52 <shapr> Oejet_: HGL isn't HOpenGL, it's the SOEGraphics lib from Paul Hudak's book.
+16:39:59 <shapr> it's also slow :-/
+16:40:40 <shapr> to test the collection capabilities of Yampa, I spawned 2000 aliens instead of 2. I never saw the first screen drawn.
+16:40:50 <shapr> 200 aliens seems okay, though not very fast.
+16:44:16 <shapr> actually....
+16:44:28 <shapr> drawing HGL stuff with HOpenGL should be pretty fast
+16:45:07 <Oejet_> shapr: Doh, I'm ignorant then, sorry.
+16:45:46 <bik> can anyone tell me what a control stack overflow error is?
+16:48:19 <Pseudonym> It usually means that you have a laziness leak/.
+16:48:30 <Pseudonym> Or you might have a genuine infinite loop.
+16:54:07 <bik> wow I can't believe how little I have actually accomplished today
+16:54:09 <emu> only genuine infinite loops were used in the processing of this data
+16:54:29 <emu> bik: lower your expectations, and you will not be disappointed
+16:55:08 <bik> I have zero expectations at this point :D, I just don't have time to spend eight hours on a homework problem
+16:55:43 <emu> ah homework... dunno much about that
+17:04:45 <marcot> I have a doubt on the 9.13 exercise of the Thompson's book. It asks to define the init function using foldr. I've thinked without results, can someone help me?
+17:06:27 <danols> what haskell editor do you guys recommend for windows ?
+17:15:11 <Philippa> textpad's OK - you can get a file for syntax highlighting, it's MDI with workspaces
+17:15:24 <danols> ok
+17:15:24 <Philippa> nothing overly fancy, no real scriptability or anything, but beats notepad any day
+17:15:31 <danols> yeah notepad sucks
+17:15:34 <danols> ok i'll dl it
+17:20:01 <danols> Philippa where can I find the highlight syntax file ? i can't seem to find it on the www
+17:20:34 <Philippa> haskell.org had a link to it somewhere
+17:20:36 * stepcut grumbles about PAM
+17:20:40 <danols> k
+17:21:38 <danols> Philippa nm got it
+17:24:01 <marcot> danols: emacs.
+17:24:25 <danols> marcot: i used emacs and vim ages ago when i was running linux, i forget to much to get back into it
+17:24:28 <danols> marcot but thanks
+17:25:16 <marcot> danols: you should at least try emacs with the haskell-mode. It's very good...
+17:25:40 <danols> marcot: why ? (i'm downloading it as we speak)
+17:27:05 <marcot> danols: I like the identation and when you write the name of a function from prelude, it show the parameters...
+17:27:29 <danols> hmmm neat can it show functions outside of prelude ?
+17:28:10 <danols> btw how do you stop a function that's stuck in ghci ? ctrl - c closes the whole program
+17:29:28 <marcot> danols: I use hugs... I think it show if the file that contains the function is open.
+17:43:56 <danols_> is there such a thing as while or loop in haskell i forget ?
+17:45:57 <shapr> you've got recursion
+17:46:06 <danols_> shapr yeah that's what I thought
+17:46:18 <shapr> you can make both while and loop with recursion.
+17:46:47 <danols_> i wish to save a http stream but i'm having problems
+17:47:12 <danols_> the test code works though if it's not a stream, as in a html or gif file for example
+17:47:28 <danols_> any ideas what i could be doing wrong ?
+17:49:10 <shapr> what sort of error do you get?
+17:49:13 <shapr> what are you trying to save?
+17:49:51 <danols_> i don't get any error but it just 'waits' and eventually returns to ghci console
+17:50:57 <shapr> what's your buffer settings?
+17:51:14 <danols_> LineBuffering
+17:51:43 <shapr> do you think that would work with a stream?
+17:51:53 <danols_> shapr not really
+17:51:58 <danols_> should it be NoBuffering ?
+17:52:04 <shapr> I'm not sure, have you tried that?
+17:52:13 <danols_> i think so a couple of hours ago
+17:52:15 <danols_> let me try again
+17:52:55 <shapr> Pseudonym: btw, I tried with 2000 aliens and I turned off drawing most of the aliens. Surprisingly, it's not much slower.
+17:54:35 <blackdog_> shapr; aliesn?
+17:54:43 <shapr> blackdog_: yampa arcade space invaders
+17:54:47 <blackdog_> guh. you ken what i mean.
+17:54:53 <blackdog_> oh, cool.
+17:55:01 <shapr> g'day blackdog 
+17:55:17 <danols_> I remember long while ago reading an example of simple IO user input (the user had to guess a number) anyone know where that tutorial is ?
+17:55:26 <blackdog> g'day shapr. (i should really observe the formalities, rather than just jumping in. :)
+17:55:28 <Pseudonym> Interesting.  Profile?
+17:55:47 <shapr> Pseudonym: good idea, I'll try that.
+17:56:41 <shapr> danols_: I think there are some examples on the Wiki.
+17:57:19 <danols_> ok i'll look
+17:57:29 <shapr> Pseudonym: you want my yampa invader sources?
+17:57:57 * shapr wonders if -threaded would make any difference here
+17:58:21 <Pseudonym> Not right now, but I will ask later.
+17:59:14 <shapr> ok
+17:59:48 <shapr> you have an interesting application in mind?
+18:12:30 <dons> moin 
+18:13:25 <shapr> g'day dons 
+18:14:06 <dons> hmm.. i notice my waking hours are getting later and later since yi began
+18:14:32 <bik> I have my little Employee{name::String, ..} data type. is it possible to make an empty list that has the same type?
+18:14:40 <shapr> I don't have enough consistency to claim a schedule.
+18:14:52 <Pseudonym> dons, you should do what one sysadmin did, and divide the hours in the conventional week into 6 equal parts.
+18:15:33 <dons> huh :)
+18:18:21 <dons> shapr: -threaded is default in 6.2.1 and 2
+18:19:58 <shapr> ah, cool
+18:40:32 * shapr bangs head on desk
+18:40:46 <Pseudonym> That's one way to keep awake.
+18:41:03 <shapr> I had <IfModule rewrite_mod.> in my httpd.conf
+18:41:15 <shapr> er <IfModule rewrite_mod.c>
+18:41:19 <shapr> to be exact
+18:42:18 <shapr> many hours of reading docs to notice that my entire config file is fine except in one place, where it should mod_rewrite.c instead of rewrite_mod.c
+18:42:42 * shapr feels lysdexic
+18:46:44 * dons injects rich espresso into his brain
+18:46:51 <dons> ah, that's better
+18:47:31 <shapr> hm, it's nearly 4am, should I sleep? or check out all the new yi changes and think about buffer arrows?
+18:47:41 <dons> hmm.
+18:47:54 <dons> big change coming in in about 10 hrs. new UI design
+18:48:03 <dons> should gives us scrolling and horizontal splits
+18:49:26 <dons> then we just need undo, text searching, yank buffers, colours, some dynamic haskell
+18:49:32 <dons> and we have 0.1
+18:49:34 <shapr> cool, what's the approach for scrolling?
+18:50:00 <dons> pretty simple. separate buffers from 'windows', which are views onto sections of a buffer
+18:50:11 <shapr> sensible
+18:50:12 <dons> so scrolling just adjusts UI.Window values, not the buffer
+18:50:34 <shapr> hopefully I"ll be able to chip in more code soon
+18:51:13 <dons> I'll have to think up something difficult to send out to post-emacs
+18:51:28 <shapr> difficult?
+18:51:37 <dons> this last week hasn't been too troublesome (because we've been avoiding the difficult implementation issues)
+18:51:52 <dons> oh, like, really fast syntax highlighting
+18:51:57 <shapr> ah
+18:52:18 <dons> I want a type for the syntax highlighter output
+18:52:20 <shapr> are there any decent Haskell parsers around?
+18:52:25 <shapr> aha :-)
+18:52:28 <dons> ghc/parser/Parser.y
+18:52:42 <dons> but for syntax hl, we just need ghc/parser/Lexer.x
+18:52:47 <dons> that's fast
+18:53:02 <dons> back to hacking.
+18:53:04 <shapr> ok
+18:53:31 <dons> I'd love someone to write a nice configure.ac for yi..
+18:53:39 <dons> also, we need a documentation system
+18:53:46 <dons> so that we can view haddocks in yi
+18:54:01 <dons> or so the user can define docs associated with their key bindings
+18:54:07 <dons> :help my_binding
+18:54:14 <dons> should print the haddock associated with that decl
+18:54:18 <dons> or something like that
+18:54:30 * dons considers adding html rendering to the list of tasks
+18:55:02 <shapr> won't configure.ac cut down on windows usage?
+18:55:13 <shapr> or will it mean you have to distribute binaries? or what?
+18:55:47 <dons> why?
+18:56:01 <dons> just so that non-linux users don't have to hack config.mk after they try and build it first time
+18:56:08 <shapr> make and configure aren't usually available on win32?
+18:56:21 <dons> oh. but they already need GNU make to build it
+18:56:26 <shapr> oh
+18:56:29 <dons> so whether to add configure.
+18:56:42 <dons> or maybe there is another way
+18:56:52 <shapr> there's the maak build system in pure Haskell
+18:57:00 <shapr> but I think that's another long-term approach
+18:57:24 <dons> we have very few platform-specific settings, and I'd like to cut them down where possible
+18:57:32 <dons> so maybe it would be poss. to do this cheaply
+18:57:43 <dons> without needing configure to set up the options for us
+18:58:00 <shapr> we could depend on Cabal
+18:58:01 <dons> not needign autoconf* would be nice
+18:58:15 <dons> true. true. should start thinking about that
+18:58:19 <shapr> I wonder if Cabal does configure-style stuff?
+18:58:41 <shapr> would be sensible
+18:58:41 <dons> dont' know
+19:39:32 <cm> hey
+19:40:32 <shapr> y0
+19:41:35 <cm> hi shapr0mat
+19:41:42 <shapr> kaspow!
+19:41:46 <shapr> biff! boom!
+19:42:24 <cm> meep meep
+19:42:40 <cm> i think i want to learn go
+19:42:51 <cm> or at least recover my chess skills
+19:43:52 * heatsink learned 9x9 go
+19:43:59 * heatsink hasn't played go on a full board
+19:44:17 <cm> i read myself through parts of some go wiki, and the game seems fascinating
+19:44:29 <heatsink> you can play it on yahoo games
+19:44:48 <cm> maybe there's some Go club here, with some old wise men teaching me the basic stuff ;)
+19:44:56 <cm> true
+19:45:19 * heatsink likes the game because it depends a lot on seeing shapes
+19:50:15 <shapr> I thought SyntaxPolice had patched Yampa Arcade...
+19:53:15 <blackdog> itsyourturn.com has go. I'm "mrak" there, and would be honoured to play a haskell devotee.
+19:53:39 <blackdog> cm: i'm not terribly good, i'm afraid...
+19:56:03 <cm> :)
+19:56:16 <cm> i've no real concept of how to play, unfortunately
+19:56:44 <cm> are there different traditional openings, as in chess?
+19:57:03 <heatsink> yes
+19:57:46 <blackdog> the rules are pretty simple. you win by capturing stones and territory. a stone is live as long as it has a "liberty" - ie, a blank space next to it. Stones also share liberties, so if you've got a big group of connected stones with two holes in it ("eyes"), then it's impregnable.
+19:58:18 <Cale> I love go, it's a wonderful game.
+19:58:20 <blackdog> it's the consequences which are so mindblowing. I love simple games with deep consequences...
+19:58:30 * heatsink creates a loginpass on iyt
+19:59:36 <Cale> My favourite go server is KGS. Generally lots of pretty nice people there, and the board editing/teaching tools are nice.
+20:00:46 <blackdog> URL?
+20:01:15 <Cale> kgs.kiseido.com
+20:01:49 <Cale> You can download a java client, or play using the applet. I recommend the java web start version.
+20:02:16 <cm> oh you can also play chess on itsyourturn.com
+20:03:34 <cm> lovely, that will give me something to do during spare work minutes waiting for the compiler :-)
+20:04:06 <blackdog> cm: they do limit you to 25 moves a day unless you become a member - it's like postal chess.
+20:04:25 <cm> cool :)
+20:09:22 <heatsink> same for go?
+20:16:30 <shapr> dons: hNewFBuffer is terrifying.
+20:17:36 <shapr> you've just gotta enjoy any function that has "please forgive me" in the comments.
+20:19:25 <dons> sorry :)
+20:19:54 <dons> I wanted the fast SimonM code for filling ByteArray#, but I didn't want to carry around a whole IOUArray
+20:20:03 <cm> der stoff aus dem die traeume sind
+20:20:19 <dons> so, hey, since IOUArray is just a newtype, you can always just use unsafecoerce# to get at the type it is wrapping
+20:20:49 <shapr> I was going to refactor newB and hNewB into the same function....
+20:21:38 <shapr> maybe I should just make a SimpleBuffer instance that's just a string.
+20:21:59 <dons> hm. ok. stringToFBuffer is just the last part of hNewFBuffer, so that's cool
+20:23:52 <dons> why do you want a String buffer, btw?
+20:24:43 <dons> also, the very first Buffer was a [Char], so you could adapt that code
+20:25:32 <shapr> I just want to have two or three buffer instances so I can get a good idea of what interface is balanced
+20:26:08 <shapr> I figure, if I write a simple string buffer, then a split list like tuomov was talking about, then I should be prepared to attack the ropes buffer.
+20:27:48 <dons> cool. good idea
+20:27:57 <dons> well, we have the class defined -- write an instance!
+20:28:14 <dons> should even be able to slot straight into existing yi
+20:28:37 <shapr> I think so
+20:28:50 * shapr advertises hs-plugins on ghc-users
+20:29:18 * dons already just did that ;)
+20:29:29 <shapr> oh, you already responded to S. Alexander?
+20:30:05 <dons> yeah. but more replies will mean he's forced to look at hs-plugins ;)
+20:30:10 <shapr> :-)
+20:30:44 <dons> shapr: isn't it, like, 7am where you are?
+20:31:16 <shapr> nah, just 5:30am
+20:31:30 <dons> oh! that's alright then. please proceed.
+20:31:34 * shapr grins
+20:31:49 <shapr> I probably should fall over instead of yiking.
+20:31:57 <shapr> hacking + yi = yiking?
+20:32:07 * shapr isn't sure if that's just lack of sleep.
+20:32:20 <dons> hehe
+20:33:21 <dons> time to go to uni. ciao!
+20:33:26 <shapr> cya!
+20:40:12 <shapr> hiya ralf 
+20:40:36 <ralf> hi shapr. 
+20:40:39 <ralf> It's been a while. 
+20:40:49 <shapr> um, two days?
+20:40:50 <ralf> i've got an interview on thursday that I'm cramming for. 
+20:41:02 <ralf> It was a long two days.  I couldn't find the adaptor for my laptop. 
+20:41:06 <ralf> ack! no computer
+20:41:12 <shapr> that sucks.
+20:41:18 <ralf> sucked. 
+20:41:35 <ralf> shapr, you got my back? 
+20:41:46 <shapr> er, huh?
+20:41:53 <ralf> I might need your help. 
+20:42:01 <shapr> I'm about to go to sleep right now...
+20:42:09 <shapr> but later today I can help you some.
+20:42:22 <ralf> Sleep?  What time is it there? 
+20:42:28 <shapr> nearly 6am
+20:42:52 <ralf> O. I was going to say, sleep at midnight?! but then I remembered your are not on EST. 
+20:43:08 <ralf> Okay.  I would appreciate some help tomorrow.  I would appreciate that very much. 
+20:43:14 <shapr> No, my accent is from EST, but my head is in CET.
+20:43:39 <ralf> yeah.  CET sounds cool.  I want to visit Sweden sometime. 
+20:43:49 <shapr> It's been a few years since I've been back to States.
+20:43:52 <ralf> There are two little problems that I may need help on. 
+20:43:58 <shapr> what are those?
+20:44:04 <ralf> Hopefully I'll have them both solved by tomorrow.
+20:44:04 <ralf> one is
+20:44:21 <ralf> to write a haskell program to read and write to a file (easy)
+20:44:30 <ralf> and the other is to get hudak's graphics library working
+20:44:33 <ralf> (also easy)
+20:44:46 <ralf> but these easy things could turn into major hang ups if you can't get them right. 
+20:44:54 <ralf> What state are you from? 
+20:45:00 <shapr> I'm from Alabama.
+20:45:28 <shapr> Not quite the mecca of functional programming.
+20:46:31 <ralf> Oh, come on.  Don't be humble. 
+20:46:35 <ralf> Of course it's the mecca of 
+20:46:38 <ralf> functional programming
+20:47:37 <shapr> Alabama?
+20:47:38 <shapr> Last time I was in Alabama, I could only find Oberon zealots.
+20:47:38 <shapr> That is, other than the Java programmers.
+20:48:21 <shapr> Alabama has since expanded into Python, but it's still not much in the way of functional programming.
+20:49:12 * cm hugs ghc
+20:49:26 <cm> gotta love :r
+20:54:02 * ralf frantically searches wikipedia
+20:54:10 <ralf> oberon?  You mean the nonlinear diagnostics device? 
+20:57:07 <cm> the language and operating system
+20:57:13 <cm> Wirth
+20:57:17 <cm> (and some other dude)
+21:05:51 <blackdog> cm: can't accept the game yet. 20 game maximum, and in the middle of a tournament. i'll accept as soon as I can...
+21:06:09 <cm> okay :)
+21:06:59 <blackdog> there we go. just lost another game... :)
+21:16:10 <ralf> I am reading hudak.  can anyone help me to compile a helloworld program using hudak's library, SOEgraphics? 
+21:19:13 * cm jumps if zero
+21:19:18 <ralf> What do you do with msi files? 
+21:20:44 <ralf> never mind.  That's just for windows users.  We linux people can use tar.gzs
+21:22:05 <cm> :]
+21:31:37 <ralf> Man, this is frustrating.  I just want to use the examples in this book, but I have no idea how execute the code. 
+21:31:58 <ralf> Is it ghci file.hs?  ghc -i file.hs?  And how do you include the graphics library? 
+21:36:36 <Lemmih> It complains when you load it with ghci?
+21:40:24 <cm> is there something like "replaceAt index list newelement"
+21:41:49 <cm> i guess i can do some take/drop magic, but that sucks :[
+21:42:15 <ralf> um.  it's saying unknown architecture. 
+21:42:19 <ralf> what is take/drop magic? 
+21:43:46 <Etaoin> using take and drop I bet
+21:44:09 <cm> replace list index new = take index list ++ [new] ++ drop (index+1) list
+21:44:54 <cm> or maybe setAt index list new = .. hm
+22:34:09 <musasabi> morning
+23:36:13 <dons> morning musasabi
+23:38:08 <earthy> oh, right. um. is this thing on?
+23:38:15 <earthy> Good Morning, #haskell!
+23:40:26 <Lemmih> Good morning, earthy.
+23:40:54 <shammah> evening earthy.
+23:42:10 <cm> whee
+23:43:17 <dons> afternoon earthy
+23:43:50 <dons> do we have a xglobe map of #haskell?
+23:45:37 <Lemmih> Like http://haskell.org/hawiki/HaskellUserLocations?
+23:46:38 * ralf goes to bed. 
+23:47:43 <dons> that's it :)
+23:48:16 <Lemmih> Anyone wanna continue the development of Hackage?
+23:48:46 <cm> i'm so looping
+23:49:19 * Lemmih throws an exception to cm.
+23:49:25 <cm> +D
+23:49:32 <cm> my mini compiler oh-so compiles
+23:53:43 * dons desperately tries to commit before battery goes flat
+23:55:02 <earthy> what's Hackage?
+23:57:10 <Lemmih> A package listing webpage written in Haskell. It's probably going to replace the current static library page when it matures.
+23:59:46 <Lemmih> But there's not much Haskell left to code since it already support the basic features (insert, update, show) so it's mostly about giving the templates a better design.

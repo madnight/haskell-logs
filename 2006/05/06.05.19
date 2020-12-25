@@ -1,0 +1,2606 @@
+00:44:53 <norpan> dons, dcoutts, anyone: do you know why there is a special foldr for the unpack function in ByteString.hs?
+00:45:42 <dons> for fusing, right? list fusion is usually done with this foldr trick. check GHC.Base for the same thing on normal lists.
+00:48:26 <dons> see the section titled "foldr/build/augment" in the Base.lhs
+00:48:38 <dons> (we should try to find the paper on list fusion that describes this game)
+00:53:03 <ADEpt> is it possible that two large STM blocks running in different threads accessing the same TVars will block each other indefinitely?
+00:58:08 <pesco> I distantly remember there being a library for parsing email messages. Does anyone know where to find it, or what it was called?
+00:58:24 <norpan> dons: yeah i understand, but why are there two different foldr functions that apperently does the same thing?
+00:58:32 <dons> oh, are there? hmm.
+00:58:35 <norpan> or did you just tell me they don't do the same thing? :)
+00:58:58 <ADEpt> pesco: google up "hazakura". Maybe it is what you want
+01:00:01 <dons> norpan: you wondering about unpackFoldr versus the real foldr ?
+01:00:31 <dons> unpackFoldr came, with rules, from simonM's code. I wrote foldr separately. maybe they overlap..
+01:00:56 <dons> I note that their args are flipped
+01:01:06 <norpan> well they seem to have the same function anyway
+01:01:07 <Cale> pesco: HsEmail?
+01:01:10 <Cale> http://cryp.to/hsemail/
+01:01:16 <pesco> Eh. Too easy.
+01:01:39 <dons> norpan: yeah. so with careful attention to rules, we might be able to remove unpackFoldr
+01:01:57 <norpan> or replace the foldr implementation by a call to it :)
+01:02:08 <dons> foldr would end up with the [0] inline.
+01:02:27 <norpan> so the reason there are two is the inlining
+01:02:27 <dons> that'd do, I think. have to check how the inlining works thouhg
+01:02:29 <norpan> i see
+01:02:48 <dons> well, one came from some code with inlining and rules all set up, and i didn't want to break things
+01:03:10 <dons> we'd have to carefully construct a test, and ensure the list/unpack stuff still fused 
+01:03:35 <dons> i'll stick a todo in the src. thanks for spotting this
+01:04:09 <norpan> if you define foldr as List.foldr . unpack then the fusion would happen and it would be the same as calling unpackFoldr directly, perhaps
+01:04:17 <norpan> who knows
+01:04:58 <dons> hmm. but we don't want to unpack in general.
+01:05:21 <dons> so i'm not sure that the unpack  would be removed in that case. (unless i misunderstand your point)
+01:06:03 <dons> norpan: if you want, you could implement mapAccum or scanr, i see they're missing from the api..
+01:06:12 <norpan> yeah
+01:06:40 <dons> i added scanl today (easy), scanr is more work. check the old foldl for hints.
+01:06:47 <norpan> i suppose the point of having unpack using build is so that you can implement stuff using unpack
+01:06:57 <norpan> and still get no intermediate list
+01:07:35 <dons> yep. it matters for the old PackedString that used unpack for everything.
+01:10:31 <norpan> i would have thought scanr was easier
+01:12:00 <dons> scanl was easier since I knew how to do it with array fusion. so its 1 line
+01:12:31 <dons> scanr i can't, since the array fusion combinator only goes left-to-right.
+01:13:34 <norpan> hmmm, array fusion?
+01:14:37 <dons> yeah, so you fuse foldl f . filter g . map h into loop (f. g.h) such that you only walk the array once.
+01:14:46 <dons> n times faster for a pipeline n long, roughly
+01:14:55 <dons> and gcc can't do it ;)
+01:15:14 <falconair> any one know when GHC 6.6 is supposed to be released, its wiki says it will be released before May '06!
+01:15:25 <dons> oh, a few months.
+01:15:33 <dons> you can always grab a nightly snapshot if you're keen
+01:15:40 <norpan> ah, the loop function
+01:16:09 <falconair> well, 6.6 is supposed to have good intel os x support, the quicker it gets done the quicker i get a port version
+01:16:25 <dons> you write everthing you can in terms of loop, then have a loop f . loop g = loop (f.g) rewrite rule to combine the lot.
+01:24:27 <dcoutts> dons, why cna we only fuse left-to-right functions? isn't it just an up-loop vs a down-loop ?
+01:25:08 <dons> we'd have to have a loopR combinator, and different rules for fusing functions walking in that direction.
+01:25:39 <dons> imagine a bunch of for loops, you can only combine the ones all heading in the same direction, since the indexes line up.
+01:26:22 <dons> it could be done. we could have loopR/loopR fusion. it would combine things like foldr, scanr
+01:26:33 <dons> but not filter or map, since we don't care which way they go.
+01:26:47 <dons> maybe it would be useful, maybe not. 
+01:32:20 <dons> btw, dcoutts norpan kzm sjanssen, I merged all the QC properties into Properties.hs now, and added the 'make fast' target to run them all quickly (just for rapid development)
+01:32:52 <dons> probably should add some flag that disable the concatMap in the fast case too.
+01:33:05 <dons> concatMap is a silly function on byte arrays anyway
+01:33:32 <dcoutts> yes, I've been meaning to re-implement it for the Lazy case
+01:33:59 <kzm> I wonder if I should scrap (ie. throw away :-) my repo, and merge things back manually?
+01:34:06 <dons> i had a go for the strict case, but there's not much to be done.
+01:34:13 <kzm> I'm starting to get too many conflicts with upstream.
+01:34:31 <dons> kzm, i would. easy to just copy across again and record
+01:34:36 <dcoutts> dons, right, so you can only fuse things going in the same direction or have versions in each directon for ones like map
+01:34:52 <dcoutts> dons, but that would still be a pay-off
+01:34:58 <dons> dcoutts: yeah. that would be doable. 
+01:35:12 <dcoutts> it's like groupBy loopdirection
+01:36:00 <dons> not sure how to switch on direction though. you'd have to spot in the rules a foldl or foldr, and then force all maps or filters to be mapRs
+01:36:04 <dcoutts> where map,filter etc come in both direction flavours and you can have rules for switching the direction of map if you need to fuse it into a downloop
+01:36:25 <dons> yeah, could get tricky. golden rule is to have few rules
+01:36:30 <dons> the more the trickier, and so on
+01:36:32 <dcoutts> heh
+01:37:20 <dons> since programming the simplifier isn't easy on the best days
+01:37:30 <dcoutts> aye
+01:45:15 <dcoutts> perhaps the best way is instead of making two forms of map is to make a non-directional loop combinator
+01:45:25 <dcoutts> and have that fuse with either directional loop
+01:46:29 <dons> hmm. there's probably a paper in that..
+01:46:37 <dcoutts> ;-)
+01:46:49 <dons> being able to do that with rewrite rules seems possible, but tricky
+01:47:31 <kosmikus> dons, dcoutts: paper? you have two weeks left ... ;)
+01:47:48 <dcoutts> loopAny f . loopUp g ==> loopUp (f & g)
+01:47:58 <dcoutts> loopAny f . loopDn g ==> loopDn (f & g)
+01:48:02 <dons> thanks kosmikus :)
+01:48:20 <dcoutts> and there's 6 other cases
+01:48:34 <dons> let me ask roman.
+01:48:58 <dcoutts> loopAny/loopAny ==> loopAny
+01:49:32 <dcoutts> anyway, as we said the other day that's not the important thing atm
+01:49:43 <dcoutts> perf can be improved later, apis can't
+01:51:12 <dons> its a very interesting idea though. i don't know of any work on this kind of problem.
+01:51:27 <dons> especially, picking the direction of the loop during simplification..
+01:51:40 <davidhouse> good morning all
+01:51:47 <dons> ah, roman says: "ha! i've been thinking exactly about this yesterday"
+01:51:57 <dcoutts> dons, I'm somewhat suprised
+01:52:14 <dcoutts> oh good, glad he's thinking about it
+01:53:16 <dcoutts> what other omni-directional loops are there? map, filter, ..?
+01:54:18 <dcoutts> some linear searches I guess
+01:54:20 * vincenz is working on that sort of thing, but in an imperative context
+01:54:26 <dcoutts> zipping
+01:54:44 <dcoutts> vincenz, ah well perhaps you can enlighten us
+01:55:07 <vincenz> well so far you've mentioned the right ones... though in theory even a foldr can be omnidirectional
+01:55:28 <vincenz> just depends on how much recomputation you're interested in
+01:55:41 <dcoutts> how about reversing...
+01:55:48 <dons> dcoutts: hmm!
+01:55:52 <dons> reverse becomes foldr
+01:56:10 <dcoutts> loopUp/reverse ==> loopDn
+01:56:43 <vincenz> or stuff like
+01:57:12 <vincenz> map i . filter h . map f . filter g => map (i.f) . filter (h .f && g)
+01:57:27 <dcoutts> any foldr / foldl of an associative operator
+01:57:58 <dons> vincenz: you actually fuse the maps and the filters into a single pass
+01:58:02 <dons> loop (i.h.f.g)
+01:58:07 <dcoutts> vincenz, you're duplicating f?
+01:58:10 <vincenz> dcoutts: yes
+01:58:16 <dons> well, with appropriate || and && to handle the filter
+01:58:18 <vincenz> dcoutts: otherwise you can't distribute the filter over the map
+01:58:33 <vincenz> obviously a smart implementation would keep this variable locally
+01:58:37 <vincenz> in the final fusion of the filter and map
+01:58:44 <vincenz> instead of recomputing
+01:59:33 <dcoutts> vincenz, but if you can fuse maps & filters then why the need to distribute the filter over the map?
+01:59:59 <davidhouse> @hoogle Char -> Int
+01:59:59 <lambdabot> Char.digitToInt :: Char -> Int
+01:59:59 <lambdabot> Char.ord :: Char -> Int
+02:00:44 <vincenz> dcoutts: well in the form I was using it... (which was imperative programming) a map (g) . filter (h) mapped to for (x elof .. ) if (h(x) then consume(g(x)
+02:00:49 <dcoutts> dons, so it's not just functions where there is no data flow along the loop, like map, but also where you've got an associative op and so the direction really doesn't matter, like sum.
+02:01:04 <vincenz> you mean commutative
+02:01:09 * vincenz ponders
+02:01:10 <dcoutts> er yes
+02:01:18 <dons> dcoutts: rl even suggests not just restricting to left or right.
+02:01:25 <dcoutts> wait, no, associative
+02:01:25 <dons> so that you could fuse, say, map. permute
+02:01:58 <dcoutts> if you've got an associative op then foldr (op) = foldl (op)
+02:02:09 <dcoutts> that's associativity, not commutativity
+02:02:18 <vincenz> aha
+02:03:24 <dcoutts> so that'd cover all the things like, concat, and, or, any, all, sum, product, maximu, minimum
+02:03:49 <davidhouse> > foldl (-) 10 &&& foldr (-) 10 $ [4,3,2]
+02:03:50 <lambdabot> (1,-7)
+02:03:58 <davidhouse> > foldl (+) 10 &&& foldr (+) 10 $ [4,3,2]
+02:03:59 <lambdabot> (19,19)
+02:04:12 <dons> dcoutts: yep. in the ndp lib they fuse and,or,any,all and so on.
+02:04:20 <vincenz> dons: ndp?
+02:04:26 <dcoutts> dons, but only in an uploop right?
+02:04:29 <vincenz> dons: this from the same guy that wrote the deforestation papers?
+02:04:31 <dons> right
+02:04:50 <dons> vincenz: the research group i'm part of does a lot of ndp stuff. nested data parallelism.
+02:04:56 <dcoutts> so I think they could be directionally-unbased loops
+02:05:05 <dcoutts> unbased/unbiased
+02:05:47 <vincenz> dons: so does my group, except in the imperative context
+02:05:47 <dcoutts> dons, do they fuse zips ?
+02:05:54 <dons> here, http://www.cse.unsw.edu.au/~chak/project/dph/
+02:05:58 <dons> dcoutts: yep.
+02:06:11 <dcoutts> nice, they're non-directional too
+02:06:26 <dons> dcoutts: the ndp code is here: http://darcs.haskell.org/packages/ndp/
+02:06:34 <vincenz> any per-element op is non-directional
+02:06:38 <vincenz> err func
+02:07:04 <dons> the interesting stuff is e..g http://darcs.haskell.org/packages/ndp/Data/Array/Parallel/Unlifted/Flat/Combinators.hs
+02:07:27 <dons> which, barring the strict tuples, directly go into Data.ByteString unchanged
+02:08:03 <norpan> but isn't loopR sort of foldr?
+02:08:14 <dons> yes.
+02:08:16 <dons> that's the point
+02:08:32 <dons> you write foldr in terms of loopR, and also scanr and any other *R
+02:08:45 <norpan> but scanr can be written in terms of foldr
+02:08:50 <dons> and anything going in the 'R' direction can be done in a single pass
+02:09:09 <dons> norpan: but probably not able to spot it as a fusion chance
+02:09:29 <norpan> hmmm
+02:09:41 <dons> they need to look like: loopR f (k (loopR g) ..
+02:09:45 <norpan> i'm trying to imagina how loopR would be but all i get to is foldr :)
+02:09:49 <dons> otherwise you get too many rules for cleanign things up.
+02:10:08 <dons> norpan: loopR looks like filter, but with an accumulator
+02:10:12 <norpan> i have to read that paper
+02:10:15 <dons> going right to left.
+02:10:32 <davidhouse> @hoogle scanr
+02:10:32 <lambdabot> Prelude.scanr :: (a -> b -> b) -> b -> [a] -> [b]
+02:10:33 <lambdabot> Prelude.scanr1 :: (a -> a -> a) -> [a] -> [a]
+02:10:41 <norpan> but the point in going right to left is that you don't need an accumulator
+02:10:47 <norpan> err, left to right
+02:10:50 <davidhouse> scanr is an accumulating fold, yes?
+02:11:18 <davidhouse> > scanr (+) 0 [1..10
+02:11:18 <lambdabot>  parse error on input `}'
+02:11:20 <davidhouse> > scanr (+) 0 [1..10]
+02:11:21 <lambdabot> [55,54,52,49,45,40,34,27,19,10,0]
+02:11:32 <davidhouse> err, right.
+02:11:37 <davidhouse> > scanl (+) 0 [1..10]
+02:11:38 <lambdabot> [0,1,3,6,10,15,21,28,36,45,55]
+02:11:55 <davidhouse> that's better.
+02:11:59 <dcoutts> dons, of course for .Lazy we're pretty much only interested in up loops right?
+02:12:06 <davidhouse> hmm... that could be quite useful.
+02:13:52 <dcoutts> dons, heh, I notice the comment in Data.Array.Parallel about missing `iterate', `repeat', and `cycle' not being supported due to them requiring infinite arrays...
+02:14:05 <dons> yeah, exactly what we've got :)
+02:14:09 * dcoutts implemented those functions yesterday for Data.ByteString.Lazy
+02:14:11 <norpan> tails = scanr (:) []
+02:14:13 <norpan> right?
+02:14:31 <xerox> > scanr (:) [] [1..3]
+02:14:31 <lambdabot> [[1,2,3],[2,3],[3],[]]
+02:14:33 <davidhouse> > tails &&& scanr (:) [] $ [1..4]
+02:14:34 <lambdabot> ([[1,2,3,4],[2,3,4],[3,4],[4],[]],[[1,2,3,4],[2,3,4],[3,4],[4],[]])
+02:14:41 <xerox> > scanl (:) [] [1..3]
+02:14:42 <lambdabot>   Occurs check: cannot construct the infinite type: a = [a]
+02:14:42 <lambdabot>   Expected type: a -> [a] -> a
+02:14:42 <lambdabot>   Inferred type: a -> [a] -> [a]
+02:14:45 <xerox> Err.
+02:15:02 <davidhouse> > uncurry (==) $ tails &&& scanr (:) [] $ [1..4]
+02:15:03 <lambdabot> True
+02:15:16 <dcoutts> dons, clearly when they're done with ndp they should move on to lazy segmented arrays :-)
+02:15:51 <vincenz> dcoutts: you mean for non contiguous indices?
+02:16:16 <dcoutts> vincenz, no, I mean [[_,_], [_,_]]
+02:16:28 <dcoutts> lazy lists of arrays
+02:16:36 <dcoutts> representing one contiguous array
+02:16:47 <dcoutts> what we do for Data.ByteString.Lazy
+02:17:56 <vincenz> ah
+02:18:01 <vincenz> sort of like a rope
+02:18:16 <davidhouse> hmm... (&&&) widens an arrow accepting a single input into one accepting a pair. is there one that narrows it?
+02:18:21 <davidhouse> @hoogle (&&&)
+02:18:21 <lambdabot> Control.Arrow.(&&&) :: Arrow a => a b c -> a b c' -> a b (c, c')
+02:18:39 <vincenz> @type join . uncurry
+02:18:40 <lambdabot> forall a a1 b.
+02:18:41 <lambdabot>       (a1 -> b -> (a1, b) -> a) -> (a1, b) -> a
+02:18:52 <dcoutts> vincenz, similar, but a lazy list not a strict tree
+02:19:03 * vincenz nods
+02:19:14 <vincenz> @type join . curry
+02:19:15 <lambdabot> forall a c. ((a, a) -> c) -> a -> c
+02:19:19 <dons> ?type interact
+02:19:20 <lambdabot> (String -> String) -> IO ()
+02:19:21 <vincenz> @type uncurry . join . curry
+02:19:22 <lambdabot> forall b c a.
+02:19:22 <lambdabot>          ((a, a) -> b -> c) -> (a, b) -> c
+02:19:30 <davidhouse> @hoogle a b (c, c') -> a b c
+02:19:31 <lambdabot> Did you mean: a b (c, C') -> a b c
+02:19:31 <lambdabot> Prelude.id :: a -> a
+02:19:31 <lambdabot> Prelude.asTypeOf :: a -> a -> a
+02:19:35 <vincenz> nm
+02:19:37 <vincenz> it's join .curry
+02:19:44 <davidhouse> but that's not arrowic.
+02:19:45 <vincenz> davidhouse: oh that!
+02:19:47 <dcoutts> dons, we're missing interact from the IO section of .Lazy
+02:19:54 <vincenz> davidhouse: just drop the second 
+02:20:01 * dcoutts adds it
+02:20:59 <norpan> a→b
+02:21:07 <norpan> oops
+02:21:07 <davidhouse> @type narrow a = a >>> arr fst
+02:21:08 <lambdabot> parse error on input `='
+02:21:17 <davidhouse> @type let narrow a = a >>> arr fst in narrow
+02:21:18 <lambdabot> forall (a :: * -> * -> *)
+02:21:18 <lambdabot>                  b
+02:21:18 <lambdabot>                  a1
+02:21:18 <lambdabot>                  b1.
+02:21:18 <lambdabot>               (Arrow a) =>
+02:21:20 <lambdabot>               a b (a1, b1) -> a b a1
+02:21:36 <davidhouse> right. so (>>> arr fst) or (>>> arr snd) does it.
+02:22:03 <dons> now, I added getLines to the strict code, so joelk could write a line-by-line filter without having to read everything into memory. maybe we should have a similar thing for .Lazy, so lines =<< getContents, doesn't have to refragment. oh, we don't have lines for .Lazy anyway, atm.
+02:22:19 <dons> dcoutts: what should happen with the Char8 interface to .Lazy?
+02:22:28 <dons> Data.ByteString.Lazy.Char8 ?
+02:22:30 <dcoutts> dons, there should be one.
+02:22:34 <dcoutts> yep
+02:22:43 <dcoutts> dons, btw +cc-options:          -O3 -funroll-loops
+02:22:46 <norpan> there should be a lot of combinations
+02:22:55 <dcoutts> I think that will be used for hs stuff too
+02:23:00 <norpan> so we should think up a good structure :)
+02:23:13 <dons> dcoutts: ok. stick it in.
+02:23:14 <dcoutts> ie ghc -optc-O3 even for .hs files, no?
+02:23:21 <dcoutts> dons, no I think that's a bad thing
+02:23:31 <dons> well, -O3 can cause gcc to produce weird code.
+02:23:37 <dcoutts> I'm worried that it gets used for both .c & .hs
+02:23:40 <dons> segfaults are not uncommon.
+02:23:42 * dcoutts checks
+02:23:43 <dons> the cc-optiosn don't.
+02:24:00 <norpan> why O3?
+02:24:04 <dcoutts> really? ok, it means something different in ghc package files from .cabal files
+02:24:19 <norpan> what do you get from O3 that you don't get from O2?
+02:24:27 <dons> loop unrolling, segfaults
+02:24:28 <vincenz> @type first
+02:24:29 <lambdabot> forall (a :: * -> * -> *) d c b.
+02:24:29 <lambdabot>    (Arrow a) =>
+02:24:29 <lambdabot>    a b c -> a (b, d) (c, d)
+02:24:36 <dcoutts> dons, -On n>1 kills the mangler on many arches
+02:24:40 <norpan> -funroll-loops?
+02:24:42 <dons> that too.
+02:24:59 <norpan> -fno-segfaults? :)
+02:25:07 <dons> I don't think C has that option.
+02:25:19 <vincenz> nope
+02:25:19 <vincenz> only
+02:25:21 <vincenz> -fmore-bugs
+02:25:23 <davidhouse> vincenz: that adds a second channel to an arrow which it just ignores. it allows arrows to just act on part of their input
+02:25:31 <vincenz> davidhouse: yeah so I noticed
+02:27:58 <dcoutts> wow lots of patches in fps today, 19
+02:28:27 <davidhouse> how do you spell signiture? how many 'i's and how many 'a's?
+02:28:53 <davidhouse> @dict signiture
+02:28:53 <lambdabot> Supported dictionary-lookup commands:
+02:28:53 <lambdabot>  @all-dicts @devils @easton @elements @foldoc @gazetteer @hitchcock @jargon @lojban @vera @web1913 @wn @world02
+02:28:53 <lambdabot> Use "@dict-help [cmd...]" for more.
+02:29:07 <davidhouse> @all-dicts signiture
+02:29:08 <lambdabot> No match for "signiture".
+02:29:12 <flux__> signature?
+02:29:13 <davidhouse> @all-dicts signature
+02:29:13 <dons> @web1913 signature
+02:29:14 <lambdabot> *** "Signature" gcide "The Collaborative International Dictionary of English v.0.48"
+02:29:14 <lambdabot> Signature \Sig"na*ture\, n. [F. (cf. It. signatura, segnatura,
+02:29:14 <lambdabot>  Sp. & LL. signatura), from L. signare, signatum. See {Sign},
+02:29:14 <lambdabot>  v. t.]
+02:29:14 <lambdabot>  1. A sign, stamp, or mark impressed, as by a seal.
+02:29:16 <lambdabot> [174 @more lines]
+02:29:18 <lambdabot> *** "Signature" web1913 "Webster's Revised Unabridged Dictionary (1913)"
+02:29:20 <lambdabot> Signature \Sig"na*ture\, n. [F. (cf. It. signatura, segnatura,
+02:29:22 <dcoutts> dons, it is using cc-options with ghc and the .hs files. :-(
+02:29:23 <lambdabot>  Sp. & LL. signatura), from L. signare, signatum. See {Sign},
+02:29:24 <lambdabot>  v. t.]
+02:29:27 <dcoutts> dons, that'll break
+02:29:27 <lambdabot>  1. A sign, stamp, or mark impressed, as by a seal.
+02:29:28 <lambdabot> [52 @more lines]
+02:29:31 <davidhouse> okay :)
+02:29:32 <dons> dcoutts: ok. better turn it off.
+02:29:43 <dcoutts> dons, we only want it for the .c file
+02:29:43 <davidhouse> right, so we should never use lambdabot's dictionary features.
+02:29:46 <dons> @help spell
+02:29:47 <lambdabot> spell <word>. Show spelling of word
+02:29:51 <dcoutts> seems Cabal can't do that
+02:29:58 <dons> @spell signature
+02:29:58 <lambdabot> signature
+02:30:02 <dons> @spell signiture
+02:30:03 <lambdabot> signature signatures signatory signore signature's
+02:30:07 <dons> :)
+02:30:07 <davidhouse> heh. thanks dons.
+02:30:22 <dcoutts> dons, did you notice any perf improvement with -funroll-loops on the fpstring.c?
+02:30:42 <dons> hmm. possibly. only in those functions that use it, of course.
+02:30:54 <dons> its hard to tell, the number are already low.
+02:31:05 <dcoutts> yeah
+02:31:08 <norpan> -funroll-loops is a tricky beast
+02:31:20 <dcoutts> perhaps we need to look at generating some data specially
+02:31:22 <norpan> looping is already quite fast with branch prediction
+02:31:51 <davidhouse> who maintains haskell.org/ghc?
+02:32:20 <dcoutts> noclouds, it's more to get better memory throughput by overlapping reads with other stuff
+02:32:20 <dons> simon marlow.
+02:32:40 <norpan> dcoutts: yeah
+02:32:41 <davidhouse> it says "The STABLE branch is still ghc-6-4-branch, and we expect there to be one further release from this branch (6.4.2)" and the link to the "haskell wik" points to hawiki.
+02:32:52 <dcoutts> noclouds, the glibc versions of similar functions do 4 or 8 byte at a time reads
+02:33:04 * dons -> dinner
+02:35:24 <norpan> well the key to all optimizing is benchmarking :)
+02:51:33 <davidhouse> @hoogle throwIO
+02:51:33 <lambdabot> Control.Exception.throwIO :: Exception -> IO a
+03:02:19 <davidhouse> @hoogle mapMaybe
+03:02:19 <lambdabot> Maybe.mapMaybe :: (a -> Maybe b) -> [a] -> [b]
+03:02:29 <davidhouse> @hoogle mapMaybeM
+03:02:29 <lambdabot> No matches found
+03:08:12 <Beelsebob> @hoogle Monad m => (m a -> Maybe b) -> [m a] -> [b]
+03:08:12 <lambdabot> Maybe.mapMaybe :: (a -> Maybe b) -> [a] -> [b]
+03:08:17 <Beelsebob> heh
+03:10:22 <davidhouse> haddock defines a mapMaybeM :: Monad m => (a -> m b) -> Maybe a -> m (Maybe b)
+03:20:45 <pierre-> hello
+03:20:53 <psnl> good morning
+03:28:25 <dons> dcoutts: your interact patch didn't type check ;)
+03:28:33 <xerox> Haha, this is fun <http://theory.lcs.mit.edu/~edemaine/images/tetris_award_large.jpg>
+03:28:41 <dons> needed to hide interact from the Prelude. patch pushed.
+03:32:11 <davidhouse> xerox, :)
+03:32:39 <norpan> xerox: well the result is not a surprise, tetris is basically bin-packing
+03:33:16 <xerox> @foldoc binary packing
+03:33:18 <lambdabot> *** "binary" foldoc "The Free On-line Dictionary of Computing (27 SEP 03)"
+03:33:18 <lambdabot> binary
+03:33:18 <lambdabot>  
+03:33:18 <lambdabot>    1. <mathematics> {Base} two.  A number representation
+03:33:18 <lambdabot>    consisting of zeros and ones used by practically all computers
+03:33:20 <lambdabot> [19 @more lines]
+03:33:22 <xerox> Err.
+03:33:31 <norpan> not binary packing
+03:33:34 <norpan> bin packing
+03:33:37 <norpan> as in containers
+03:36:02 <xerox> So?
+03:37:12 <davidhouse> bin packing is NP-complete.
+03:37:42 <psnl> one day I should go find that reduction
+03:39:47 <davidhouse> some people write really ugly code.
+03:40:05 <davidhouse> not necessarily in terms of the way it's done, but in terms of indentation, etc.
+03:40:27 <davidhouse> sporadic use of both hard and soft tabs for indentation
+03:40:59 <psnl> I wonder if there is a ghc flag that throws an error for that
+03:49:27 <davidhouse> what's the timeline on haskell prime?
+03:51:14 <eivuokko> http://hackage.haskell.org/trac/haskell-prime/wiki/TimeLine
+03:57:42 <dcoutts_> dons, doh!
+03:57:53 * dcoutts_ swears he compiled it first...
+03:58:16 <davidhouse> eivuokko: thanks.
+03:58:34 <dcoutts_> dons, yep, seems not :-)
+03:58:42 <dcoutts_> ./Data/ByteString/Lazy.hs:181:8:
+03:58:42 <dcoutts_>     Ambiguous occurrence `interact'
+04:12:31 <yaarg> woo! lhs2tex <3
+04:15:19 <kosmikus> yaarg: ?
+04:20:43 <yaarg> kosmikus: just a handy program :)
+04:20:58 <kosmikus> yaarg: nice to hear
+04:21:14 <yaarg> kosmikus: did you write it?
+04:21:31 <kosmikus> co-write it, I'm Andres Loeh ...
+04:21:39 <davidhouse> @hoogle get
+04:21:39 <lambdabot> Control.Monad.State.get :: MonadState s m => m s
+04:21:40 <lambdabot> Text.ParserCombinators.ReadP.get :: ReadP Char
+04:21:40 <lambdabot> Text.ParserCombinators.ReadPrec.get :: ReadPrec Char
+04:29:01 <yip> http://blogs.msdn.com/sriram/archive/2006/04/11/573731.aspx
+04:29:40 <vincenz> yip = jyp?
+04:30:06 <ADEpt> what's the proper way to issue threadDelay from inside the STM block running in the separate thread?
+04:30:46 <yaarg> kosmikus: okay well thank you for saving quite a bit of time for me today :)
+04:30:54 <yip> vincenz: jip
+04:31:13 <vincenz> yip: as in yes or as in you're "jip"
+04:31:24 * yip is jip
+04:58:37 <xerox> <http://img130.imageshack.us/my.php?image=190520060au.jpg>
+05:00:28 <davidhouse> what's so special about ST? it's just a state monad, right?
+05:00:38 <xerox> davidhouse - not exactly
+05:00:58 <xerox> davidhouse - ST provides a flavour of IORefs, namely STRefs, without IO.
+05:01:30 <davidhouse> by the looks of things, ST came before State.
+05:01:53 <davidhouse> i guess ST was just too powerful for most cases, so the STRefs were thrown out and we got the cut-down version, State.
+05:06:25 <davidhouse> @hoogle runST
+05:06:26 <lambdabot> Control.Monad.ST.runST :: ST s a -> a
+05:06:26 <lambdabot> Data.Array.ST.runSTArray :: Ix i => ST s (STArray s i e) -> Array i e
+05:06:26 <lambdabot> Data.Array.ST.runSTUArray :: Ix i => ST s (STUArray s i e) -> UArray i e
+05:06:48 <davidhouse> runST is also a different type to runState (or evalState, which i guess is the real analogue)
+05:06:49 <dcoutts_> davidhouse, they're quite different things
+05:07:05 <ADEpt> @where paste
+05:07:05 <lambdabot> http://paste.lisp.org/new/haskell
+05:08:31 <lisppaste2> ADEpt pasted "why 20 and not 21?" at http://paste.lisp.org/display/20169
+05:09:20 <ADEpt> can somebody with ghc newer than 6.4.1 run the pasted code and tell me if they get 21 as output, not 20?
+05:11:19 <norpan> ADEpt: because it depends on which atomic action gets run first?
+05:13:45 <eivuokko> fwiw, I ran it on 6.4.2 in Windows, and I get 20 (tried three times)
+05:14:15 <norpan> why are you so surprised it returns 20?
+05:14:32 <norpan> the firsta atomic action is obviously run first, and then the var is set to 20
+05:14:38 <ADEpt> norpan: because i see "In thread. n=" message two times.
+05:14:43 <eivuokko> Yeah
+05:15:03 <ADEpt> norpan: I see "In thread. n=0", then "In thread. n=20", then the final 20.
+05:15:14 <eivuokko> Does STM retry transactions?
+05:15:19 <ADEpt> norpan: and this I could not explain
+05:15:40 <norpan> huh, why would it run the thread twice?
+05:16:06 <ADEpt> norpan: just try it out :)
+05:16:31 <norpan> otoh, you use something with unsafe in its name
+05:16:40 <norpan> :)
+05:16:52 <ADEpt> but I dont force anything with it.
+05:16:59 <eivuokko> I'd guess, unless it's a bug, that the thread 1 first is marked dependent on tvar, then it waits and tvar is changed.  hence the threads 2's transaction is broken.
+05:17:13 <eivuokko> But I know nothing about STM, really
+05:17:56 <lisppaste2> ADEpt annotated #20169 with "Time to re-learn some basic math" at http://paste.lisp.org/display/20169#1
+05:18:44 <ADEpt> sorry, I just missed out the fact that 3 sec + 3 sec > 5 sec
+05:19:00 <davidhouse> but why is it running it twice?
+05:19:26 <Lemmih> davidhouse: 'n' changed.
+05:19:40 <ADEpt> davidhouse: because it's STM and it's cool :) It sees that n had changed
+05:19:55 <davidhouse> ah, deliberate behaviour.
+05:20:26 <ADEpt> davidhouse: each "atomically" block should be .. erm.. atomical.
+05:20:34 <davidhouse> atomic.
+05:20:54 <eivuokko> So it retries on sharing failure?
+05:21:03 <ADEpt> eivuokko: yes
+05:21:19 <eivuokko> I should read STM paper(s), I guess.
+05:24:08 <norpan> ah it doesn't force all the operations but instead checks if they were indeed autoic
+05:24:14 <norpan> atomic
+05:24:18 <norpan> interesting
+05:25:00 <davidhouse> it feels really weird reading papers that were written before do notation
+05:25:29 <norpan> you're too young
+05:25:44 <davidhouse> ;)
+05:34:55 <davidhouse> hmm... SPJ and Launchbury's (old) paper on ST claims that putChar is implemented using ccall. is this still the case?
+05:47:25 <good_boy> what does _ in (_, a) mean?
+05:48:03 <alar> good_boy: "matches anything"
+05:48:24 <yip> good_boy: just think of it as a "x", where you never need to actually use the value of x
+05:48:39 <good_boy> thank you.
+05:48:47 <davidhouse> > let snd (_, a) = a in snd ("hello", 5)
+05:48:48 <lambdabot> 5
+05:49:13 <davidhouse> that's how snd is implemented.
+05:49:47 <davidhouse> "throwErrnoIfMinus1RetryMayBlock" <- from GHC.Handle. that's a meaty function name.
+05:50:18 <alar> =)
+06:04:20 <ADEpt> @index newChan
+06:04:20 <lambdabot> Control.Concurrent.Chan, Control.Concurrent
+06:05:00 <nealar> our ISP seems to be sick today
+06:05:13 <ADEpt> @index TimeDiff
+06:05:14 <lambdabot> System.Time, System.Time
+06:16:07 <kowey> i use Integer a lot for arbitrary sized bit vectors; would something like an instance of Data.Bits for Data.ByteString.ByteString be more efficient?
+06:17:02 <dcoutts_> kowey, use UArray Int Bool
+06:17:33 <kowey> dcoutts_: thanks
+06:18:15 <dcoutts_> it's represented by a packed array of bits
+06:19:14 <dcoutts_> it's not an insacne of Bits however, though you could fix that (probably requiring a newtype wrapper)
+06:19:21 <dcoutts_> insacne/instance
+06:20:33 <kowey> hmm, yeah I just noticed... it'd be nice to keep all those easy-breezy bit vector operations; guess i'll just have to write a smidgen of wrapper code
+06:20:54 <ihope> Surely there's a better way to parse things like "4. Swap 7 with 2."
+06:21:06 <davidhouse> parsec?
+06:21:37 <davidhouse> digit >> string ". " >> anyChar `manyTill` newline
+06:21:47 <davidhouse> @hoogle digit
+06:21:47 <lambdabot> Text.ParserCombinators.Parsec.Char.digit :: CharParser st Char
+06:21:47 <lambdabot> Char.digitToInt :: Char -> Int
+06:21:47 <lambdabot> Char.intToDigit :: Int -> Char
+06:21:51 <davidhouse> good, it is digit.
+06:22:34 <ihope> Yes, but that's a program instruction. I want to get the other numbers out too, and the fact that it's a swap.
+06:22:53 <davidhouse> what else is in the grammar?
+06:23:09 <ihope> http://esoteric.voxelperfect.net/wiki/SMATINY
+06:23:54 <ihope> And the "Hello, world!" program there uses comments, marked by semicolons.
+06:25:57 <davidhouse> > ord 72
+06:25:57 <lambdabot>  add an instance declaration for (Num Char)
+06:26:00 <davidhouse> > chr 72
+06:26:01 <lambdabot> 'H'
+06:26:03 <davidhouse> ah.
+06:26:56 <davidhouse> ihope, build three parsec parsers, one to parse each type of line. then your main loop will be a many $ choice [ swap, nop, output ]
+06:27:11 <ihope> Hmm.
+06:27:46 <ihope> I was going to lines it, cut out the blank lines, then parse each of those.
+06:28:11 <davidhouse> well you could filter out the blank lines first, yes.
+06:28:41 <davidhouse> in fact, you could lines it, filter out the blank ones, then do a mapM (choice [swap, nop, output]) $ linesedstuff
+06:30:57 <davidhouse> ihope, when you have a swap command, why not just "Swap with X" instead of "Swap Y with X"?
+06:31:28 <ihope> So the interpreter thingy knows what to swap with X.
+06:31:51 <davidhouse> ah.
+06:32:08 <davidhouse> i didn't realise you could swap lines other than the one you're currently at.
+06:53:40 <good_boy> im stuck with some other thing again... how do i combine a function which accepts two arguments with map (prefix) so that the function gets one after another all elements of a list which has the same type as one of the function's arguments?
+06:53:59 <vincenz> good_boy: foldr
+06:54:10 <vincenz> or scanl
+06:54:11 * vincenz ponders
+06:54:14 <vincenz> @type scanr
+06:54:15 <lambdabot> forall b a. (a -> b -> b) -> b -> [a] -> [b]
+06:54:25 <vincenz> > scanr (+) 1 [1..10]
+06:54:26 <lambdabot> [56,55,53,50,46,41,35,28,20,11,1]
+06:54:27 <sjanssen_> good_boy: "which has the same type"?  A list can only contain things that are the same type
+06:54:42 <good_boy> map (function a) b where a is one of the function's arguments and b is the list
+06:54:47 <good_boy> doesnt work.
+06:54:52 <vincenz> sure it does
+06:54:58 <good_boy> i mean
+06:54:59 <vincenz> plop a list = map (function a) list
+06:55:11 <good_boy> it doesnt do what i want it to do.
+06:55:19 <good_boy> b ist a [Int]
+06:55:21 <vincenz> > let foo num list = map (+ num) list in foo 2 [1..10]
+06:55:22 <lambdabot> [3,4,5,6,7,8,9,10,11,12]
+06:55:28 <good_boy> and the second function argument is a Int
+06:55:33 <good_boy> not a [Int]...
+06:55:57 <vincenz> good_boy: give the type of the function
+06:56:16 <good_boy> function :: String -> Int -> (String, Int)
+06:56:35 <vincenz> erm
+06:56:41 <vincenz> what does it do
+06:56:56 <sjanssen_> good_boy: sure you don't mean String -> Int -> [(Char, Int)] ?
+06:57:14 <good_boy> i am. it just puts a string and an int together in a tupel ^^
+06:57:34 <vincenz> > let foo str num = (str, num) in foo "hello" 1
+06:57:35 <lambdabot> ("hello",1)
+06:57:50 <good_boy> but my purpose is combining the map function with a function which has two arguments
+06:58:04 <vincenz> good_boy: you partially apply the function to the argument
+06:58:13 <vincenz> just as you mentioned
+06:58:31 <good_boy> in that case the second argument would be [Int]...
+06:58:34 <vincenz> no
+06:58:40 <vincenz> @type map
+06:58:41 <lambdabot> forall b a. (a -> b) -> [a] -> [b]
+06:58:53 <vincenz> @type \function valu -> map (function value
+06:58:54 <lambdabot> parse error (possibly incorrect indentation)
+06:58:54 <vincenz> @type \function valu -> map (function value)
+06:58:55 <lambdabot> Not in scope: `value'
+06:58:58 <vincenz> @type \function value -> map (function value)
+06:58:59 <lambdabot> forall t a b.
+06:58:59 <lambdabot>                (t -> a -> b) -> t -> [a] -> [b]
+06:59:32 <Lemmih> good_boy: map (\a -> fn a val) lst?
+06:59:41 <sjanssen_> good_boy: maybe you want zipWith?
+06:59:52 <good_boy> no...
+06:59:53 <sjanssen_> > zipWith (+) [1, 2, 3] [4, 5, 6]
+06:59:53 <lambdabot> [5,7,9]
+07:00:02 <vincenz> good_boy: be more clear?
+07:00:07 <vincenz> and write down the specification in one sentence?
+07:00:30 <dozer> if I had a list of items in a monad, is there a lib function that will return me the first non-fail item in the list?
+07:00:42 <dozer> Modad m => [m a] -> a
+07:00:48 <sjanssen_> @hoogle msum
+07:00:49 <lambdabot> Monad.msum :: MonadPlus a => [a b] -> a b
+07:00:49 <lambdabot> Control.Monad.msum :: MonadPlus m => [m a] -> m a
+07:00:54 <vincenz> dozer: at best -> ma
+07:00:55 <vincenz> m a
+07:01:00 <dozer> thx
+07:01:18 <sjanssen_> @hoogle mconcat
+07:01:18 <lambdabot> Data.Monoid.mconcat :: Monoid a => [a] -> a
+07:01:43 <vincenz> > mconcat ["a" .. "z"]
+07:01:43 <lambdabot>  Not in scope: `mconcat'
+07:01:49 <vincenz> > Data.Monoid.mconcat ["a" .. "z"]
+07:01:50 <lambdabot>  Not in scope: `Data.Monoid.mconcat'
+07:01:56 * vincenz palmslaps
+07:02:19 <sjanssen_> dozer: that doesn't necessarily return the first non-fail item, with the list Monad it'll return all of them
+07:03:14 <sjanssen_> there isn't really a way to do that unless your specific Monad lets you test for failure
+07:03:24 <good_boy> function :: String -> Int -> (String, Int) function a b = (a, b)   test :: String -> [Int] -> (String, Int)   a b = map (function a) b
+07:03:32 <vincenz> of
+07:03:38 <vincenz> good_boy: that should work fine
+07:03:40 <dozer> do item <- head . mconcat items
+07:03:40 <vincenz> oh wait
+07:03:41 <vincenz> it should return
+07:03:45 <vincenz> [(String, Int)]
+07:03:54 <vincenz> test :: String -> [Int] -> [(String, Int)]
+07:03:59 <good_boy> oh yes
+07:04:34 <good_boy> works 
+07:05:21 <sjanssen_> dozer: that will only work in the list monad
+07:05:28 <vincenz> sjanssen_: or Maybe
+07:05:29 <dozer> dho!
+07:05:38 <vincenz> > msum [Nothing, Just 1, Just 2]
+07:05:42 <lambdabot> Just 1
+07:05:54 <sjanssen_> vincenz: yeah, his code used 'head'
+07:06:00 <vincenz> ah
+07:06:02 * vincenz nods
+07:06:49 <dozer> what I need is to convert [System.Environment.getEnv "HTTP_PROXY", System.Environment.getEnv "http_proxy"] into the first one of these that's set, or fail
+07:07:13 <dozer> so I guess this is all in the IO monad
+07:07:48 <ihope> msum?
+07:08:17 <vincenz> dozer: what about converting to a Maybe when set
+07:08:23 <vincenz> and then msum
+07:08:39 <ihope> @type Control.Monad.msum
+07:08:40 <lambdabot> forall a (m :: * -> *).
+07:08:40 <lambdabot>         (MonadPlus m) =>
+07:08:40 <lambdabot>         [m a] -> m a
+07:11:42 <Lemmih> IO is an instance of MonadPlus.
+07:11:52 <ihope> Weird.
+07:12:45 <psnl> I heard mutterings about a better make written in haskell and using dags. can anyone remember its name?
+07:12:45 <ihope> "No instance for (Control.Monad.MonadPlus IO)" <- are you sure?
+07:13:12 <Lemmih> ihope: Import Control.Monad.Error from mtl.
+07:13:34 <ihope> Ah.
+07:14:17 <davidhouse> psnl, hmake?
+07:14:33 <sjanssen_> why doesn't getEnv return IO (Maybe String)
+07:14:34 <dozer> > System.Environment.getEnvironment
+07:14:34 <lambdabot>  Not in scope: `System.Environment.getEnvironment'
+07:14:46 <sjanssen_> I think the current API is just plain wrong
+07:14:53 <lisppaste2> davidhouse pasted "smatiny parser" at http://paste.lisp.org/display/20176
+07:14:59 <davidhouse> ihope, ^^
+07:15:08 <davidhouse> @hoogle getEnv
+07:15:09 <lambdabot> System.getEnv :: String -> IO String
+07:15:09 <lambdabot> System.Environment.getEnvironment :: IO [(String, String)]
+07:15:14 <ihope> Ah, thanks!
+07:15:16 <ihope> @karma+ davidhouse
+07:15:16 <lambdabot> davidhouse's karma raised to 2.
+07:15:20 <sjanssen_> you shouldn't have to resort to handling exceptions to see if an env-var is declared
+07:15:40 <psnl> davidhouse: ta
+07:16:38 <dozer> I'm a bit confused
+07:17:34 <dozer> do { i <- f ; j <- g } will do f, and if it isn't fail, put it in i, then do g and if it isn't fail, put it in j
+07:17:51 <dozer> but how would I get g to happen /only/ when f,i failed
+07:18:06 <dozer> rather than /only/ when f,i succeed?
+07:18:20 <ihope> Hmm...
+07:18:21 <sjanssen_> dozer: Monad and MonadPlus aren't sufficient to express what you want
+07:18:48 <ihope> dozer: would f itself fail, or would the pattern match with i fail?
+07:18:50 <Lemmih> sjanssen_: Isn't that just 'f `mplus` g'?
+07:18:50 <dozer> not sure - I've not groked this stuff sufficiently yet
+07:19:13 <dozer> I guess the patern match - so I could use  "fail <- f"?
+07:19:18 <sjanssen_> Lemmih: not for all Monads, with List that gives you all successes
+07:19:42 <ihope> dozer: well, you could try f `catch` const g
+07:19:44 <sjanssen_> dozer: that will just make a new binding that shadows fail
+07:19:50 <ihope> Dunno how well that'd work.
+07:20:18 <Lemmih> sjanssen_: I'm pretty sure he's talking about IO actions.
+07:21:34 <ihope> And I was just about to ask him a question.
+07:21:43 <sjanssen_> Lemmih: oh, yeah.  good point
+07:21:49 <sjanssen_> dozer: mplus does what you want for IO
+07:31:00 <vincenz> > let odd x = (x/=0) || even (x-1); even x = (x==0) || odd (x-1) in even 3
+07:31:01 <lambdabot> True
+07:32:01 <wilx> @quote
+07:32:01 <lambdabot> lispy says: I just remembered this dream i had the other morning.  I was trying to tell my alarm clock how to snooze by using a list comprehension
+07:32:10 <wilx> lol
+07:32:24 <sjanssen_> lispy: nice one
+07:33:10 <sjanssen_> > press [button | button <- buttons, button == snoozeButton]
+07:33:11 <lambdabot>  Not in scope: `snoozeButton'
+07:33:40 <ihope> > press snoozeButton
+07:33:41 <lambdabot>  Not in scope: `snoozeButton'
+07:33:45 <ihope> Much shorter.
+07:34:12 <vincenz> lol
+07:35:18 <davidhouse> @hoogle press
+07:35:19 <lambdabot> System.Win32.File.fILE_ATTRIBUTE_COMPRESSED :: FileAttributeOrFlag
+07:35:19 <lambdabot> Text.ParserCombinators.Parsec.Expr.buildExpressionParser :: OperatorTable tok st a -> GenParser tok st a -> GenParser tok st a
+07:35:55 <sjanssen_> ihope: I don't know about you, but when my alarm clock goes off, it *always* requires a nondeterministic search to find the snooze button
+07:36:17 <ihope> I don't have an alarm clock.
+07:36:34 <vincenz> sjanssen_: yes and with me it's an undeterministic result as well
+07:36:40 <vincenz> sjanssen_: I don't always realize I pushed it
+07:37:03 <sjanssen_> ihope: really, what if you need to get up early?
+07:37:24 <ihope> Don't go to bed? :-P
+07:37:37 <earthy> let the sun / your bladder / your pets wake you?
+07:38:02 <davidhouse> earthy, or your pets' bladders
+07:38:40 <sjanssen_> I think I'd prefer an alarm clock
+07:38:48 <earthy> that requires more clenaup, thereby voiding the advantages of actually having woken up on time
+07:39:34 <good_boy> is there anything such [A...Z] in Haskell like there is [1...9]?
+07:39:53 <davidhouse> > ['a'..'z']
+07:39:53 <lambdabot> "abcdefghijklmnopqrstuvwxyz"
+07:40:00 <davidhouse> > ['A'..'Z']
+07:40:01 <lambdabot> "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+07:40:03 <good_boy> cool :)
+07:40:09 <davidhouse> you can do that with any instance of Ord
+07:40:15 <davidhouse> > [False..True]
+07:40:15 <norpan> no, Enum
+07:40:15 <lambdabot>  parse error on input `False..'
+07:40:20 <davidhouse> > [False .. True]
+07:40:21 <lambdabot> [False,True]
+07:40:22 <davidhouse> sorry, enum.
+07:40:40 <davidhouse> or Enum, to be correct.
+07:40:54 <good_boy> what do you mean with instance of enum? cant i just write ['A'...'Z']?
+07:41:02 <davidhouse> good_boy: yes.
+07:41:09 <good_boy> oh ok
+07:41:14 <vincenz> davidhouse: KISS
+07:41:21 <SamB_XP> its just that if Char wasn't an instance of Enum, it wouldn't work
+07:41:21 <davidhouse> and any type that is an instance of Enum, you can do [some value of that type .. some other value]
+07:41:35 * davidhouse is yet to see a useful application of Bool's instantiation of Enum, though
+07:41:36 <good_boy> i see now
+07:41:48 <SamB_XP> @type \a b -> [a..b]
+07:41:49 <lambdabot> forall a. (Enum a) => a -> a -> [a]
+07:41:59 <norpan> davidhouse: it's good for code like [minBound .. maxBound]
+07:42:04 <SamB_XP> @pl \a b -> [a..b]
+07:42:05 <lambdabot> enumFromTo
+07:42:14 * SamB_XP pats lambdabot
+07:42:29 <davidhouse> yeah, [a..b] gets transformed into enumFromTo a b
+07:42:49 <norpan> > maxBound :: Integer
+07:42:50 <lambdabot>  add an instance declaration for (Bounded Integer)
+07:42:50 <lambdabot>   In the expression: maxBound :: Integer
+07:42:50 <lambdabot>   In the definition of `wzv': wzv = maxBound :: Integer
+07:43:04 <ihope> > maxBound :: Int
+07:43:05 <lambdabot> 2147483647
+07:43:13 <ihope> > 2147483647 + 1 :: Int
+07:43:13 <lambdabot> -2147483648
+07:43:19 <davidhouse> Integer is by definition unbounded.
+07:43:29 <ihope> It got everything but the sign correct :-)
+07:43:43 <davidhouse> > minBound :: Int -- it wraps round
+07:43:43 <lambdabot> -2147483648
+07:43:50 <knoppix> @listcommands
+07:43:50 <lambdabot> Unknown command, try @list
+07:43:56 <knoppix> @list
+07:43:56 <lambdabot> list [module|command]. Where modules is one of:
+07:43:56 <lambdabot> babel base compose dice dict djinn drHylo dummy elite fact haddock help hoogle karma lambda localtime log more pl plugs poll pretty quote search seen slap spell state system todo topic type unlambda
+07:43:56 <lambdabot> version vixen where
+07:44:02 <davidhouse> > maxBound - minBound :: Int
+07:44:03 <lambdabot> -1
+07:44:04 <sjanssen_> > abs (2147483647 + 1 :: Int)
+07:44:05 <lambdabot> -2147483648
+07:44:13 <SamB_XP> haha
+07:44:20 <mauke> > abs (-2147483648) :: Int
+07:44:21 <lambdabot> -2147483648
+07:44:35 <davidhouse> @type fromIntegral
+07:44:36 <lambdabot> forall b a. (Num b, Integral a) => a -> b
+07:44:37 <sjanssen_> lousy two's complement
+07:45:04 <davidhouse> > fromIntegral (maxBound :: Int) - fromIntegral (minBound :: Int) :: Integer
+07:45:05 <lambdabot> 4294967295
+07:45:08 * SamB_XP supposes that probably doesn't happen in C?
+07:45:10 <davidhouse> that's the range of Int.
+07:45:19 <vincenz> > abs (fromIntegral (2147483647 + 1 :: Int))
+07:45:20 <lambdabot> 2147483648
+07:45:34 <SamB_XP> oh, what do you know, they do have an abs on ints in C...
+07:45:46 <davidhouse> > log (maxBound :: Int) / log 2
+07:45:47 <lambdabot>  add an instance declaration for (Floating Int)
+07:46:04 <davidhouse> > log (fromIntegral (maxBound :: Int)) / log (fromIntegral 2)
+07:46:05 <lambdabot> 30.999999999328196
+07:46:21 <davidhouse> so Int = -2^31 .. 2^31
+07:46:23 <sjanssen_> > logBase 2 (fromIntegral (maxBound :: Int))
+07:46:24 <lambdabot> 30.999999999328196
+07:46:54 <SamB_XP> > 2^31
+07:46:55 <lambdabot> 2147483648
+07:47:10 * monochrom awes at the inexact number
+07:47:20 <SamB_XP> @type 2^31
+07:47:21 <lambdabot> forall a. (Num a) => a
+07:47:32 <davidhouse> monochrom: which one?
+07:47:36 <sjanssen_> > logBase 2 (fromIntegral (maxBound :: Word64))
+07:47:37 <lambdabot> 64.0
+07:47:39 <monochrom> 30.9999... :)
+07:47:40 <SamB_XP> > 2^31 :: Int
+07:47:40 <davidhouse> monochrom: the log is just because of rounding errors.
+07:47:42 <lambdabot> -2147483648
+07:47:59 <Igloo> Int is only guaranteed to be at least 29-bit
+07:48:08 <SamB_XP> > 2^31-1 :: Int
+07:48:09 <lambdabot> 2147483647
+07:48:20 <monochrom> > logBase 2 (fromIntegral (maxBound :: Int) :: Double)
+07:48:21 <lambdabot> 30.999999999328196
+07:48:25 <monochrom> Yuck.
+07:48:25 <davidhouse> > maximum [maxBount :: Int - 1 .. ]
+07:48:25 <lambdabot>  parse error on input `-'
+07:48:29 <SamB_XP> Igloo: but nobody actually tags integers, do they?
+07:48:30 <sjanssen_> davidhouse, monochrom: the reason it is less than 31 is because maxBound == 2^31 - 1
+07:48:36 <SamB_XP> er, ints...
+07:48:47 <davidhouse> > let bd = maxBount :: Int - 1 in maximum [bd .. ]
+07:48:47 <lambdabot>  parse error on input `-'
+07:48:47 * monochrom smacks his head
+07:48:51 <Igloo> SamB_XP: Not any more, AFAIK. Doesn't change the spec, though.
+07:48:54 <davidhouse> > let bd = (maxBount :: Int) - 1 in maximum [bd .. ]
+07:48:55 <lambdabot>  Not in scope: `maxBount'
+07:48:59 <SamB_XP> Igloo: indeed.
+07:48:59 <davidhouse> > let bd = (maxBound :: Int) - 1 in maximum [bd .. ]
+07:49:00 * monochrom goes back to sleep :)
+07:49:00 <lambdabot> 2147483647
+07:49:12 <davidhouse> ta-da! the maximum of an infinite list :)
+07:49:20 <davidhouse> ... and mathematics falls apart.
+07:49:39 <sieni> >  logBase 2 (fromIntegral ((fromIntegral (maxBound :: Int) + 1 :: Integer))) 
+07:49:40 <lambdabot> 31.000000000000004
+07:49:41 <SamB_XP> > length [(1::Int)..]
+07:49:42 <mux> The world vanishes in a puff of logic.
+07:49:44 <lambdabot> Terminated
+07:49:44 <sieni> that's closer
+07:50:08 <SamB_XP> > length [(1::Int8)..]
+07:50:09 <lambdabot> 127
+07:50:16 <davidhouse> nice.
+07:51:32 <sjanssen_> @yow
+07:51:32 <lambdabot> Hello.  I know the divorce rate among unmarried Catholic Alaskan
+07:51:32 <lambdabot> females!!
+07:51:35 <good_boy> another question: how can i define a function which contains conditions locally?
+07:52:00 <dozer> let  list = map System.Environment.getEnv ["HTTP_PROXY", "http_proxy"]  in  Control.Monad.mapM (Control.Monad.liftM print) list
+07:52:16 <dozer> *** Exception: HTTP_PROXY: getEnv: does not exist (no environment variable)
+07:52:19 <dozer> :(
+07:52:25 <sjanssen_> dozer: use msum
+07:52:29 <davidhouse> good_boy: what do you mean?
+07:52:53 <good_boy> replaceAll a b = map (substitute a) b
+07:53:26 <monochrom> "condition" is a very overloaded term.
+07:53:32 <good_boy> where substitute| a == b = True | otherwise = False
+07:53:54 <sjanssen_> > filter (== 2) [1, 2, 3, 2]
+07:53:55 <lambdabot> [2,2]
+07:54:45 <davidhouse> good_boy: what's the point of this function?
+07:54:47 <sjanssen_> good_boy: that function won't type, it doesn't make any sense
+07:54:57 <monochrom> where is the parameter for substitute?
+07:55:15 <monochrom> don't you want "where substitute x | a==b = ..."
+07:55:30 <good_boy> i know it doesnt make sense... i just wrote it like that so that you could get a better idea what i meant with locally and condition.
+07:55:32 <davidhouse> if you're trying to write a function to replace the elements of one list with the elements of another, you've got your imperative programming hat on.
+07:55:50 <good_boy> yeah
+07:55:53 <good_boy> :D
+07:55:59 <mauke> how am I supposed to get a better idea from something that doesn't make any sense?
+07:56:17 <monochrom> Perhaps you mean: where {substitute x | x==b = True; substitute x | otherwise = False}
+07:56:54 <davidhouse> monochrom: well, you don't need to repeat substitute x there.
+07:56:57 <mauke> perhaps you mean: substitute = (== b)
+07:57:04 <monochrom> Darn!
+08:01:12 <lisppaste2> dozer pasted "not prety, but it works" at http://paste.lisp.org/display/20178
+08:01:51 <good_boy> i think it is pretty ^^
+08:01:59 <good_boy> not long
+08:02:05 <davidhouse> dozer, what's with the _ <- stuff?
+08:02:28 <dozer> no idea - how do I write a line that discards stuff?
+08:02:29 <monochrom> that's the ugly part, davidhouse  XD
+08:02:42 <lisppaste2> davidhouse annotated #20178 with "you don't need that" at http://paste.lisp.org/display/20178#1
+08:04:19 <Igloo> The first print should be putStrLn
+08:04:40 <davidhouse> also true.
+08:04:46 <davidhouse> otherwise it'll be real ugly.
+08:04:54 <davidhouse> @fptools Data.Arraw
+08:04:54 <lambdabot> Data.Arraw not available
+08:04:55 <davidhouse> @fptools Data.Array
+08:04:56 <lambdabot> http://darcs.haskell.org/packages/base/Data/Array.hs
+08:06:54 <davidhouse> @hoogle Array i e -> i -> Maybe e
+08:06:55 <lambdabot> No matches, try a more general search
+08:07:00 <davidhouse> is there nothing like that?
+08:07:12 <araujo> Hi!
+08:07:39 <davidhouse> can the indices have gaps in them? i guess not actually, as then it'd just be Data.Map
+08:07:47 <sjanssen_> @hoogle (Ix i) => (i, i) -> i -> Bool
+08:07:48 <lambdabot> Ix.inRange :: Ix a => (a, a) -> a -> Bool
+08:07:53 <sjanssen_> davidhouse: nope
+08:08:08 <sjanssen_> @hoogle Array i e -> (i, i)
+08:08:09 <lambdabot> No matches, try a more general search
+08:08:19 <sjanssen_> @hoogle bounds
+08:08:20 <lambdabot> Array.bounds :: Ix a => Array a b -> (a, a)
+08:08:20 <lambdabot> Data.Array.bounds :: Ix i => Array i e -> (i, i)
+08:08:20 <lambdabot> Data.Array.IArray.bounds :: (HasBounds a, Ix i) => a i e -> (i, i)
+08:09:57 <sjanssen_> @pl \a i -> if inRange (bounds a) i then Just a ! i else Nothing
+08:09:57 <lambdabot> flip flip Nothing . ap (ap . (if' .) . inRange . bounds) ((!) . Just)
+08:10:08 <sjanssen_> oh, that's wrong
+08:10:22 <sjanssen_> @pl \a i -> if inRange (bounds a) i then Just (a ! i) else Nothing
+08:10:22 <lambdabot> flip flip Nothing . ap (ap . (if' .) . inRange . bounds) ((Just .) . (!))
+08:14:06 <good_boy> what i wanted to do before is from a list of strings of type ["airplane", "airplqne", "ahrplane", "birplane"] to take the nth char of one string beginning from the first character and compare it with the respective n char of the remaining strings of a list. There is always one char which is different from the homologue ones and i want that to add it to a new string.
+08:15:06 <davidhouse> to get the nth char, use \s n -> s !! (n + 1)
+08:15:14 <davidhouse> you'll probably want to map over those.
+08:15:27 <good_boy> what is !! for?
+08:15:51 <davidhouse> it gets the nth element of a list, starting from 0 (hence the +1)
+08:15:54 <bejs> list !! n gets the nth element from a list
+08:16:20 <bejs> [3, 4, 7, 12] !! 1  is the 4
+08:17:35 <davidhouse> good_boy: you've got quite a complicated problem.
+08:17:38 <davidhouse> i suggest breaking it down.
+08:17:48 <good_boy> i cant break down.
+08:18:27 <davidhouse> first you might want to transform your list of strings into a list of list of chars
+08:18:45 <davidhouse> e.g. your input would go to [['a', 'a', 'a', 'b'], ['i', 'i', 'h', 'i'], ...]
+08:18:57 <good_boy> yes...
+08:19:00 <davidhouse> to do that you can use transpose, i think. (is that preluded?)
+08:19:03 <davidhouse> @hoogle transpose
+08:19:03 <lambdabot> List.transpose :: [[a]] -> [[a]]
+08:19:03 <lambdabot> Data.Graph.transposeG :: Graph -> Graph
+08:19:06 <davidhouse> good.
+08:19:19 <davidhouse> > transpose ["airplane", "airplqne", "ahrplane", "birplane"]
+08:19:20 <lambdabot> ["aaab","iihi","rrrr","pppp","llll","aqaa","nnnn","eeee"]
+08:19:48 <davidhouse> then you'll need a function that takes a list and returns the one that is different from all the rest.
+08:20:24 <davidhouse> by the looks of things, there won't always be one, so it would have type Eq a => [a] -> Maybe a
+08:20:43 <good_boy> there will always be one...
+08:21:21 <davidhouse> but in your input, the rs are all the same, as are the 'l's, the 'n's, the 'p's and the 'e's.
+08:21:38 <good_boy> i mean there wont be more than one :)
+08:21:49 <davidhouse> right. zero or one. hence Maybe is a good bet.
+08:23:47 <davidhouse> hmm...
+08:23:48 <lisppaste2> dozer annotated #20178 with "less crufty?" at http://paste.lisp.org/display/20178#2
+08:23:55 <davidhouse> i'm not sure of an elegant way to write this.
+08:24:55 <mgoetze> well, can you rely on the first one always being "correct"?
+08:25:14 <good_boy> not really...
+08:25:57 <good_boy> i think i have an elegant way... but that is if I'm allowed to use transpose....
+08:26:15 <davidhouse> > let findDifferent (x1:x2:xs) = if x1 == x2 then findDifferent xs else do rest <- findDifferent xs; if x1 == rest then Just x2 else Just x1 in map findDifferent $ transpose ["airplane", "airplqne", "ahrplane", "birplane"] 
+08:26:16 <lambdabot>  Non-exhaustive patterns in function findDifferent
+08:26:30 <davidhouse> > let findDifferent (x1:x2:xs) = if x1 == x2 then findDifferent xs else do rest <- findDifferent xs; if x1 == rest then Just x2 else Just x1; findDifferent _ = Nothing in map findDifferent $ transpose ["airplane", "airplqne", "ahrplane", "birplane"] 
+08:26:31 <lambdabot>  parse error on input `='
+08:26:44 <davidhouse> oops.
+08:27:00 <davidhouse> > let findDifferent (x1:x2:xs) = if x1 == x2 then findDifferent xs else do { rest <- findDifferent xs; if x1 == rest then Just x2 else Just x1 }; findDifferent _ = Nothing in map findDifferent $ transpose ["airplane", "airplqne", "ahrplane", "birplane"] 
+08:27:01 <lambdabot> [Nothing,Nothing,Nothing,Nothing,Nothing,Nothing,Nothing,Nothing]
+08:27:06 <davidhouse> grr.
+08:27:14 <davidhouse> yeah, that approach isn't going to work.
+08:27:26 <davidhouse> hmmm... unless...
+08:27:30 <good_boy> yes?
+08:27:37 <davidhouse> > let findDifferent (x1:x2:xs) = if x1 == x2 then findDifferent xs else do { rest <- findDifferent xs; if x1 == rest then Just x2 else Just x1 }; findDifferent [x] = Just x; findDifferent _ = Nothing in map findDifferent $ transpose ["airplane", "airplqne", "ahrplane", "birplane"] 
+08:27:38 <lambdabot> [Nothing,Nothing,Nothing,Nothing,Nothing,Nothing,Nothing,Nothing]
+08:27:43 <davidhouse> ah well.
+08:28:50 <davidhouse> oh yeah.
+08:28:54 <davidhouse> wait, no.
+08:28:56 <davidhouse> hmm.
+08:29:14 <davidhouse> the last condition should only hit on an empty list.
+08:29:19 <davidhouse> > let findDifferent (x1:x2:xs) = if x1 == x2 then findDifferent xs else do { rest <- findDifferent xs; if x1 == rest then Just x2 else Just x1 }; findDifferent [x] = Just x; findDifferent [] = Nothing in map findDifferent $ transpose ["airplane", "airplqne", "ahrplane", "birplane"] 
+08:29:20 <lambdabot> [Nothing,Nothing,Nothing,Nothing,Nothing,Nothing,Nothing,Nothing]
+08:29:21 <good_boy> i dont want the solution... i wanted some tips :)
+08:29:40 <good_boy> im gonna post it as soon as i have it ready...
+08:29:41 <davidhouse> well, i'm struggling myself, so i can't really give you tips ;)
+08:29:56 <good_boy> and that is in a few hours!
+08:32:03 <mgoetze> good_boy: well, if you want a nice and inefficient solution ;), you could check each letter of "aaab", "iihi", ... whether it is unique
+08:32:23 <good_boy> i was thinking of that 
+08:32:30 <good_boy> why is it inefficient?
+08:33:07 <mgoetze> because you have to go through the list several times instead of just once
+08:33:33 <mgoetze> but it's probably pretty easy to write
+08:33:50 <good_boy> isnt it what predefined functions do?
+08:34:50 <good_boy> i mean... i could write a map function myself... would it be less efficient than the one which exists in every interpreter?
+08:35:07 <mgoetze> isUnique s n = and map (=/(s!!n)) [s!!i|i<-[0..length s], i=/n]
+08:35:09 <monochrom> unlikedly
+08:35:40 <monochrom> but I don't understand your logic.
+08:35:48 <mgoetze> und, put an $ between and and map there
+08:35:58 * vincenz lols at typeinfo's output
+08:36:37 <mgoetze> > map (isUnique "aaab") [0..3] where isUnique s n = and $ map (=/(s!!n)) [s!!i|i<-[0..length s], i=/n]
+08:36:38 <lambdabot>  Not in scope: `=/'
+08:36:49 <mgoetze> > map (isUnique "aaab") [0..3] where isUnique s n = and $ map (/=(s!!n)) [s!!i|i<-[0..length s], i/=n]
+08:36:50 <lambdabot> Exception: Prelude.(!!): index too large
+08:37:03 <mgoetze> >length "aaab"
+08:37:08 <mgoetze> > length "aaab"
+08:37:09 <lambdabot> 4
+08:37:15 <monochrom> have you finished debugging? :)
+08:37:22 <mgoetze> > map (isUnique "aaab") [0..3] where isUnique s n = and $ map (/=(s!!n)) [s!!i|i<-[0..length s - 1], i/=n]
+08:37:23 <lambdabot> [False,False,False,True]
+08:37:48 <mgoetze> that should help you, good_boy 
+08:38:17 <blacksheep> hey. sorry for the noob question, but I couldnt find it anywhere. what is the easiest way to convert an Int to a String?
+08:38:18 <good_boy> i cant get the unique letter though :)
+08:38:31 <good_boy> "int"?
+08:38:33 <monochrom> show
+08:38:57 <mgoetze> good_boy: you could use another list comprehension....
+08:39:03 <good_boy> that doesnt tell me which is the unique letter though.
+08:39:03 <blacksheep> good_boy: is that an answer to me?
+08:39:15 <good_boy> yes. but im not sure if its right
+08:39:21 <good_boy> @blacksheep
+08:39:21 <lambdabot> Unknown command, try @list
+08:39:24 <mgoetze> blacksheep: you want monochrom's answer
+08:39:40 <ndm> good_boy: xs \\ nub xs
+08:39:47 <ndm> that gives you all the non unique strings
+08:39:49 <mgoetze> good_boy: it tells you the position of the unique letter, which you can then apply to (s!!)
+08:40:06 <monochrom> I like it when people ignore the useful answer and ask to elaborate the offtrack answer.
+08:40:19 <blacksheep> mgoetze: thx, i didnt get it. monochrom, it seems i don't have hugs installed on here... let me just do it and ill try it
+08:40:34 <monochrom> It proves that their brain is capable of distinguishing the two, and then choose the wrong path.
+08:40:34 <ndm> blacksheep: windows or linux?
+08:40:46 <blacksheep> linux, the new suse 10.1
+08:40:49 <ndm> its easy enough to install hugs on windows :)
+08:40:55 <monochrom> > show (45 :: Int)
+08:40:56 <lambdabot> "45"
+08:41:02 <good_boy> whats the irony for?
+08:41:04 <blacksheep> i may have to compile it :(
+08:41:16 <ndm> just get the last release and use that
+08:41:27 <ndm> the new one has only been about a few days, the older one is perfectly useable
+08:41:39 <blacksheep> compiling is easy, but it is boring, takes too time :D
+08:41:52 <ndm> using the old one won't make much difference
+08:43:08 <blacksheep> ndm: ill get the new one. do you think i should get the "-plus" or just the regular?
+08:43:31 <blacksheep> i shouldn't need more than the base libs... i guess ill go for the regular
+08:43:40 <ndm> blacksheep: definately the bigger one
+08:43:50 <ndm> its not that much bigger, but its much more convenient
+08:43:56 <blacksheep> okay then
+08:43:56 <ndm> and some of the packages are useful
+08:44:19 <ndm> in fact about 4 are really commonly used
+08:44:41 <mathewm> newbie question -- Does haskell have 'labels' other than "labeled fields"?
+08:44:53 <ndm> mathewm: define label?
+08:45:11 <mathewm> ndm: That is what I am attempting to do :)
+08:45:18 <monochrom> I don't think there are labels other than labelled fields
+08:45:22 <mathewm> I am attempting to grok this http://okmij.org/ftp/Haskell/keyword-arguments.lhs
+08:45:35 <mathewm> specifically 'data Color = Color'
+08:45:54 <ndm> mathewm: as a newbie, my suggestion is don't try and understand that (i certainly don't)
+08:45:57 <mathewm> and later they use the Color constructor with an argument 'Color (x0,y0)'
+08:45:59 <ndm> data Color = Color
+08:46:03 <ndm> defines a type Color
+08:46:08 <ndm> and a constructor Color
+08:46:12 <ndm> consider:
+08:46:14 <mathewm> without parameters, right?
+08:46:19 <ndm> data Bool = True | False
+08:46:21 <ndm> yes, no parameters
+08:46:31 <ndm> you can think of the constructor Color as a constant, if that helps
+08:46:34 <mathewm> then how does this work:  Origin (x0,y0)
+08:46:48 <mathewm> in make_square and make_rect
+08:47:14 <Igloo> They're both arguments to make_square
+08:47:15 <ndm> mathewm: you have a parse error :)
+08:47:18 <Igloo> It's not an application
+08:47:20 <mathewm> oh... 
+08:47:24 <ndm> [Origin] [(x0,y0)]
+08:47:27 * mathewm feels dense
+08:47:37 <mathewm> thanks
+08:47:52 <ndm> its just C thoughts resurfacing :)
+08:47:55 <psi> any news from google regarding slots?
+08:48:01 <mathewm> now I see what they mean by "label"
+08:48:04 <ADEpt> no
+08:48:06 <ADEpt> psi: no
+08:48:14 <psi> mkay
+08:51:31 <mahogny> hm. talk about language abuse o_O
+09:03:23 <mathewm> I wonder how much performance overhead the use of HList brings with it
+09:03:55 <dcoutts_> mathewm, ideally no more than list, but...
+09:04:26 <dcoutts_> it is afterall just nested tuples which is the same representation as lists
+09:04:38 <mathewm> i see
+09:06:19 * vincenz snickers
+09:06:23 <vincenz> gotta love c++ers
+09:06:34 <vincenz> <...> typedef is so cool
+09:06:46 * mathewm smiles
+09:06:58 <jethr0> #define begin {
+09:07:17 <monochrom> you mean like type X a = [(a,a)] ?
+09:08:06 <good_boy> should I import qualified Data.List to use transpose?
+09:08:25 <monochrom> you can import List(transpose)
+09:09:23 <good_boy> Module List not previously loaded
+09:09:33 <good_boy> im using Hugs.
+09:12:27 <monochrom> "import List(transpose)" write that in the beginning of your .hs file
+09:13:12 <vincenz> Data.List
+09:14:57 <blacksheep> has anyone got the following error when compiling hugs: hugs98-plus-May2006/src/builtin.c:2044: undefined reference to `mallocBytesRWX'
+09:16:34 <good_boy> Module Main already loaded... this is weird
+09:17:01 <blacksheep> it seems that mallocByteRWC wasnt implemented for 64-bit systems :(
+09:18:13 <blacksheep> no... its something else...
+09:23:36 <blacksheep> notanotheridiot: never run your linux as root! ;)
+09:24:08 <neologism> blacksheep: I havent used other account tha root's for ages
+09:24:10 <notanotheridiot> haha, soz - I'm actually IRC tunneling out  - and it seems to think i'm root on the server
+09:24:24 <notanotheridiot> s/irc/ssh
+09:24:39 <blacksheep> notanotheridiot: okay ;D
+09:33:44 <davidhouse> @hoogle maximum
+09:33:44 <lambdabot> Prelude.maximum :: Ord a => [a] -> a
+09:33:44 <lambdabot> List.maximumBy :: (a -> a -> a) -> [a] -> a
+09:33:44 <lambdabot> Data.List.maximumBy :: (a -> a -> Ordering) -> [a] -> a
+09:35:58 <blacksheep> i have to go now, thx for the solution, ill try it later
+09:38:01 <bringert> any GHC on OS X/Intel users here? xerox__?
+09:39:37 <mathewm> me
+09:39:49 <mathewm> doh - PPC, not intel
+09:46:51 <davidhouse> good_boy, stil around?
+09:47:17 <good_boy> yes
+09:47:23 <good_boy> i almost got it 
+09:47:26 <davidhouse> cool.
+09:47:32 <good_boy> just one question:
+09:47:46 <good_boy> count a b = map (b ==) a = True where a String and b Char
+09:47:54 <good_boy> i get an error here.
+09:48:13 <davidhouse> what are you trying to say?
+09:48:54 <davidhouse> count the number of times that (b==) is true?
+09:48:57 <good_boy> yes
+09:49:13 <davidhouse> do a filter then take the length.
+09:49:37 <vincenz> davidhouse: linky to google calendar?
+09:50:30 <davidhouse> the way i solved it was to 1) sort the list. 2) group it (the group function). 3) take the length of each substring generated by group. 4) find the string with the minimum length
+09:50:32 <vincenz> good_boy: :
+09:51:08 <davidhouse> good_boy: if you want the entire solution, i can give it to you
+09:51:10 <vincenz> > count a b = sum . map (\x -> if b == x then 1 else 0) $ a in count "abcda" 'a'
+09:51:10 <lambdabot>  parse error on input `='
+09:51:12 <davidhouse> but i'm not sure you do
+09:51:15 <vincenz> > let count a b = sum . map (\x -> if b == x then 1 else 0) $ a in count "abcda" 'a'
+09:51:16 <lambdabot> 2
+09:51:31 <davidhouse> vincenz: filter and length is cleaner, IMO.
+09:51:37 <vincenz> true
+09:51:45 <vincenz> I saw map, so I used map :/
+09:53:14 <good_boy> i dont want to :)
+09:54:33 <davidhouse> try following the method i laid out.
+09:55:11 <davidhouse> > group "aaabbcccccdde" -- this is how group works
+09:55:11 <lambdabot> ["aaa","bb","ccccc","dd","e"]
+09:55:30 <Cale> > group "mississauga"
+09:55:30 <lambdabot> ["m","i","ss","i","ss","a","u","g","a"]
+09:55:32 <good_boy> hm, i actually have it... but its weird because map doesnt work it out for the entire string....
+09:56:07 <Cale> what is it that you're trying to compute?
+09:56:10 <monochrom> mississauga > mississippi
+09:56:16 <davidhouse> > group $ sort "mississauga"
+09:56:16 <lambdabot> ["aa","g","ii","m","ssss","u"]
+09:56:52 <monochrom> > map (=='c') "abccba"
+09:56:53 <lambdabot> [False,False,True,True,False,False]
+09:57:20 <mauke> > sortBy (by length) . group . sort $ "mississauga"; by f a b = f a `compare` f b
+09:57:20 <lambdabot> ["g","m","u","aa","ii","ssss"]
+09:57:23 <davidhouse> Cale, for a Eq a => [[a]], walk through, comparing the nth element of each list. in each comparision, there will be one element which is different to all the others. compile these into a new list.
+09:57:26 <good_boy> where can i paste the code?
+09:57:53 <monochrom> It works, insofar as constructing a list of booleans indicating which items in the original "abccba" are c's.
+09:58:13 <davidhouse> @where paste
+09:58:14 <lambdabot> http://paste.lisp.org/new/haskell
+09:58:16 <monochrom> It is then your " = True" that doesn't work.  It doesn't make sense either.
+09:58:41 <lisppaste2> good_bye pasted "Replacement" at http://paste.lisp.org/display/20186
+09:59:04 <good_boy> i have smth wrong there, a detail...
+09:59:50 <monochrom> substitute seems correct.
+09:59:55 <good_boy> yes
+09:59:57 <good_boy> thats ok
+10:00:40 <monochrom> count is to count those not equal to b?
+10:01:09 <good_boy> the problem is that when i call replaceAll, it does the replacement only as the first element of the list of tupel tells ignoring all the rest
+10:01:23 <good_boy> no.
+10:01:26 <good_boy> for both.
+10:01:43 <monochrom> Then I don't understand your count.
+10:01:58 <good_boy> oh.
+10:02:04 <good_boy> hm
+10:02:34 <good_boy> thats the problem then...
+10:03:34 <monochrom> So much for "the program will work after it type-checks" :)
+10:04:08 <davidhouse> @type let f `attach` g = \x y -> g x `f` g y in (compare `attach`)
+10:04:09 <lambdabot> forall a
+10:04:09 <lambdabot>                         t.
+10:04:09 <lambdabot>                       (Ord a) =>
+10:04:09 <lambdabot>                       (t -> a) -> t -> t -> Ordering
+10:10:05 <good_boy> it seems like map just returns the first string of the list...
+10:10:16 <good_boy> @ map (getCharacter) (transpose (map (substitute a) b))
+10:10:33 <good_boy> the map not inside the brackets...
+10:11:14 <lisppaste2> davidhouse pasted "findUniques" at http://paste.lisp.org/display/20187
+10:11:31 <davidhouse> good_boy: that's my solution, if you get tired.
+10:11:38 <good_boy> ok ^^
+10:11:41 <davidhouse> :)
+10:12:50 <davidhouse> it does require Ord a, which perhaps shouldn't be required
+10:14:36 <davidhouse> oops, one quick adjustment
+10:19:32 <hyrax42_> @type (id &&& length)
+10:19:33 <lambdabot> forall a. [a] -> ([a], Int)
+10:19:56 <lisppaste2> davidhouse annotated #20187 with "fixups" at http://paste.lisp.org/display/20187#1
+10:20:30 <hyrax42_> isn't type on findDifferent wrong
+10:20:47 <davidhouse> hyrax42_: see the new version
+10:20:53 <davidhouse> there were a couple of type errors
+10:20:54 <hyrax42_> oh
+10:21:01 <hyrax42_> I clicked the enw one, but browser didn't snap down
+10:21:03 <hyrax42_> to the annotation
+10:21:05 <davidhouse> ah.
+10:22:06 <hyrax42_> is group . sort the best way to do that?
+10:22:23 <davidhouse> it's a fairly standard combination.
+10:22:30 <hyrax42_> ok
+10:22:38 <davidhouse> it's a shame, because it requires that a be an instance of Ord
+10:22:48 <davidhouse> which really shouldn't be necessary.
+10:23:22 <hyrax42_> also, isn't it enough to have findDifferent' :: Ord a => [a] -> [a]
+10:23:33 <hyrax42_> isn't class Eq a => Ord a?
+10:23:35 <davidhouse> @type group
+10:23:36 <lambdabot> forall a. (Eq a) => [a] -> [[a]]
+10:24:05 <davidhouse> @type minimumBy (comparing length) . group . sort
+10:24:06 <lambdabot> Not in scope: `comparing'
+10:24:25 <davidhouse> @type minimumBy (\x y -> length x `compare` length y) . group . sort
+10:24:26 <lambdabot> forall a.
+10:24:26 <lambdabot>                       (Ord a) =>
+10:24:26 <lambdabot>                       [a] -> [a]
+10:24:32 <davidhouse> apparently so!
+10:24:38 <davidhouse> cool. ideal solution now.
+10:24:51 <hyrax42_> wellideal would be Eq a => [a] -> [a]
+10:24:55 <hyrax42_> but that'd be messier
+10:25:03 <davidhouse> oh yeah.
+10:26:55 <hyrax42_> also, wouldn't it be better to have findUniques = concatMap (maybeToList . findDifferent) . transpose
+10:27:01 <hyrax42_> wait
+10:27:09 <hyrax42_> I'm not eve sure what the problem is
+10:27:11 <davidhouse> depends on what you want to output.
+10:27:26 <davidhouse> i prefer the list of Maybes.
+10:27:43 <davidhouse> otherwise you'll get a list like "bpq" and you'll have no idea where those letters came from
+10:28:20 <hyrax42_> so we're trying to find elements that occur only once at the nth position in the string?
+10:28:25 <hyrax42_> *strings
+10:28:37 <davidhouse> kind of.
+10:28:40 <hyrax42_> why?
+10:29:07 <davidhouse> given [[a]], compare the nth element of each sublist. there should be one that's unique. find said element.
+10:29:13 <davidhouse> dunno, good_boy wanted it.
+10:29:29 <hyrax42_> ah ok, then the maybe's are better
+10:29:48 <davidhouse> but it's easily swappable
+10:30:01 <davidhouse> in fact, we could probably parametrise it over the inner monad.
+10:30:29 <davidhouse> or perhaps not.
+10:30:44 <davidhouse> as the choices are [Maybe a] or [a]. the latter has only one monad.
+10:33:08 <davidhouse> perhaps using some combination involving nubBy would enable us to shed the Ord constraint.
+10:33:36 <davidhouse> > let x = "aaab" in x \\ nub x
+10:33:37 <lambdabot> "aa"
+10:34:00 <davidhouse> hmm...
+10:34:23 <davidhouse> actually, if we just wrote a function that counted the occurances of a given element in a list, that would allow us to get rid of sort.
+10:34:30 <davidhouse> @hoogle [a] -> a -> Int
+10:34:30 <lambdabot> No matches, try a more general search
+10:34:38 <davidhouse> @hoogle a -> [a] -> Int
+10:34:38 <lambdabot> No matches, try a more general search
+10:34:55 <eivuokko> @hoole [a]-> [(a,Int)]
+10:34:56 <lambdabot> No matches, try a more general search
+10:35:08 <eivuokko> Funny.
+10:37:10 <davidhouse> @type filter . (==)
+10:37:11 <lambdabot> forall a. (Eq a) => a -> [a] -> [a]
+10:37:18 <Lemmih> @type map (head &&& length) . group
+10:37:19 <lambdabot> forall a.
+10:37:19 <lambdabot>            (Eq a) =>
+10:37:19 <lambdabot>            [a] -> [(a, Int)]
+10:37:39 <davidhouse> not quite.
+10:37:48 <Lemmih> @type map (head &&& length) . group . sort
+10:37:48 <lambdabot> forall a.
+10:37:49 <lambdabot>               (Ord a) =>
+10:37:49 <lambdabot>               [a] -> [(a, Int)]
+10:37:58 <davidhouse> yeah, we're trying to get rid of the Ord.
+10:38:06 <davidhouse> @type length . filter . (==)
+10:38:06 <lambdabot>   Couldn't match `[a]' against `[a1] -> [a1]'
+10:38:06 <lambdabot>   Expected type: a1 -> [a]
+10:39:52 <davidhouse> @pl \x xs -> length $ filter (==x) xs
+10:39:52 <lambdabot> (length .) . filter . (==)
+10:41:09 <davidhouse> ah well. Ord isn't a big constraint anyway.
+10:42:04 <hyrax42_> @type (\\)
+10:42:05 <lambdabot> forall a. (Eq a) => [a] -> [a] -> [a]
+10:42:44 <davidhouse> difference of two lists.
+10:42:51 <davidhouse> > "hello" \\ "he"
+10:42:52 <lambdabot> "llo"
+10:43:00 <davidhouse> > "hello" \\ "hlo"
+10:43:00 <lambdabot> "el"
+10:43:43 <hyrax42_> ah
+10:43:50 <hyrax42_> type wasn't too descriptive
+10:44:37 <Lemmih> @type let sGroup lst = nub [ fst (partition (==x) lst) | x <- lst ] in map (head &&& length) . sGroup
+10:44:38 <lambdabot> forall a.
+10:44:38 <lambdabot>                                  (Eq [a],
+10:44:38 <lambdabot>                                   Eq a) =>
+10:44:38 <lambdabot>                                  [a]
+10:44:40 <lambdabot>                                  -> [(a,
+10:44:42 <lambdabot>                                    Int)]
+10:45:31 <hyrax42_> isn't Eq [a] superfluous?
+10:45:47 <hyrax42_> gah
+10:45:56 <hyrax42_> oops wrong window
+10:46:22 <Lemmih> @type let sGroup lst = [ fst (partition (==x) lst) | x <- nub lst ] in map (head &&& length) . sGroup
+10:46:22 <lambdabot> forall a.
+10:46:22 <lambdabot>                                  (Eq a) =>
+10:46:22 <lambdabot>                                  [a]
+10:46:24 <lambdabot>                                  -> [(a,
+10:46:26 <lambdabot>                                    Int)]
+10:46:51 <DukeDave> heya
+10:47:44 <DukeDave> would anyone like to help me prove     foldl f v xs = foldr ( \ x g a -> g (f a x)) id xs v
+10:48:06 <DukeDave> I'm trying to revise structural induction and I just can't get it :(
+10:48:08 <SamB> oooookay....
+10:48:34 <SamB> GHC just experienced the impossible trying to compile Gtk2Hs
+10:48:59 <davidhouse> GHC experiences the impossible all the time.
+10:49:21 <dcoutts> SamB, that's a shame :-(
+10:49:28 * SamB better stop using 6.4
+10:50:16 <Lemmih> davidhouse: I'm still waiting for GHC to get me laid. (:
+10:50:46 <davidhouse> Lemmih: you mean you don't get recognised walking down the street?
+10:51:30 <davidhouse> :)
+10:52:23 <SamB> does anyone even know what Lemmih looks like?
+10:52:52 <davidhouse> i presume Lemmih does.
+10:53:05 <Lemmih> davidhouse: It's funny. I somehow manage to avoid all the OSS/Haskell groupies whenever I venture out.
+10:53:22 <ADEpt> davidhouse: nope. The best he sees of himself is reversed image in the mirror ;)
+10:53:47 <davidhouse> SamB, http://darcs.haskell.org/~lemmih/Me.png a bit of googling goes a long way
+10:54:27 <SamB> why would I even *want* to know what Lemmih looks like?
+10:54:41 <SamB> does he even live on the same continent as me?
+10:54:51 <davidhouse> Lemmih, really? i heard SPJ had to install extra security at his place.
+10:55:02 <ADEpt> SamB: he doesnt??
+10:55:02 <davidhouse> armed guards and everything.
+10:55:09 <ADEpt> @localtime Lemmig
+10:55:15 <ADEpt> @localtime Lemmih
+10:55:16 <lambdabot> Local time for Lemmih is Fri May 19 19:55:19 2006
+10:55:23 <SamB> I dunno!
+10:55:37 <SamB> @localtime Lemmih
+10:55:38 <lambdabot> Local time for Lemmih is Fri May 19 19:55:40 2006
+10:55:40 <ADEpt> europe, I guess
+10:56:34 <DukeDave> gah, someone, please put me out of my misery :(
+10:56:38 * davidhouse <- food
+10:56:50 <Lemmih> http://haskell.org/hawiki/HaskellUserLocations
+10:57:21 <SamB> I'm sorry, dave, I'm afraid I can't do that.
+10:57:35 <SamB> Lambdabot won't let me use the IO monad in here!
+10:58:24 <DukeDave> :)
+11:01:50 <DukeDave> http://pastebin.com/726940
+11:01:55 <DukeDave> angst :(
+11:04:55 <SamB> proofs?
+11:05:29 <DukeDave> yeah
+11:05:51 <DukeDave> I am `trying' to revise for an exam next week
+11:06:11 <SamB> ooh, sweet. I don't need to rebuild Gtk2Hs to run this Inform 7 IDE...
+11:06:27 <SamB> I just needed to update my SCIM modules for GTK
+11:07:24 <SamB> okay, what is the trouble?
+11:08:39 * SamB didn't remember he still had plain-old Mozilla installed
+11:08:55 <DukeDave> I can't prove    foldl f v [] = foldr ( \ x g a -> g (f a x)) id [] v
+11:11:25 <SamB> @type foldr ( \ x g a -> g (f a x)) id [] v
+11:11:26 <lambdabot> Not in scope: `f'
+11:11:26 <lambdabot>  
+11:11:26 <lambdabot> <interactive>:1:36: Not in scope: `v'
+11:11:41 <SamB> @type \f -> foldr ( \ x g a -> g (f a x)) id [] v
+11:11:42 <lambdabot> Not in scope: `v'
+11:11:46 <SamB> @type \f v -> foldr ( \ x g a -> g (f a x)) id [] v
+11:11:47 <lambdabot> forall a a1.
+11:11:47 <lambdabot>                  (a -> a1 -> a) -> a -> a
+11:12:14 <SamB> @type \f v -> foldl f v []
+11:12:14 <lambdabot> forall a a1. (a -> a1 -> a) -> a -> a
+11:13:19 <eng> noob question: what's so great about haskell?
+11:13:30 <eng> i don't know any haskell
+11:13:51 <Lemmih> eng: Familiar with functional programming in general?
+11:13:54 <DukeDave> I'm just a little confused about the [] and v swapping over :|
+11:14:11 <SamB> me too
+11:14:14 <eng> yes, i know a little lisp
+11:15:59 <neologism> lisp is functional language? :)
+11:16:22 <eng> isn't it?
+11:16:53 <neologism> its similar
+11:17:15 <eng> hmm...
+11:17:47 <eng> so what makes a functional programming language?
+11:17:59 <mathewm> functions
+11:18:01 <mathewm> ;)
+11:18:11 <mathewm> pattern matching
+11:18:16 <neologism> referential transparency?
+11:18:25 <eng> ah...
+11:18:35 <eng> gotta read up then
+11:18:37 <mathewm> I would call ML functional, but they sacrifice ref. trans.
+11:18:38 <neologism> lisp is not referntially transparent, it has side effects
+11:18:55 <neologism> mathewm: "function" wityh side effects is not a function ;(
+11:19:05 <neologism> (mathematically)
+11:19:25 <mathewm> Then "haskell" cannot have the IO monad
+11:19:28 <mathewm> right?
+11:19:39 <neologism> no.. monads solve it
+11:20:00 <norpan> functional has nothing to do with side effects
+11:20:25 <neologism> norpan: mathematically function is binary relation... no side effects
+11:20:27 <norpan> functional is about programming with functions, functions being first-level objects etc
+11:20:51 <DukeDave> I've always thought of a function as "a mapping from a set of inputs to a set of outputs"
+11:21:06 <neologism> DukeDave: binary relation :)
+11:21:10 <DukeDave> hehe
+11:21:23 <DukeDave> you with you `technical mumbojumbo ;)   '
+11:21:41 <mathewm> hmm - could one argue that side-effects is a function with hidden variables?
+11:22:17 <DukeDave> so, if I have a function,   addCurrentRainfallInInches x
+11:22:55 <DukeDave> that breaks referentially transparency, because it adds a different amount at depending when its evaluated, right?
+11:23:08 <norpan> okay, saying has nothing to do with is maybe a bit strong, but purity is not the most prominent feature in a functional language
+11:23:39 <neologism> DukeDave: it has to be in IO monad
+11:23:59 <norpan> lisp, ml etc are functional languages in my book
+11:24:36 <neologism> norpan: lisp pretends to be functional very well :)
+11:24:48 <neologism> and you can code functionally in lisp
+11:25:04 <norpan> closures, higher-order functions
+11:25:04 <neologism> but you can code functionally even in C
+11:25:29 <SamB> C is just not very good at it, forcing you to make your own closures manually
+11:25:36 <neologism> yes
+11:25:48 <SamB> and the GC has to be abstracted away, too
+11:25:52 <sieni_> SamB: even that isn't too bad, but collecting all the garbage generated by creating closures
+11:25:53 <norpan> then it's not functional, these things should be built-in of course
+11:25:59 <norpan> you can code anything in alla languages
+11:26:46 <eivuokko> Functional languages just tend to highlight composing functions.
+11:26:57 <SamB> well, if you don't compare memory addresses and don't think about how the GC works, you can still write functional code in C...
+11:27:17 <SamB> but it is easier to let GHC or JHC do it for you.
+11:27:34 <neologism> func(int i) {if (i == 0) return 1; return i * func(i - 1);}
+11:27:42 <neologism> 100% functional :)
+11:27:44 <sieni_> SamB: I think that you could add syntax for lambdas to C if one is satisfied with Boehm's garbage collector
+11:28:23 <SamB> how would you type them?
+11:28:31 <sieni_> SamB: type?
+11:28:53 <SamB> as in type system?
+11:29:07 <flux__> they would be like other functions in C?
+11:29:10 <sieni_> SamB: well, functions have types in C, right? the parameters and return value must match
+11:29:20 <flux__> anyway, gcc has an extension that allows local functions
+11:29:25 <sieni_> flux__: yes
+11:29:35 <flux__> and those local functions have the scope so that they may access the parent function's variables
+11:29:37 <SamB> because you would have to pass around the variables *and* the function pointer
+11:29:45 <mathewm> I wish local functions worked in C++ too :*(
+11:29:49 <flux__> so if those functions were anonymous, it would be like lambda
+11:30:13 <flux__> however the gcc implementation will not work if you'll return such functions.. or atleast not if they try to access the variables after the parent function has exited
+11:30:32 <eivuokko> mathewm, You can have them via local classes.  Just that local classes cannot be template params.  But that's probably gonna get lifted in next std.
+11:30:40 <sieni_> flux__: only thing that's needed is a closure conversion so that if you say "lambda", then it needs to make all variables that are outside the lamba, but referred from the lambda, allocated from the heap
+11:31:23 <SamB> wouldn't it be easier to just use Haskell?
+11:31:30 <SamB> and more efficient, to boot?
+11:31:34 <sieni_> SamB: or standard ml
+11:32:23 <sieni_> SamB: I'm not saying that it would be worth wasting time to integrate closures into C.
+11:36:11 <flux__> samb, well, if you already have 1000000 lines of C around, it might not be that easy to just using haskell ;)
+11:36:33 <SamB_XP> well, it probably isn't purely functional C, either!
+11:36:36 <flux__> however, is it better to switch to some non-C that looks like C but is extended dramatically? not so sure if that helps..
+11:36:36 <SamB_XP> or even mostly so
+11:37:04 <Sentinel> use c++
+11:37:11 <SamB_XP> hahaha
+11:38:40 <monochrom> The Haskell community gets a lot of questions "does Haskell allow ____ ?" and they make Haskell sound bad.  (Most often ___ is a discouraged imperative idiom.)
+11:38:47 <davidhouse> @faq
+11:38:47 <lambdabot> The answer is: Yes! Haskell can do that.
+11:39:40 <monochrom> We should organize ourselves to overswamp the C/C++ community with questions like "does C++ allow closures, nested functions, ..." so that C/C++ sound really really bad.
+11:40:22 <Sentinel> monochrom: thats impossible cause nested fuctions isnt even needed, you can call functions in others functions so
+11:41:07 <sjanssen_> monochrom: I'm in #C++ right now
+11:41:10 <SamB_XP> how about partial application?
+11:41:17 <Pegazus> what do you have against C++?
+11:41:33 <Pegazus> <SamB_XP> how about partial application? --> you have that kind of functionality with functors / libraries...
+11:41:46 <SamB_XP> it goes in the wrong direction from C?
+11:41:52 <eivuokko> SamB, no?
+11:41:54 <Pegazus> it doesn't
+11:41:57 <Pegazus> C++ is great!
+11:41:57 <SamB_XP> it is too complicated for its own good...
+11:42:03 <sieni_> Pegazus: It's a Big Hack. Too complicated for no good reason.
+11:42:06 <Sentinel> c++ is really good
+11:42:07 <eivuokko> SamB, you don't have to use complicated parts!
+11:42:11 <monochrom> I have nothing against C++.  I have something against double standard.
+11:42:12 <Pegazus> if it's too complicated for you, then don't use it!!!
+11:42:16 <SamB_XP> yes, but other people will!
+11:42:18 <eivuokko> SamB, that goes nowhere ;)
+11:42:26 <Pegazus> C++ is a really complex language
+11:42:27 <davidhouse> Pegazus: we plan not to :)
+11:42:30 <Pegazus> complex, and dangerous...
+11:42:38 <davidhouse> haskell is more complex.
+11:42:40 <SamB_XP> and maybe there will not be a simple way to do something
+11:42:41 <sieni_> Pegazus: Do you really know all the details of template instantiation?
+11:42:42 <Pegazus> that means, that if you know how to use it properly, it's the best ally you'll ever have...
+11:42:43 <Sentinel> c++ dont have any "double standard" it has one standard from 1998 that was updates 2003
+11:42:52 <Pegazus> and if you don't, you'll only make disasters!!!
+11:43:06 <Pegazus> <sieni_> Pegazus: Do you really know all the details of template instantiation? --> nope, but i use them happyly :)
+11:43:09 <sjanssen_> any other features I should ask for in #c++ ?
+11:43:09 <monochrom> "double standard" refers to people.
+11:43:47 <Sentinel> monochrom: what about it, dont you find that for other languages?
+11:43:49 <eivuokko> sieni, do you know all the details of class entailment when there's MPTC's and FD's around? ;)
+11:44:08 <monochrom> "double standard" refers to people not languages.
+11:44:53 <Sentinel> monochrom: exactly, and i refered to people uses other languages, or what people are you referring to?
+11:45:14 <sieni_> eivuokko: no :-), but I've been reading Vandevoorde and Josuttis's book about "C++ Templates" and the whole thing is absurdly complicated
+11:45:21 <SamB_XP> did I mention the proliferation of strange syntactical forms?
+11:45:26 <mahogny> C++ >> /dev/null;
+11:45:33 <monochrom> I refer to people who say "that language makes it hard to xxx" while their favourite language makes it hard to yyy.
+11:45:51 <Sentinel> mahogny: "much greater than" yes
+11:46:06 <Pegazus> <sieni_> eivuokko: no :-), but I've been reading Vandevoorde and Josuttis's book about "C++ Templates" and the whole thing is absurdly complicated --> the fact that it's too complicated for you, doesn't mean it's not simple for others
+11:46:09 <mahogny> Sentinel, afraid I didn't use the mathematical >> in this case :)
+11:46:11 * sjanssen_ didn't have as much fun in #c++ as he hoped
+11:46:21 <Sentinel> hehe
+11:46:23 <vincenz> re
+11:46:35 <Pegazus> if you are not capable enought of handling C++, it's not C++ problem...
+11:46:40 <sieni_> Pegazus: Why are you repeating my comments?
+11:46:44 <ffranzosi> Summer of Code -> hi guys, my mentor is having troubles to link himself with my possible project, he says that there is no link in his mentor home to do so, could anybody help me?
+11:46:57 <Pegazus> <sieni_> Pegazus: Why are you repeating my comments? --> to answer you
+11:47:19 <mahogny> Pegazus, that depends on your definitions of "handle"
+11:47:28 <davidhouse> ffranzosi: you'll want to ping xerox
+11:47:28 <monochrom> You need a nestable quotation language.
+11:47:28 <SamB_XP> anyway, some of us like to deal with complex problems rather than dealing with complex languages
+11:47:52 <sieni_> Pegazus: I'm perfectly capable of handling C++. The trouble with C++ that gives you plethora of subtle ways to shoot yourself in the foot (for example compared to C) mostly without giving anything in return
+11:48:04 <monochrom> heh sjanssen, what did you get?
+11:48:16 <ffranzosi> xerox__:  my mentor is having troubles to link himself with my possible project, he says that there is no link in his mentor home to do so, could you help me one more time?
+11:48:36 <Pegazus> sieni_: that's the wonderfull thing about C++. it gives you all the power you want... if you don't know how to manage it, then it's your problem...
+11:48:56 <sjanssen_> monochrom: nothing, somebody named 'pwned' gave me some decent info on Boost libraries that aim to support some functional style
+11:48:59 <Pegazus> i mean, you are saying like: I don't like this, because it gives me much options or ways to do things wrong!!! and i want to be controlled so i can't do them...
+11:49:03 <TuringTest> Pegazus: No...it is your problem, your co-worker's problem, and the user's problem.
+11:49:06 * SamB likes Haskell-brand power better
+11:49:21 <Pegazus> it's not my problem, because i know how to work with that, and take the best out of it...
+11:49:21 <Sentinel> sieni_: that is TOTALLY wrong, stl gives very big adventages, especially to speed up developement and also OO for big projects, and its still legal to write c++ code and exclude some parts for certain projects when you could feel a need for it, templates or something for example.
+11:49:28 <Pegazus> and i get very good code, with really few errors...
+11:49:37 <monochrom> sjanssen: have you also tried creating your own operators like >>= ?
+11:49:45 <eivuokko> Pegazus, you really don't know what you are talking about.  C++ does not give you anymore power than haskell.  This discussion is purely about taste, not "power".
+11:49:49 <mahogny> C++ := low level programming in large scale, also known as Bad Practice (tm)
+11:50:04 <Pegazus> C++ gives you much more power than haskell :)
+11:50:09 <vincenz> eivuokko: that's not entirely correct. templates give ducktyping capabilities at compiletime
+11:50:12 <sieni_> Sentinel: Why would you think that Haskell, OCaml or Standard ML woulnd't give you similar benefits without the complications?
+11:50:22 <davidhouse> Pegazus: what can you do in C++ that you can't do in haskell?
+11:50:22 <mahogny> Pegazus, what power and what do you need it for
+11:50:30 <norpan> don't feed the trolls
+11:50:32 <tony2> C++ all the speed of Assembly combined with all the power of.......................
+11:50:35 <Sentinel> eivuokko: you are wrong, its way more portable and haskell and there is more documentation for example, you could see that as a power
+11:50:37 <tony2> Assembly
+11:50:38 <eivuokko> vincenz, Oh, ok.  I didn't mean power like that.  Power to make something happen.
+11:50:40 <Pegazus> davidhouse: modify vars :)
+11:50:46 <vincenz> eivuokko: but in general I agree with you
+11:50:48 * SamB still doesn't know why he would ever need to type ducks
+11:50:50 <vincenz> haskell - power == c++ power
+11:50:55 <vincenz> but haskell is much clearer and succint
+11:50:59 <mahogny> Pegazus, IORef is for you :)
+11:51:00 <TuringTest> Pegazus: IORef, Ptr, StablePtr , etc...
+11:51:01 <SamB> a duck is a duck -- what do I care what type it is?
+11:51:14 <Pegazus> i want pointers to memory :)
+11:51:15 <Pegazus> anyway...
+11:51:18 <davidhouse> Pegazus: at a higher level. what applications can you write in C++ but not in haskell?
+11:51:24 <vincenz> in fact if typeclasses were inlien instead of using a polymorphic vtable, they'd have the same power as templates
+11:51:24 <sjanssen_> Pegazus: Foreign.Ptr ?
+11:51:25 <tony2> if you want too eat it you should care .
+11:51:26 <SamB> Foreign.Ptr, anyone?
+11:51:26 <Pegazus> can you give me all this: www.boost.org on haskell?
+11:51:31 <vincenz> Pegazus: LOL
+11:51:37 <vincenz> Pegazus: boost is inspired by functional languages
+11:51:38 <Pegazus> <davidhouse> Pegazus: at a higher level. what applications can you write in C++ but not in haskell? ---> an operative system :)
+11:51:49 <SamB> well...
+11:51:50 <sjanssen_> Pegazus: it's been done
+11:51:51 <SamB> not really.
+11:51:51 <davidhouse> an operating system?
+11:51:54 <davidhouse> google for House.
+11:52:00 <davidhouse> @where house
+11:52:00 <lambdabot> http://www.cse.ogi.edu/~hallgren/House/
+11:52:03 <vincenz> Pegazus: operating systems are written in c not c+=
+11:52:08 <vincenz> Pegazus: get your facts straight
+11:52:11 <eivuokko> Sentinel, yes, more portable maybe.  But complete C++ implementations are not that common.  As for documentation, it's a bit so-so, and docs aren't really power :)  Just means sometimes.
+11:52:11 <Pegazus> so?
+11:52:13 * psnl wonders when an operating system became an application
+11:52:15 <neologism> vincenz: some are in c++
+11:52:15 <Pegazus> you can write them in C++
+11:52:19 <mahogny> vincenz, not completely correct...
+11:52:19 <SamB> its just that, lacking struct support, it is not much fun to write, for instance, filesystems...
+11:52:21 <vincenz> neologism: and some are in haskell
+11:52:29 <davidhouse> Pegazus: yes you can. you can also write them in haskell.
+11:52:33 <Sentinel> vincenz: its you who should get facts straight, you could mix both assembly/c and c++ in an OS if you want
+11:52:39 <tony2> galois make assured OS in haskell, try doing that in c++.
+11:52:39 <eivuokko> Sentinel, but if we count yhc, haskell probably shoots right past C++ in portability.  But of course that's bytecode, so it's a bit diffrent comparison.
+11:52:40 <vincenz> Sentinel: as well as c++
+11:52:41 <vincenz> erm
+11:52:42 <norpan> please
+11:52:43 <vincenz> haskell
+11:52:49 <SamB> psnl: well, when did application begin to mean "program"?
+11:52:50 <norpan> don't make me /ignore you
+11:52:54 <Sentinel> vincenz: i havent said you couldnt
+11:53:03 <Sentinel> i know about the test system they made
+11:53:08 <vincenz> yep :)
+11:53:15 <ffranzosi> xerox__: my mentor is having troubles to link himself with my possible project, he says that there is no link in his mentor home to do so. He is already registered in the wiki as interested mentor of my project. But he could not yet do the same at Google. Could you help me one more time?
+11:53:23 <vincenz> for all c++ lovers
+11:53:31 <SamB> ffranzosi: try #haskell-overflow?
+11:53:36 <vincenz> http://www.notvincenz.com/wiki/uploads/Main/icme2006.pdf
+11:53:37 <Lemmih> ffranzosi: I'm not sure he's around.
+11:53:55 <norpan> i had a c++ issue at work yesterday
+11:53:58 <norpan> couldn't figure it out
+11:54:07 <SamB> #haskell-overflow is less crowded and also mentions Summer of Code in the topic
+11:54:19 <Pegazus> does haskell has multi inherence?
+11:54:25 <ffranzosi> SamB and Lemmih: thanks for the advice
+11:54:27 <SamB> sure!
+11:54:29 <vincenz> Pegazus: yes
+11:54:34 <sjanssen_> Pegazus: Haskell doesn't really have intheritance
+11:54:36 <Pegazus> with a nice syntaxis?
+11:54:38 <vincenz> sjanssen_: typeclasses
+11:54:42 <MarcWeber> Is anyone using haskore? I can't find the dependencies for modules Hsc.[...]
+11:54:45 <Pegazus> does haskell has virtual functions?
+11:54:49 <norpan> it turned out a superclass had one of it's virtual method's arguments changed from unsigned to int and therefore the subclass method was not inheriting it anymore. couldn't for my life figure our why the subclass method wasn't called
+11:54:53 <Pegazus> and static "virtual functions"?
+11:54:54 <vincenz> Pegazus: you're mimssing the point
+11:54:54 <davidhouse> Pegazus: you're comparing apples and pears.
+11:54:56 <norpan> that's c++ for you
+11:54:57 <SamB> no, haskell only has real functions
+11:54:59 <Pegazus> :)
+11:55:00 <Pegazus> ok
+11:55:01 <Sentinel> vincenz: im not gonna read all that through now, but you can write c++ without templates in a project if you want that, and also from the tests ive seen haskell often performs pretty good but is behind both c and c++
+11:55:07 <vincenz> Pegazus: you're looking at specific features instead of what they enable
+11:55:14 <Pegazus> C++ syntaxis is much more nicer to me
+11:55:14 <monochrom> See, those are the questions I am talking about.
+11:55:23 <SamB> you can pass bottom values around and pretend they are functions, though, if you like
+11:55:23 <mahogny> Pegazus, we have first class functions and partial application. that's virtual functions on adrenaline
+11:55:25 <Philippa> *reads up*
+11:55:25 <vincenz> Sentinel: I'm not arguing for c++
+11:55:37 <Sentinel> sounds like you are arguing against it
+11:55:44 <Philippa> IMO, C++ gives you slightly more power of one sort than Haskell does in practice
+11:55:44 <Pegazus> <mahogny>: no idea what first class functions are. but partial application has nothing to do with virtual functions
+11:55:44 <monochrom> Does C++ let you make new operator names like >>= ?
+11:56:00 <mahogny> Pegazus, I mean, functions as first class values
+11:56:01 <monochrom> Does C++ have the do notation and the arrow notation?
+11:56:02 <Philippa> Pegazus: you'll learn Haskell syntax over time. It's a lot nicer in many regards than C++ once you've got it down
+11:56:03 <SamB> Philippa: I'm sure it does.
+11:56:06 <davidhouse> can you use bindings in cases?
+11:56:06 <vincenz> monochrom: I miss the fact that the  . operator is not overloadable in c++ :(
+11:56:08 <eivuokko> Philippa, what sort of power?  Except more libs?
+11:56:15 <SamB> but it is also much harder to follow, afaict
+11:56:21 <vincenz> monochrom: if I could overload the . operator, the stuff mentioned in my paper would even be cooler
+11:56:26 <Philippa> eivuokko: much tighter control over memory usage if you care about it
+11:56:28 <Sentinel> monochrom: that aint really needed, you can overload allready existing operators, otherwise just make functions.. whats the problem
+11:56:32 <Pegazus> <vincenz> monochrom: I miss the fact that the  . operator is not overloadable in c++ :( --> it is, but not as an operator...
+11:56:36 <davidhouse> > let x = "hello"; y = "hello" in case y of x -> True; _ -> False
+11:56:36 <lambdabot>   Warning: Pattern match(es) are overlapped
+11:56:37 <lambdabot>      In a case alternative: _ -> ...
+11:56:42 <eivuokko> Philippa, Ah, well.
+11:56:45 <davidhouse> no.
+11:56:46 <vincenz> Pegazus: no it is not
+11:56:50 <Pegazus> you have something called "ScopE"
+11:56:52 <Philippa> there're systems that matters for
+11:56:52 <vincenz> Pegazus: read my paper
+11:56:53 <Pegazus> yes, it is
+11:57:02 <Pegazus> i don't want to read your paper
+11:57:14 <Pegazus> with functional objects you can do anything you can do in haskell with functions
+11:57:15 <Sentinel> and -> exists in c++
+11:57:26 <davidhouse> Pegazus: so you could define an operator . defined by (f . g) = f (g(x))
+11:57:28 <hyrax42_> what's going on
+11:57:30 <sjanssen_> davidhouse: doing bindings like that just shadow the variable, they won't check for equality
+11:57:37 <norpan> 7ignore pegazus
+11:57:38 <vincenz> Pegazus: look I work mostly on c++ in my professional experience, I know what and what isn't possible with c++
+11:57:38 <TuringTest> Pegazus: You should check out http://homepages.cwi.nl/~ralf/OOHaskell/ "Haskell's overlooked object system"
+11:57:39 <norpan> oops
+11:57:43 <Philippa> Pegazus: no you can't. Missing out type annotations springs to mind
+11:57:45 <vincenz> Pegazus: . and .* are nonoverloadable
+11:57:50 <mahogny> Pegazus, you can also do anything haskell does in assembly. that doesn't mean we should use it :)
+11:57:52 <davidhouse> Pegazus: of course. we're not trying to argue that haskell is more powerful than C++.
+11:57:59 <davidhouse> sjanssen_: yes, so i see.
+11:58:03 <Philippa> magogny: not true. Portable code
+11:58:06 <SamB> Pegazus: can you make typeclasses?
+11:58:06 <SamB> can you define monads?
+11:58:14 <Pegazus> <vincenz> Pegazus: . and .* are nonoverloadable --> you can't do it with ., but you can do it with another operator
+11:58:18 <davidhouse> SamB, apples and pears.
+11:58:23 <mahogny> Philippa, I think you got my argument the other way around :P
+11:58:26 <TuringTest> Pegazus: in "Haskell's overlooked object system" the demonstrate that Haskell can do essentially every OO thing you want.
+11:58:29 <vincenz> Pegazus: well yes but then you'd sort of forego the issue
+11:58:39 <vincenz> Pegazus: (&object)->method()
+11:58:40 <Philippa> mahogny: you can't write portable code in asm :-)
+11:58:42 <davidhouse> the point is that neither haskell nor C++ are more powerful than the other. both can do anything you can think of.
+11:58:54 <Pegazus> <davidhouse> the point is that neither haskell nor C++ are more powerful than the other. both can do anything you can think of. --> both can do all things
+11:58:56 <mahogny> Philippa, yes. I was arguing for haskell in that sentence :)
+11:59:00 <Pegazus> but most of the things are easier in C++ :)
+11:59:03 <Philippa> davidhouse: oh FFS, given how Haskell treats IO surely you can avoid the turing tarpit fuckup?
+11:59:04 <vincenz> HAH
+11:59:09 <sjanssen_> TuringTest: that paper is sexy.  Not only can Haskell do OO, even the classes defined in it a first-class
+11:59:14 <Sentinel> As a fun fact i can say like this, there is reasons why for example games that needs really good performance is cooded in c++ and not in haskell :)
+11:59:34 <davidhouse> Pegazus: 'easy' is subjective.
+11:59:37 <Philippa> IO matters, therefore turing equivalence is not enough. I've already given an example of things C++ can do that Haskell can't
+11:59:37 <vincenz> Sentinel: did you see the presentation about a lead game developer arguing for functiona llanguages?
+11:59:40 <Pegazus> i don't argue about performance because that's implementation/processor defined...
+11:59:41 <TuringTest> Pegazus: The Haskell entries in the shootout are shorter than the C++ : http://shootout.alioth.debian.org/gp4/benchmark.php?test=all&lang=all
+11:59:44 <monochrom> Oh there are also reasons why we are in #haskell not #c++
+11:59:47 <Pegazus> i'm arguing about easyness of writting
+11:59:48 <Sentinel> vincenz: nope
+11:59:49 <eivuokko> Sentinel, have you seen recentish presentation by Tim Sweeney on some conference?
+11:59:52 <hyrax42_> it would be nice if you could /ignore an entire thread of conversation
+11:59:55 <sjanssen_> vincenz: I'm not registered on this nick, and I'm too lazy to do it
+11:59:57 <vincenz> Sentinel: quite interesting, it's on lambda-the-ultimate
+11:59:59 <mahogny> Sentinel, real fact: the gaming industry is totally inbred and won't leave C++ until they are taken out of their market by competitors
+12:00:00 <davidhouse> Pegazus: meaning that how easy you find something depends on what you know. therefore you can't argue C++ is easier to use.
+12:00:07 * Glimi agrees with hyrax42_ 
+12:00:10 <Sentinel> vincenz: oh, url?
+12:00:10 <psnl> hyrax42_: you can in irssi, I just can't rember the bit of magic
+12:00:20 <Philippa> mahogny: when Tim Sweeney's one of those competitors, there's some chance it'll happen in at least some niches
+12:00:21 <davidhouse> hyrax42_: Alt+F4
+12:00:24 <vincenz> Sentinel: looking it up
+12:00:30 <hyrax42_> davidhouse: :)
+12:00:35 <davidhouse> or Ctrl+Alt+Esc if you're into that kind of thing.
+12:00:46 <eivuokko> mahogny, a lot of games use other languages than just C++.  A lot of games have to use some C++ as it's for example the main API for Direct X
+12:00:48 <Sentinel> mahogny: you think its just in their head and c/c++ have no adventages at all?
+12:00:53 <hyrax42_> well I'm on os X, so command+w is what we'd be after
+12:01:05 <mahogny> Philippa, yeah. I don't think haskell can replace c++ all the way for games. it would do well for the higher level parts but not for engines etc
+12:01:06 * psnl twitches at Pegazus: "both can do all things" my arse
+12:01:11 <Pegazus> well, i've to go... but we all know really, that C++ beats haskell in every way :)
+12:01:28 <Philippa> mahogny: I don't think Haskell's the ideal lang there. Games want a strict-by-default language for now, amongst other things
+12:01:29 <hyrax42_> goodbye
+12:01:32 * TuringTest waves goodbye to the troll
+12:01:36 <davidhouse> Pegazus: you've convinced no-one, given no valid arguments and not made any valid points. goodby.
+12:01:37 <Sentinel> indeed, for engines and stuff performance is really important
+12:01:43 <vincenz> anyone remember the link to the paper about functional progrmming for games?
+12:01:51 <vincenz> PLOOP 2004 or something I think
+12:02:00 <Pegazus> <davidhouse> taking into account that i'm in #Haskell channel, that isn't that bad :)
+12:02:00 <Philippa> which one? The one that does space invaders in Yampa?
+12:02:03 <SamB> er, C++ is not exactly a better Haskell.
+12:02:06 <Philippa> Pegazus: yes it is
+12:02:09 <mahogny> Sentinel, people who wants to go into games programming learn c++ "because that's what is used". with the philosophy, you can't expect anything else than inbred language usage
+12:02:11 <Philippa> SamB: quite
+12:02:11 <SamB> it is definately a better C++ than Haskell, though...
+12:02:14 <sjanssen_> @remember Pegazus well, i've to go... but we all know really, that C++ beats haskell in every way :)
+12:02:14 <lambdabot> Unknown command, try @list
+12:02:16 <vincenz> Sentinel: http://www.cs.princeton.edu/~dpw/popl/06/Tim-POPL.ppt
+12:02:27 <Pegazus> haha
+12:02:28 <Philippa> Pegazus: valid arguments're valid anywhere. Deal with it
+12:02:33 <Sentinel> vincenz: thx, i'll check it out
+12:02:37 <Pegazus> let's all go to #C++
+12:02:43 <davidhouse> Pegazus: if one were truly superior to the other, you would at least be able to give one point to support yourselves.
+12:02:45 <Pegazus> and we can check if you convince anyone there
+12:02:46 <davidhouse> *yourself
+12:02:54 <davidhouse> we're not trying to claim haskell > C++ ;)
+12:03:00 <Pegazus> <davidhouse> i've coded in both, and i found C++ much more nicer and powerfull
+12:03:01 <vincenz> Sentinel: don't expect too much technical stuff, it's mostly an intuitistic piece of writing
+12:03:02 <monochrom> Last I heard, in a game there is a core part (primitive operations, e.g., graphics) in C/C++ or asm, and there is the game logic part in some very high-level in-house scripting language.
+12:03:04 <Sentinel> mahogny: yeah thats partially true, its an obvious result
+12:03:13 <msph> Hm?
+12:03:14 <Pegazus> i think templates are great
+12:03:15 <Philippa> monochrom: that's only true in some cases
+12:03:16 <davidhouse> Pegazus: fine. that's your opinion. just don't try sharing it unless you have some arguments.
+12:03:20 <SamB> well, assuming the superior one was C++, they would
+12:03:21 <Pegazus> they give you the most power with metaprogramming and generics
+12:03:24 <monochrom> Ah, ok.
+12:03:24 <msph> Sorry, misstell.
+12:03:25 <Philippa> although there's a lot of lua floating around
+12:03:28 <Pegazus> and they are as efficient as writting hand code...
+12:03:33 <Philippa> Pegazus: No, they don't
+12:03:41 <vincenz> Pegazus: it's known that the most flexible systems are dynamic typing systems
+12:03:42 <Pegazus> you can write components that can plug in one into another, really welll
+12:03:49 <Pegazus> <vincenz> Pegazus: it's known that the most flexible systems are dynamic typing systems ---> that's false
+12:03:57 <Philippa> and unless you've really looked into things like ML's module system, Haskell's type classes and staged programming, you're not qualified to make the statement either
+12:04:09 <Pegazus> the problem of static typing systems, is that they don't generally provide good metaprogramming and generic capabilities
+12:04:21 <SamB> monochrom: only sometimes they don't use an in-house scripting language, but some open source language instead
+12:04:22 <Philippa> C++ doesn't provide good metaprogramming capabilities
+12:04:26 <vincenz> nope
+12:04:28 <vincenz> I experienced that today
+12:04:29 <Philippa> it has them by accident in a drastically painful manner
+12:04:31 <SamB> like Python, for instance
+12:04:39 * vincenz had to get a horrible hack to get type2int
+12:04:41 <Philippa> compare and contrast with, say, lisp macros
+12:05:06 <Philippa> I had to break the type system just to encode something akin to an algebraic datatype. And that's just a safe tagged union, FFS
+12:05:24 <sjanssen_> hmm, Redhat, eh?
+12:05:25 <Pegazus> nearly all virtual functions used in the world, could be decided at compile time
+12:05:40 <Sentinel> monochrom: well that changes, most is probably written in c/c++ with a little asm in very critical performance stuff. Then ofc some scripting can be used to handle the "world or something like that" but most will probably be c/c++ anyway
+12:05:42 <vincenz> Pegazus: incorrect, only if you're calling to yourself
+12:05:42 <Pegazus> but static languages doesn't support that feature
+12:05:52 <SamB> Pegazus: that is exactly what JHC tries to do
+12:05:59 <Philippa> SamB: not tries to. Does.
+12:06:02 <Pegazus> C++ gives you a lot of that power
+12:06:03 <TuringTest> Pegazus: nonsense, there are many whole-program compilers that do that for ML languages
+12:06:08 <vincenz> yep
+12:06:10 <vincenz> SML!
+12:06:18 <defcon8> down with all languages
+12:06:22 <defcon8> cant you guys write in binary?
+12:06:29 <monochrom> I can.
+12:06:29 <Philippa> Pegazus: you're in a chan where a good many people research various aspects of programming languages. Really, you're outclassed and should try learn for a while
+12:06:32 <vincenz> defcon8: like the guy with the two key keyboard? 0 and 1
+12:06:32 <Pegazus> C++ has a bunch of things, all mixed, that i haven't seen so well coordinated in any other language
+12:06:36 <SamB> Philippa: doesn't it punt occassionally?
+12:06:39 <psnl> defcon8: been a while for me
+12:06:45 <Philippa> SamB: nope, GRIN's entirely first-order
+12:06:48 * TuringTest shudders : coordinated?
+12:06:50 <eivuokko> defcon8, if that's the only choice, some, sure.
+12:06:50 <Philippa> it *can't* punt
+12:06:58 <psnl> does anyone here have ops?
+12:07:15 <hyrax42_> shapr isn't in... who else has ops?
+12:07:15 <Pegazus> C++ features mix really well to give you kind of unlimited power
+12:07:24 <vincenz> Philippa: out of curiousity, do you think that a template that curries functors in c++ is pulishable?
+12:07:28 <Sentinel> hardly unlimited :D
+12:07:32 <Pegazus> they do
+12:07:33 <vincenz> s/pul/publ
+12:07:38 <SamB> Philippa: you mean it inlines all the eval calls every time?
+12:07:39 <Sentinel> but its good yes
+12:07:42 <Philippa> Pegazus: you're not giving any good arguments, and incidentally I can find plenty of limits
+12:07:47 <Pegazus> MACROS + TEMPLATES + OOP can give you nearly all you want
+12:07:52 <eivuokko> Pegazus, can you please stop.  Nobody's really listening that over-the-edge boasting.
+12:07:52 <Pegazus> tell me a limit
+12:07:55 <Philippa> SamB: I believe it does that, yes
+12:07:55 <vincenz> Pegazus: so can 0s and 1s
+12:08:00 <sjanssen_> vincenz: does it do more than the similar things in Boost?
+12:08:04 <Pegazus> yes, but C++ in a nice way
+12:08:08 <vincenz> sjanssen_: does boost do currying?
+12:08:08 <Philippa> Pegazus: Parse a string at compile-time. Go on.
+12:08:10 <monochrom> Pegazus: I have looked at the coordination too, and I cannot say it is well.  I can only say the coordination is no worse than other mainstream languages.
+12:08:13 <vincenz> sjanssen_: I can show you a use case
+12:08:16 <hyrax42_> does this happen much in #haskell?
+12:08:18 <Pegazus> <vincenz> sjanssen_: does boost do currying? --> you can do it with boost::bind
+12:08:23 <TuringTest> Pegazus: Can you write, in C++, a call-with-current-continuation like function?
+12:08:23 <Philippa> Pegazus: write a compiler in C++ by stage-annotating an interpreter. I've done that in Template Haskell.
+12:08:23 <hyrax42_> it's teh first time I see it since I started idling here
+12:08:31 <sjanssen_> vincenz: yeah, if you've got code, I'd like to see it
+12:08:32 <Pegazus> <Philippa> Pegazus: Parse a string at compile-time. Go on. --> you can with macros
+12:08:32 <psnl> hyrax42_: first time for me too
+12:08:34 <mahogny> Pegazus, I consider any language without higher order functions or partial application majorly crippled. might as well code in C without using functions
+12:08:37 <vincenz> sjanssen_: http://rafb.net/paste/results/hJDnuk82.html
+12:08:43 <vincenz> sjanssen_: that's a use case
+12:08:50 <Philippa> Pegazus: not if you need a turing-complete parser you can't
+12:08:52 <vincenz> it could be cleaned a lot by doing some more automated detection
+12:08:57 <vincenz> but that wasn't my aim at the time
+12:09:00 <Philippa> C++ macros're equivalent to a stack automaton
+12:09:01 <psnl> Pegazus: I want a pony, does C++ give it to me?
+12:09:05 <Pegazus> <mahogny> Pegazus, I consider any language without higher order functions or partial application majorly crippled. might as well code in C without using functions ---> boost::bind and functors provides that functionality
+12:09:21 <Philippa> not comfortably they don't
+12:09:21 <Pegazus> <Philippa> C++ macros're equivalent to a stack automaton --> macros are more powerfull that stack automaton, because they are turin complete...
+12:09:28 <Philippa> Pegazus: no they're not
+12:09:30 <mahogny> Pegazus, I don't see why I would want to mess with an external library for such a fundamental feature
+12:09:31 <Pegazus> they are
+12:09:36 <vincenz> sjanssen_: thoughts?
+12:09:50 <Philippa> really, a friend and I sat down and worked this out. As of the current standard, the preprocessor is not turing complete
+12:09:52 <Pegazus> templates are also turing complete..
+12:09:57 <Philippa> but they can't parse strings
+12:09:59 <Philippa> funny, huh?
+12:10:16 <Pegazus> you have to do really bizzarre things to get it do it
+12:10:18 <Pegazus> but it's possible...
+12:10:18 <eivuokko> Philippa, was this just macros or whole preprocessor (ie #include repetition/recursion)?
+12:10:19 <Philippa> (string defined as either of a std::string or a char *)
+12:10:22 <Pegazus> check Boost.PP
+12:10:30 <Sentinel> important to remember in most cases its more important who's behind the keyboard and what algorithm and so on you are using than the language itself for the performance
+12:10:39 <Philippa> eivuokko: Point, I can't remember if we considered that
+12:10:41 <psnl> Pegazus: turing completeness is over rated in so many different ways
+12:10:58 <vincenz> Philippa: if you want to see something wacky: http://rafb.net/paste/results/hJDnuk82.html
+12:10:59 <Philippa> I *think* we did though
+12:11:05 <Pegazus> well, i'g2G... BYE!
+12:11:09 <monochrom> Pegazus: could you show an example how it is like to use boost::bind to do currying?  For example "let f x y = x+y+1 in f 10" how do I say a similar thing in boost?
+12:11:19 <mahogny> Sentinel, assuming a decent programmer, there's more to it though
+12:11:30 <sjanssen_> vincenz: I'm not too familiar with other efforts to do this sort of thing in C++, not sure whether it's revolutionary
+12:11:30 <Pegazus> later when i came back i tell you
+12:11:32 <Philippa> Pegazus: a sane language *doesn't* make you jump through flaming hoops to do these things, sorry
+12:11:34 <Pegazus> for the time being i must go
+12:11:45 <Philippa> C++ does not make these things easy at all
+12:11:57 <Philippa> so really, it's not the ultimate language. Get over it.
+12:12:09 <Philippa> In the meantime, I've a girl to go watch some stuff with
+12:12:14 <Sentinel> mahogny: yeah ofc
+12:12:24 <vincenz> sjanssen_: neat no?
+12:12:56 <Sentinel> mahogny: and thats not only with descent ones, there is very few programmers that is really good
+12:13:35 <mahogny> Sentinel, have to agree there. there's quite a jump between your ordinary professional programmer and the real elite
+12:14:31 <Sentinel> and also ive seen many "good programmers" here at irc but that knows like no high school math anyway so they might not perform so good all the time anyway(performance wise)
+12:14:33 <ed-210> i'm sorta interested in haskell, but.. is it 'PERLish'?
+12:14:34 <vincenz> sjanssen_: the nice thing is that they're polymorphic
+12:14:40 <vincenz> ed-210: nope!
+12:14:46 <ed-210> nifty!
+12:14:48 <sjanssen_> vincenz: yeah, that sounds really tricky
+12:15:04 <vincenz> sjanssen_: I can make a generic functor<returnTYPE, TYPELIST(argumentTypes)>
+12:15:08 <vincenz> and store any sort of functor in them
+12:15:16 <vincenz> be they curried, creators, etc..
+12:15:16 <norpan> a good foundation in mathematics is invaluable
+12:15:18 <mahogny> Sentinel, you mean the evil C coders who implements another linear search just because it's easy? :)
+12:15:43 <Sentinel> mahogny: heh or the people who dropped out of school for coding
+12:15:50 <mahogny> even worse
+12:15:54 <norpan> c coders optimizing constant factors instead of ordo
+12:16:02 <mahogny> omg
+12:16:03 <monochrom> I think I see how boost provides currying.
+12:16:30 <sjanssen_> vincenz: now you just need to write lambda in C++, and you'd be set
+12:16:34 <eivuokko> Sentinel, I dropped out of univ to do coding, I do very fine, thank you.
+12:16:52 <b33fc0d3_> what's all the fuss about ?
+12:17:03 <eivuokko> Power.
+12:17:05 <monochrom> There is no fuss, don't worry.
+12:17:14 <Sentinel> eivuokko: i didnt see i mentioned you, do you feel offended? i previosly referred to people who not even knows any high school math
+12:17:25 <mahogny> dropping university is one thing. if you drop out earlier... then you're toast
+12:17:29 <vincenz> sjanssen_: I can even do list like functions on typelists at coompiletime :)
+12:17:57 <vincenz> append<typelist, typelist>
+12:18:05 <tony2> mahogny: I dissage.
+12:18:24 <psnl> vincenz: don't take this personally; but you're a sick guy for being able to do that
+12:18:30 <vincenz> :D
+12:18:44 <monochrom> Someone please say that to The Oleg.
+12:18:45 <eivuokko> Sentinel, yes, but I find it funny to comment abilities of people who don't go through the studying pipeline offered by western countries.  Those schooling systems are hardly the only choice or mark of the good *anything*.
+12:18:48 <mahogny> tony2, I have seen plenty of folks with a university degree that know jack about programming so I don't give it much status
+12:18:58 <eivuokko> Sentinel, (yes = I am not offended, just making a point)
+12:19:16 <tony2> mahogny: I have one, but left school at 16.
+12:19:30 <vincenz> sjanssen_: but the chainer is quite useful
+12:19:36 <vincenz> sjanssen_: Creator knows that for T* it has to alloc
+12:19:45 <tony2> it's really not about being _taught_ to code well.
+12:19:52 <vincenz> sjanssen_: by then making a second creator that wraps pointers into smart pointers, you basically have auto allocation and auto deallocation
+12:20:29 <vincenz> it's like a templatized factory
+12:20:32 <monochrom> I want more examples from vincenz :)
+12:20:41 <vincenz> heh
+12:20:47 <Sentinel> eivuokko: well now you are going into another subject, i am from europe and i got a friend that dropped out early and works with coding/web hosting and ears shitloads of money but that has nothing to do with this point. We were talking performance, partially in games and stuff, and try to write a 3d engine for example with no knowledge of high school math... good luck
+12:21:35 <vincenz> monochrom: http://oasis.yi.org:8080/test/
+12:21:41 <vincenz> monochrom: some test cases
+12:21:44 <mahogny> well, one can pick up math outside school but I doubt many coders who drop do
+12:21:51 <monochrom> Heh. In #math every summer we get lots of highschool students asking "I am writing a 3d engine, but I don't know how to rotate..."
+12:22:01 <davidhouse> hehe
+12:22:14 <eivuokko> Sentinel, It was of relevance to the other comment you made about dropping out of school to do coding.
+12:22:48 <monochrom> If you then point them to a linear algebra book, 99% of them will go "but what is the formula? I just want to code it up"
+12:23:13 <vincenz> sjanssen_: test13.cpp demonstrates how I store an intermediate functor
+12:23:17 <mahogny> that cookbook style of math is a very bad attitude
+12:23:41 <vincenz> the custom allocator allows for making a good allocator for small objects
+12:23:44 <monochrom> (At that point one would wonder, why would you want to code it up without knowing what it means, why don't you just download one of the many free 3d engines.)
+12:23:49 <vincenz> as functors typically are between 4 and 12 bytes
+12:23:56 <Sentinel> eivuokko: well, i only said that to show they might encounter problems later and some developement tasks because lack of stuff they would have needed from school. But not all of them work as game developers and the few that does might do alright also, and certainly not all of them will do the 3d stuff math
+12:25:16 <vincenz> sjanssen_: test14 is even neater... I had something to iterate over typelists and call different functions
+12:25:28 <monochrom> It is this contradictory attitude: on one hand he wants to call the product his, on the other hand he doesn't want to learn the math.
+12:26:16 <mahogny> anyway, code monkeys are needed at times too
+12:26:44 <tony2> mahogny, indeed, code poets need them to do their dirty work.
+12:26:45 <vincenz> sjanssen_: and the coolest thing of all...turning an array of any dimension (I only implementted up to dimension 20 I think) nito a functor
+12:26:55 <vincenz> sjanssen_: so you do f(1,2,3) and get the element at [1][2][3]
+12:26:55 <monochrom> code monkeys need to know when to copy someone else's code rather than write their own. :)
+12:26:58 <eivuokko> Sentinel, that comment also implies that being graduated is the only way to know the stuff? :)  No, matter.  Sure, if you drop and don't learn besides, it is going to get you in trouble.  But schools and universities are not the knowledge, they are just one (in my opinion badly lacking) meter of it.
+12:28:49 * vincenz shuts up
+12:29:34 <vincenz> anyways, test4 is the cleanest demonstration of currying
+12:29:45 <Sentinel> sure thing, i know ive always been interested in math and read it some outside of school and i learn it in school also. But its typically one of those subjects that people generally only learn in school, partially because so many thinks its hard or/and lack of interest
+12:30:00 <monochrom> If you try to base your school-or-not-school argument on knowledge, I think it is shallow.  I think problem-solving skills are more important than knowledge; knowledge acquisition is just one of the many tools in your box of problem-solving skills.
+12:31:03 <monochrom> And of course, some schools are better than others in getting you to learn how to solve problems and acquire new knowledge.  And there are also cases where you can learn without schools.
+12:31:24 <Sentinel> but both are really making up pretty much space in that toolbox, but i agree the "thinking skills" is more important
+12:31:56 <eivuokko> monochrom, knowledge can be time saved if it's preacquired and hence it has good value for many employers.
+12:32:50 <davidhouse> heh. i love jonathon ross. "Do I have a show to steal you away from your illegal nightime watering!"
+12:32:52 <mahogny> to be able to solve problems, one needs to know what tools are available. university will give you that insight. you can't live with only one of knowledge and problem solving skills
+12:33:10 <monochrom> Are we discussing how to get the attention of employers?  I didn't know we are.
+12:33:21 <mahogny> not me
+12:33:29 <psnl> davidhouse: my housemates started watching home again, so I thought I wonder use IRC for entertianment again
+12:33:38 <psnl> s/wonder/would/
+12:33:50 <mahogny> hi Ulfalizer 
+12:33:56 <davidhouse> psni, the wonder of a laptop. i'm doing both :)
+12:33:59 <eivuokko> monochrom, If you are living by coding, it surely comes down to that almost always?
+12:34:04 <Ulfalizer> hmm, i wonder if there's some mac keyboard equivalent to home/end+shift to mark up lines..
+12:34:20 <Ulfalizer> mahogny: ehlo
+12:34:28 <FenixRF> monochrom, only one flaw ... knowledge to a point gets you a job... a piece of paper saying you can be taught is more important to employers than what you really know.
+12:34:29 <eivuokko> monochrom, or comparable saving in time, if you are doing something more exotic than just normal jobs.
+12:34:33 <mahogny> Ulfalizer, fan of the smtp protocol? :)
+12:34:53 <Ulfalizer> mahogny: not really. i'm not even sure i remember the basics :)
+12:34:59 <monochrom> I think we are discussing school-or-not-school in the context of how to be a good programmer, not how to live by coding.
+12:35:31 <Ulfalizer> ah, you were thinking about my "ehlo" :)
+12:35:32 <eivuokko> monochrom, Original comment from Sentinel was to drop out of school to do programming.  I took that as living by coding.
+12:35:39 <mahogny> Ulfalizer, :)
+12:35:40 * Dreadshoot clubs down Ulfalizer
+12:35:48 <monochrom> I took that as programming.
+12:35:57 <Ulfalizer> it was just me trying to imitate the guy from the motorola commercial
+12:36:05 <psnl> I learnt a lot outside school, but my course has taught me things I never would have learnt by myself
+12:36:05 <Ulfalizer> Dreadshoot: are you here as well? :(
+12:36:16 <Dreadshoot> /part
+12:36:23 <Ulfalizer> well, apparently you are. that sucks :(
+12:36:32 <eivuokko> monochrom, and as it was about practical aspects of life, it seemed appropriate context.  As it doesn't matter at all if you drop out of school if you don't depend on paper at the end.
+12:36:40 <tony2> I think people agree here.  There is a statistical relation between school and good prgrammer but it is not a necessary condition.
+12:36:55 <Dreadshoot> eivuokko: school rules though, except you make no cash :)
+12:36:57 <vincenz> tony2: more like a correlation
+12:36:57 * Ulfalizer kicks Dreadshoot back to quakenet
+12:37:31 <tony2> correlation, sure.
+12:37:55 <Ulfalizer> Dreadshoot: what are you studying? :|
+12:38:51 <hyrax42_> how does System.system give two values?
+12:39:14 <ihope> System.system?
+12:39:19 <ihope> @type System.system
+12:39:20 <lambdabot> String -> IO GHC.IOBase.ExitCode
+12:39:22 <hyrax42_> or maybe I'm misunderstanding
+12:39:31 <hyrax42_> > System.system "pwd" >>= print
+12:39:31 <lambdabot>  Not in scope: `System.system'
+12:39:38 <hyrax42_> ahh :)
+12:39:57 <hyrax42_> but if I do that in ghci, I get a line with directory name, and a line wiht ExitSuccess
+12:39:57 <davidhouse> ooh, ihope! :)
+12:40:03 <monochrom> eivuokko: the thing is your original words were "I find it funny to comment abilities of people who don't go through ..." you were speaking of abilities, not employment.
+12:40:12 <hyrax42_> but ExitCode = ExitSuccess | ExitFailure Int
+12:40:22 <hyrax42_> where does the string result of pwd live
+12:40:30 <ihope> Let's see here...
+12:40:42 <monochrom> So I can only conclude that "<Sentinel> eivuokko: well now you are going into another subject" is so true and always.
+12:41:06 <ihope> hyrax42_: I think system prints out whatever the thing you call does, then returns the exit code.
+12:41:13 <Glimi> hyrax42_, It is in the IO monad
+12:41:23 <Ulfalizer> hyrax42_: maybe you can't get the result as a string via System.system. just guessing though..
+12:41:42 <ihope> davidhouse: aye?
+12:41:53 * Ulfalizer needs to learn about monads
+12:41:54 <hyrax42_> looks that way
+12:41:56 <davidhouse> ihope, hows Smatiny? did you do any more work on it?
+12:42:03 <hyrax42_> from the report:
+12:42:10 <ihope> Not really. I had school to go to.
+12:42:12 <hyrax42_> "Computation system cmd returns the exit code produced when the operating system processes the command cmd."
+12:42:24 <xerox> Good evening.
+12:42:32 <davidhouse> hi xerox.
+12:42:39 <mahogny> yo
+12:43:02 <hyrax42_> yeah, System.system "pwd" >> return prints the result also
+12:43:08 <hyrax42_> * return ()
+12:43:18 <eivuokko> monochrom, if you want to think I was not discussing life, ok.  I don't care enough to go with quote-games.
+12:43:19 <davidhouse> ihope, i thought it would be quite fun to finish off and write the interpreter, [Step] -> String
+12:43:50 * Ulfalizer touches Dreadshoot in the wrong way
+12:43:56 <Ulfalizer> Dreadshoot: have you met hallin irl?
+12:44:07 <Dreadshoot> no
+12:44:19 <Ulfalizer> ok, then you weren't who i thought you were :/
+12:44:19 <hyrax42_> Ulfalizer: if my (limited!) experience is anythong to go by, just keep reading things like Monads as Containers, All About Monads etc. and eventually things begin to make sense
+12:44:38 <hyrax42_> I seem to get clarity on certain things after sleeping on them
+12:44:59 <ihope> davidhouse: maybe [Step] -> ([Step], String), so it'll also give you the end state of the program.
+12:45:03 <Ulfalizer> hyrax42_: well, as i haven't read anything at all about them yet, i guess anything will be an improvement :)
+12:45:11 <hyrax42_> :)
+12:45:25 <davidhouse> ihope, sure. it would involve changing evalState to runState.
+12:45:28 <ihope> But then if you want to have it do input as well...
+12:46:01 <davidhouse> then the input would be encoded into [Step].
+12:46:10 <davidhouse> and we may have to change to StateT IO
+12:46:17 <ihope> Ooph.
+12:47:01 <davidhouse> then i'll do a little more refactoring so it's more extensible
+12:47:12 <davidhouse> it looks like you designed it to be fairly extensible.
+12:47:51 <ihope> Yep, it was made to be extensible.
+12:48:20 <ihope> Hence the "one can pretty much add whatever one wants to this language to make it more fun than it already is" :-)
+12:48:33 <davidhouse> quite.
+12:56:05 <ihope> So what's the best datatype for holding SMATINY memory, where the only reading will be via indexing and the only writing will be swapping?
+12:56:48 <davidhouse> i'm using Data.Map.
+12:56:56 <ihope> @docs Data.Map
+12:56:56 <lambdabot> http://haskell.org/ghc/docs/latest/html/libraries/base/Data-Map.html
+12:57:03 <davidhouse> things have changed a bit since i pastebinned it for you.
+12:57:26 <lisppaste2> davidhouse pasted "smatiny, in progress" at http://paste.lisp.org/display/20195
+12:57:36 <davidhouse> that last function isn't finished.
+12:57:43 <ihope> Nice.
+12:59:26 <ihope> ...Wow.
+12:59:49 <davidhouse> ihope, i went with Data.Map as opposed to Data.Array, because i figured there was the possibility of there being large Do Nothings in between steps
+13:00:14 <ihope> Like "1. Do something. 284. Do something else."?
+13:00:25 <davidhouse> right.
+13:01:09 <ihope> What would happen if I were to change step 134 to something, then later change it back to a "Do nothing."?
+13:02:30 <davidhouse> i dunno. let me finish the interpreter and we'll see.
+13:02:40 <davidhouse> it doesn't sound like any special edge case
+13:11:36 <eng> gtg. 
+13:12:13 <eng> it was a thrill to listen to (watch?) you guys 
+13:12:16 <eng> bye
+13:12:55 <davidhouse> what's wrong with this line?
+13:12:59 <davidhouse> s@(Swap _ _) -> doSwap s  >> return ''
+13:13:02 <davidhouse> (parse of a case)
+13:13:19 <davidhouse> *part
+13:14:01 <davidhouse> oh, wait.
+13:14:05 <ihope> The '' bit?
+13:14:06 <davidhouse> '' isn't a valid char.
+13:14:09 <ihope> :-)
+13:14:52 <monochrom> hahahaha
+13:15:01 <mahogny> that was way n00b =)
+13:15:34 * davidhouse bows
+13:17:10 <norpan> nooooooob
+13:17:45 <davidhouse> all right, all righ.
+13:17:54 <davidhouse> i was used to being able to do that with "".
+13:34:39 <ihope> I hate it how '' and " look so similar.
+13:35:48 <xerox> `'"“”„,.
+13:36:44 <ihope> Uh oh.
+13:37:13 <BCoppens> don't forget ´ ;)
+13:38:13 <BCoppens> ˝ˇ˘¯«» :P
+13:38:36 <sieni> \�@\�@�G¯�
+13:39:06 <BCoppens> I'm pretty sure there are also more variants of ', but I can't find those on my keyboard ;)
+13:39:11 <ihope> ¡Spécìãl chãrãctérs!
+13:39:54 <norpan> ïnd?eð
+13:40:42 <BCoppens> :þ
+13:42:22 <ihope> =|°-)
+13:44:03 <BCoppens> it's even more fun with a bigger part of the unicode set ;)
+13:45:40 <BCoppens> The wikipedia has some examples :) http://en.wikipedia.org/wiki/Kaomoji#Basic_examples_2
+13:52:28 <davidhouse> > ord 'a'
+13:52:29 <lambdabot> 97
+13:52:43 <Beelsebob> > > ord 'a' 98
+13:52:43 <lambdabot>  parse error on input `>'
+13:52:47 <Beelsebob> boring
+13:52:55 <ihope> Um...
+13:53:07 <ihope> > ord 'a' > 98
+13:53:07 <Beelsebob> > (>) (ord 'a') 98
+13:53:07 <lambdabot> False
+13:53:08 <lambdabot> False
+13:54:15 <xerox> False!
+13:55:28 <ihope> > False!
+13:55:28 <lambdabot>  parse error on input `}'
+13:55:35 <Beelsebob> > !False
+13:55:35 <lambdabot>  parse error on input `!'
+13:55:41 <ihope> > False! False
+13:55:42 <lambdabot> Couldn't match `Array i e' against `Bool'
+13:55:47 <ihope> Whee.
+13:55:54 <Beelsebob> > id !$ False
+13:55:55 <lambdabot>  Not in scope: `!$'
+13:56:03 <Beelsebob> :o
+13:59:47 <davidhouse> ihope, almost there. it prints "!Hi"
+13:59:50 <davidhouse> :)
+14:00:00 <ihope> Heh.
+14:00:08 <ihope> Is that the "Hi!" program?
+14:00:31 <ihope> > id $! False
+14:00:32 <lambdabot> False
+14:00:43 <davidhouse> ihope, yep.
+14:00:52 <davidhouse> > ord '!'
+14:00:53 <lambdabot> 33
+14:01:01 <ihope> What does it do with the "Hello, world!" program on the talk page?
+14:01:12 <ihope> > sort "Hello, world!"
+14:01:13 <lambdabot> " !,Hdellloorw"
+14:01:41 <davidhouse> ihope, well it doesn't do comments yet.
+14:01:52 <ihope> You can strip those out.
+14:02:02 <davidhouse> true.
+14:02:29 <davidhouse> > all isSpace []
+14:02:30 <lambdabot> True
+14:02:32 <davidhouse> good.
+14:02:45 <Beelsebob> > all isSpace "space"
+14:02:46 <lambdabot> False
+14:03:13 <ihope> > all isSpace "   \t   \n"
+14:03:14 <lambdabot> True
+14:03:27 <xerox> > (>>) (<) (>) ">" "<"
+14:03:28 <lambdabot> True
+14:03:30 * xerox snickers
+14:03:58 <ihope> Whee.
+14:04:03 <ihope> @type (>>) (<)
+14:04:04 <lambdabot> forall a b. (Ord a) => (a -> b) -> a -> b
+14:04:25 <ihope> > (>>) (<) (>) "<" ">"
+14:04:26 <lambdabot> False
+14:04:31 <xerox> haha.
+14:04:36 <xerox> >_<
+14:05:19 <davidhouse> ihope, grr. the hello world prog prints nothing.
+14:05:41 <ihope> > \">" _ "<" -> (>>) (>) (<) ">" "<"
+14:05:41 <lambdabot> Add a type signature
+14:05:57 <ihope> @type \">" _ "<" -> (>>) (>) (<) ">" "<"
+14:05:58 <lambdabot> forall t.
+14:05:58 <lambdabot>              [Char] -> t -> [Char] -> Bool
+14:06:06 <ihope> Ah, yes.
+14:08:03 <davidhouse> @hoogle trace
+14:08:03 <lambdabot> Debug.Trace.trace :: String -> a -> a
+14:08:03 <lambdabot> Debug.Trace :: module
+14:08:03 <lambdabot> Debug.Trace.putTraceMsg :: String -> IO ()
+14:11:38 * SamB wonders how one is supposed to edit javascript
+14:11:51 <davidhouse> SamB, alert().
+14:12:00 <davidhouse> ihope, the Hi! program works. hello world is being worked on.
+14:12:16 <ihope> What's it do so far?
+14:12:50 <davidhouse> print nothing.
+14:13:06 <ihope> Hmm...
+14:13:45 <ihope> Wuh oh.
+14:14:09 <davidhouse> ?
+14:14:11 <shoJitou> Hi, I understand how monads can isolate side-effects by tagging functions that use them as contaminated, but I don't understand how arrows do. Do they?
+14:14:25 <davidhouse> shoJitou: yes.
+14:14:41 <davidhouse> shoJitou: you might want to read some of the papers. i recommend "arrows as computations" by ross paterson
+14:15:03 <ihope> davidhouse: try changing step 121 to say "121. Swap 187 with 72."
+14:15:12 <SamB> no, I meant, there doesn't seem to be an emacs mode in Debian for it
+14:16:36 <shoJitou> david, I tried, but its a bit dense for my level of understanding, and I don't exactly know how is notation works because he has code like http://rafb.net/paste/results/AX2qol52.html
+14:17:42 <davidhouse> ihope, "Hello, wor"
+14:18:15 <sieni> shoJitou: what's unclear about that code?
+14:18:40 <sjanssen_> shoJitou: is it more clear if you write it as: add f g = \b -> f b + g b ?
+14:18:42 <davidhouse> ihope, i can give you full debugging output if you want it
+14:18:51 <davidhouse> ihope, so you get an idea of the flow.
+14:18:53 <shoJitou> sieni, well, there are three parameters and only three parts to the type
+14:19:03 <sieni> shoJitou: add takes two functions and a number and computes f(b) + g(b)
+14:19:13 <shoJitou> ah
+14:19:29 <sjanssen_> shoJitou: you can remove the last parens because of the associativity of ->
+14:19:50 <Cale> alternately, you can look at it as taking two functions and returning a function which is their sum
+14:20:00 <Cale> that's the same thing, of course
+14:20:12 <xerox> Hola Cale!
+14:20:17 <Cale> hello xerox 
+14:20:46 <xerox> Cale - did you know that you can make any shape folding a piece of paper and doing _exactly_one_ cut? <http://img130.imageshack.us/my.php?image=190520060au.jpg>
+14:21:09 <shoJitou> Yeah, that makes sense, now:)
+14:21:12 <shoJitou> thanks
+14:21:32 <Cale> I'd heard about that
+14:21:51 <davidhouse> xerox, what shape is that?
+14:22:00 <Cale> looks like a fish :)
+14:22:03 <davidhouse> or is that the final shape
+14:22:06 <xerox> Yes!
+14:22:08 <xerox> A fish.
+14:22:13 <davidhouse> starting with square paper?
+14:22:15 <basti_> xerox: how "any"?
+14:22:27 <xerox> basti_: *any*
+14:22:31 <Cale> of course, any polygonal shape
+14:22:37 <Cale> you can't make a circle :)
+14:22:37 <moonlite1> i've got some problems with importing some constructors (CalendarTime, CInfo (haskelldb) and String (wtf?)). If someone could take a look here: http://pastebin.com/727249 it would be great
+14:22:39 <xerox> davidhouse: yes, that was drawn in the center of a square paper.
+14:22:53 <basti_> and probably it has to be connected?!
+14:23:25 <Cale> might not have to be connected
+14:23:38 <basti_> moonlite1: youre confusing data and its type?
+14:23:40 <davidhouse> > chr 187
+14:23:40 <lambdabot> '\187'
+14:23:45 <basti_> -> #blah? ;)
+14:24:03 <basti_> > "Hi"::String
+14:24:04 <lambdabot> "Hi"
+14:24:09 <basti_> > String::String
+14:24:10 <lambdabot>  Not in scope: data constructor `String'
+14:24:20 <Cale> moonlite1: String isn't a value
+14:24:53 <moonlite1> aaah so obviuos :/ should be StringT, CalendarTimeT etc.
+14:25:05 <moonlite1> DBL.CInfo though?
+14:25:07 <basti_> what should?
+14:25:23 <basti_> DBL.CInfo may well be a construtor.
+14:25:48 <moonlite1> String should be StringT etc. there is a CType datatype. 
+14:26:05 <basti_> what use would "String" be for then?
+14:26:06 <moonlite1> that has CalendarTimeT StringT etc in haskelldb
+14:26:18 <basti_> thats something else, btw.
+14:26:36 <basti_> and unrelated too.
+14:26:44 <moonlite1> StringT would tell the database type of that column
+14:26:53 <basti_> ah i see.
+14:27:10 <basti_> so StringT is a constructor of a value that is absolutely not like a string
+14:27:47 <moonlite1> pretty much
+14:27:51 <moonlite1> :)
+14:28:09 <moonlite1> i feel quite dumb :)
+14:29:11 <osquar> why is has
+14:29:19 <osquar> kell type system predicative if it is ?
+14:29:19 <davidhouse> > map ord "Hello, world!"
+14:29:20 <lambdabot> [72,101,108,108,111,44,32,119,111,114,108,100,33]
+14:29:29 <ihope> davidhouse: I can probably figure it out.
+14:29:35 <basti_> osquar: uhm.
+14:29:50 <davidhouse> ihope, it may still be a problem with the interpreter.
+14:30:12 <ihope> 163. Swap 163 with 107.
+14:30:17 <osquar> basti_ I mean parametric lambda calculus is impredicative
+14:30:35 <ihope> osquar: wuh?
+14:30:39 <osquar> but I have heard Haskell is not
+14:30:49 <basti_> osquar: I cannot say i know what you're talking about.
+14:30:56 <basti_> do not let this stop you.
+14:31:01 <osquar> :-) hehe
+14:31:40 <yip> can i make my own infix constructors like (:)?
+14:31:46 <ihope> yip: yep.
+14:31:57 <yip> just like regular functions?
+14:31:57 <basti_> "yup"?
+14:31:59 <ihope> Well, not (:).
+14:32:13 <basti_> really similar, yes.
+14:32:14 <davidhouse> ihope, yay! :D
+14:32:18 <yip> ihope: can i pattern match with my own infix constructors?
+14:32:19 <ihope> It works?
+14:32:26 <ihope> yip: yep.
+14:32:32 <ibid> yip: a constructor that starts with a colon is infix. they're otherwise completely regular constructors
+14:32:41 <ihope> data Foobar = Foo :% Bar
+14:32:47 <ibid> yip: note that such a constructor can only consist of symbol characters
+14:32:50 <davidhouse> ihope, don't suppose you've got a site i could upload the binary to?
+14:32:52 <ihope> foo (x :% y) = (x,y)
+14:33:14 <ihope> davidhouse: just a second.
+14:33:19 <yip> ibid: cool thanks
+14:33:21 <ibid> yip: also, you can do `This` to regular binary constructors like you can for functions
+14:33:45 <yip> ibid: also in pattern matching?
+14:33:56 <ibid> yip: iirc yes
+14:34:16 <basti_> osquar found nobody to talk about his strange problems :|
+14:34:43 <yip> ibid: is it possible to have scoped data declerations, like in a let?
+14:34:49 <ihope> davidhouse: put it in a pastebin, and I'll ask someone to upload it to http://esoteric.voxelperfect.net/files/
+14:35:18 <davidhouse> ihope, i need a name.
+14:35:23 <ihope> A name?
+14:35:35 <davidhouse> for the interpreter :)
+14:35:35 <ibid> yip: no
+14:35:42 <ihope> smatiny.hs?
+14:35:42 <yip> ibid: that's a shame
+14:35:47 <davidhouse> pfft.
+14:36:05 <ihope> swap.hs?
+14:36:38 <davidhouse> ihope, hang on, let me add some IO before i pastebin it
+14:36:50 <ihope> Okay.
+14:37:07 <ihope> Just how are you getting the program into the interpreter?
+14:37:25 <davidhouse> read from a text file?
+14:37:35 <ihope> So you're not typing it out. :-)
+14:37:39 <davidhouse> hell no.
+14:38:20 <davidhouse> :)
+14:39:50 <SamB> so, I notice that MozEmbed widgets don't seem to have a context menu?
+14:40:32 <davidhouse> @hoogle getArgs
+14:40:32 <lambdabot> System.getArgs :: IO [String]
+14:41:40 <shoJitou> So, those of you experienced in monads, would you rather use monads or a 'wild' system like ML's?
+14:42:05 <ihope> shoJitou: a what?
+14:42:31 <shoJitou> ihope, a system where you can have side-effects anywhere you want.
+14:42:38 <ihope> Monads.
+14:42:44 <ihope> :-)
+14:43:10 <ihope> Except for debugging and stuff.
+14:43:24 <davidhouse> "data Verbosity = Introversial | Outgoing" :)
+14:43:38 <Cale> More control over where side effects go sounds good to me :)
+14:43:39 <ihope> And I understand that unsafePerformIO is essential when using FFI.
+14:43:40 <norpan> how can you guys work with darcs? my impression is that it takes extremely long time to pull/merge patches and also uses a lot of memory
+14:43:43 <yip> monads are especially useful for debugging
+14:43:59 <Cale> norpan: where did you get this impression?
+14:44:12 <norpan> by getting code from kzm and dons for fps with darcs pull
+14:44:22 <monochrom> I would rather use monads and the do notation.
+14:44:44 * shoJitou has much to learn
+14:45:03 <eivuokko> Most of time darcs operates really nice and quick in my use.
+14:45:22 <norpan> more than once it has just stood there eating cpu when i do darcs pull
+14:45:35 <norpan> when darcs get works relatively fast
+14:45:47 <eivuokko> There must have been conflicts.  Those can be slow.  Even extremely.
+14:46:01 <norpan> there probably were
+14:46:06 <norpan> once i let it sit for 20 hours
+14:46:09 <Cale> shoJitou: Basically, monads give you a really nice way to control which parts of the system are allowed access to certain side effects and data.
+14:46:37 <eivuokko> (Even resolved conflicts that have patches set in between conflicts and resolver patch can be painfull)
+14:46:39 <Cale> They also let you write up your own miniature ideal language for solving a problem.
+14:46:55 <norpan> well at any rate it was unusable
+14:46:58 <shoJitou> Cale, I know, but I was wondering if other people found it worth having to restructure the arch to fit the monad style
+14:47:15 <norpan> and i had to get the repo separately and put my patches in by hand
+14:47:23 <Cale> There's no restructuring needed if you design things that way in the first place :)
+14:47:28 <norpan> maybe i'm just using it wronf
+14:47:43 <eivuokko> norpan, It's not typical, I have not had those (in real usage) and we use darcs at work.
+14:48:05 <norpan> maybe something is wrong with one of those repos then
+14:48:18 <eivuokko> norpan, It is certainly darcs' fault.  But how can we live with it...well for most people that just doesn't happen (often enough to be problem anyway)
+14:48:41 <eivuokko> norpan, No, it's darcs' algo that has bad complexity.
+14:48:41 <Excedrin> if you check in "binary" stuff as text, it's guaranteed to behave that way
+14:48:59 <eivuokko> norpan, (given there were no wierd network errors or something)
+14:49:13 <norpan> no i even did it locally
+14:49:16 <norpan> same result
+14:49:23 <Cale> norpan: this was on a darcs pull? Had you made changes to your copy of the repo? You might try a darcs get --partial, or some such.
+14:49:35 <good_boy> is this acceptable: (tail a):(head a) where a list
+14:49:37 <good_boy> ?
+14:49:40 <eivuokko> Yeah, conflicts :)  Bad start.  You can try pulling one patch a time or something.
+14:49:47 <Cale> good_boy: nope, it's a type error
+14:49:53 <eivuokko> Or pulling in other direction.
+14:50:29 <Cale> @type \a -> tail a : head a
+14:50:29 <lambdabot>   Occurs check: cannot construct the infinite type: a = [[a]]
+14:50:30 <lambdabot>   Expected type: [[[a]]]
+14:50:39 <shoJitou> good, did you mean tail a ++ [head a]?
+14:50:46 <eivuokko> Or reverse.
+14:50:54 <good_boy> or yes, that.
+14:50:59 <good_boy> or just a!
+14:51:21 <good_boy> have had a long day... i can hardly think.
+14:51:42 <Cale> > foldl (flip (:)) [] [1,2,3,4,5]
+14:51:42 <lambdabot> [5,4,3,2,1]
+14:51:58 <Cale> > foldr (:) [] [1,2,3,4,5]
+14:51:59 <lambdabot> [1,2,3,4,5]
+14:52:42 <norpan> i think i'll stick with mercurial at work
+14:52:53 <lisppaste2> davidhouse pasted "smatiny, in progress" at http://paste.lisp.org/display/20198
+14:53:08 <damg__> noob question ;) : does putStr allow showing the string before it gets a \n ?
+14:53:49 <Cale> damg__: yeah, you need to set the buffering on stdout to NoBuffering, or do an hFlush stdout
+14:54:06 <damg__> ah, thank you Cale 
+14:54:08 <Cale> In System.IO, you'll find hSetBuffering, which is probably what you want
+14:54:24 <damg__> yes, it is on LineBuffering right now, didnt realize it was :)
+14:54:24 <ihope> davidhouse: where's the rest of it?
+14:55:12 <Cale> Your request for http://esoteric.voxelperfect.net/wiki/SMATINY  could not be fulfilled, because the domain name esoteric.voxelperfect.net could not be resolved.
+14:56:17 <davidhouse> ihope, hold on, had to restart.
+14:56:18 <Cale> hmm
+14:56:24 <Dreadshoot> fst (5, "test")
+14:56:26 <Cale> probably just temporary
+14:56:32 <Dreadshoot> > fst (5, "test")
+14:56:33 <lambdabot> 5
+14:57:04 <Cale> yeah, stupid dns :)
+14:57:32 <ihope> Cale: s/esoteric.voxelperfect.net/www.esolangs.org/?
+14:57:41 <Cale> It's working now
+14:59:47 <davidhouse> @hoogle exitSuccess
+14:59:47 <lambdabot> System.Exit.ExitSuccess :: ExitCode
+15:01:03 <ihope> @hoogle exitFailure
+15:01:03 <lambdabot> System.exitFailure :: IO a
+15:01:04 <lambdabot> System.Exit.ExitFailure :: Int -> ExitCode
+15:01:08 <davidhouse> ihope, okay, done. email address?
+15:01:20 <ihope> Mine?
+15:01:52 <ihope> ihope127 at Gmail
+15:03:05 * defcon8 sends the spammers
+15:03:13 <ihope> Oh noes!
+15:03:21 * ihope hugs his spam filter
+15:05:04 <davidhouse> ihope, let me just check it compiles, one last time.
+15:05:21 <davidhouse> good.
+15:06:15 <davidhouse> ihope, sent.
+15:06:34 <ihope> And received.
+15:07:18 <davidhouse> right, time to start refactoring.
+15:10:35 <davidhouse> wow! http://www.haskell.org/happy/ after seeing that page, how can you not want to use happy! :D
+15:11:27 <ihope> And by that, do you mean http://www.haskell.org/happy/Happy.gif? :-)
+15:11:37 <eivuokko> heh :)
+15:11:39 <SamB> well, it is about as exciting as yacc? only for Haskell?
+15:12:24 <davidhouse> ihope, yes :)
+15:12:53 <ihope> So how do I work this interpreter?
+15:13:37 <davidhouse> ihope, it's in the readme :)
+15:13:53 <ihope> What, who reads those? :-)
+15:13:57 <ihope> s/\)/P/
+15:15:29 <hyrax42_> @type ord
+15:15:30 <lambdabot> Char -> Int
+15:15:44 <hyrax42_> in what encoding
+15:15:48 <davidhouse> ASCII
+15:15:49 * SamB is surprised ihope remembered to escape the paren
+15:15:58 <hyrax42_> > ord 'π'
+15:15:59 <lambdabot>  lexical error
+15:16:03 <ihope> Hee hee.
+15:16:05 <SamB> UNICODE!
+15:16:05 <davidhouse> ASCII. :)
+15:16:15 <hyrax42_> just checking!
+15:16:29 <SamB> > ord '\u0000'
+15:16:29 <lambdabot>  lexical error in string/character literal
+15:16:33 <hyrax42_> > ord 'é'
+15:16:33 <lambdabot>  lexical error
+15:16:35 <SamB> > ord '\x0000'
+15:16:35 <lambdabot> 0
+15:16:40 <SamB> > ord '\x1000'
+15:16:41 <lambdabot> 4096
+15:16:41 <davidhouse> give up, hyrax42_ :)
+15:16:44 <hyrax42_> heh
+15:16:46 <hyrax42_> fine
+15:16:51 <ihope> > ord '\x3914'
+15:16:51 <lambdabot> 14612
+15:16:56 <ihope> Obvious.
+15:17:07 <davidhouse> > let ord 'é' = ord 'e' in ord 'é'
+15:17:08 <lambdabot>  lexical error
+15:17:20 <davidhouse> pfft. doesn't even support unicode generally.
+15:17:36 <ihope> > let é = ord 'e' in é
+15:17:37 <lambdabot>  lexical error
+15:17:48 <norpan> generally?
+15:17:54 <ihope> > let ord 'a' = ord 'e' in ord 'a'
+15:17:55 <lambdabot> Add a type signature
+15:18:35 <ihope> @type let ord 'a' = ord 'e' in ord 'a'
+15:18:36 <lambdabot> forall t. t
+15:18:43 <ihope> Heh.
+15:18:57 <ihope> @index ord
+15:18:58 <lambdabot> Data.Char
+15:19:08 <ihope> > let ord 'a' =Data.Char.ord 'e' in ord 'a'
+15:19:09 <lambdabot> 101
+15:19:14 <ihope> > ord 'e'
+15:19:14 <lambdabot> 101
+15:20:55 <davidhouse> huh? what's with that type?
+15:21:09 <ihope> It was defining ord recursively.
+15:21:30 <ihope> It might as well have been "let foobar 'a' = foobar 'e' in foobar 'a'".
+15:21:57 <davidhouse> yeah.
+15:22:01 <davidhouse> okay.
+15:22:07 <davidhouse> it's _|_, then :)
+15:22:45 <davidhouse> i ask because i read (interestingly) the other day that there are no functions with type forall a. a except for id and the _|_ function.
+15:23:02 <ihope> id and const undefined?
+15:23:10 <ihope> And unsafeCoerce#? :-)
+15:23:20 <SamB> > let foobar 'a' = foobar 'e' in foobar 'a' :: Int
+15:23:21 <lambdabot>  Non-exhaustive patterns in function foobar
+15:23:25 <Cale> id doesn't have type forall a. a
+15:23:30 <SamB> @type id
+15:23:31 <lambdabot> forall a. a -> a
+15:23:32 <davidhouse> oops.
+15:23:39 <davidhouse> i meant forall a. a -> a
+15:23:50 <Cale> okay, then yeah
+15:23:57 <SamB> @djinn forall a. a -> a
+15:23:57 <lambdabot> -- f cannot be realized.
+15:24:04 <Cale> @djinn a -> a
+15:24:04 <lambdabot> f a = a
+15:24:06 <SamB> @djinn forall a.
+15:24:07 <davidhouse> any function a -> a that always returns _|_ is the same.
+15:24:07 <lambdabot> -- f cannot be realized.
+15:24:16 <ihope> @djinn a
+15:24:16 <lambdabot> -- f cannot be realized.
+15:24:17 <davidhouse> (as all the other functions that fit that definitoin)
+15:24:23 <SamB> okay, I think djinn needs to give parse errors where appropraite
+15:24:27 <Cale> @type error "hello"
+15:24:28 <lambdabot> forall a. a
+15:24:29 <SamB> er, s/ai/ia/
+15:24:37 <Cale> @type const (error "hello")
+15:24:38 <lambdabot> forall a b. b -> a
+15:24:41 <ihope> @djinn foo . bar
+15:24:41 <lambdabot> Cannot parse command
+15:24:48 <ihope> @djinn foo.
+15:24:48 <lambdabot> -- f cannot be realized.
+15:24:53 <ihope> Hmm.
+15:25:23 <Cale> djinn constructs functions given a type
+15:25:45 <Cale> @. pl djinn (a -> b) -> (b -> c) -> (a -> c)
+15:25:45 <lambdabot> f = flip (.)
+15:27:14 <millhouse> I've got a haskell newbie question about reading binary files
+15:27:18 <millhouse> basically
+15:27:20 <millhouse> I've got a binary file
+15:27:27 <davidhouse> and you want to read it?
+15:27:27 <millhouse> And I want an immutable array of Word32s
+15:27:39 <millhouse> not sure about the best way to do it
+15:27:44 <ihope> Hmm...
+15:28:59 <davidhouse> Word32 is just an unsigned Int?
+15:29:03 <millhouse> yes
+15:29:19 * davidhouse knows nothing about binary files
+15:29:49 <davidhouse> millhouse: do we share a surname or is that just a nick?
+15:29:55 <millhouse> just a nick
+15:30:04 <davidhouse> ah :)
+15:30:08 <millhouse> :)
+15:30:16 <hyrax42_> you can declare multiple constructors using the { name :: Type, ...} syntax right?
+15:30:23 <davidhouse> hyrax42_: nope
+15:30:28 <ihope> No?
+15:30:28 <hyrax42_> oh
+15:30:32 <Cale> hyrax42_: sure
+15:30:34 <davidhouse> hyrax42_: oh, wait
+15:30:35 <eivuokko> Yes you can.
+15:30:50 <davidhouse> sorry, i thought you meant could you use name more than once (i.e. in more than one different record)
+15:30:58 <davidhouse> that's called record syntax, by the way.
+15:31:05 <hyrax42_> ah ok
+15:31:09 <eivuokko> As long as all name-labels are used within one type and they have same type.
+15:31:09 <hyrax42_> I thought it was, but wasn't sure
+15:31:11 <Cale> davidhouse: you can, so long as they belong to the same type
+15:31:39 <davidhouse> true.
+15:31:51 <hyrax42_> so I can resume the names across constructors for the type, so long as those named spots are all same type?
+15:31:54 <davidhouse> what's the current favourite for replacing records in haskell prime?
+15:32:41 <eivuokko> As far as I understand, there is no really ongoing proposal.
+15:33:00 <Taral> has anyone looked at HAppS?
+15:33:02 <Cale> millhouse: http://article.gmane.org/gmane.comp.lang.haskell.cafe/10803 looks interesting
+15:33:12 <hyrax42_> oh!
+15:33:14 <davidhouse> :( it'd be nice to get a concrete replacement in.
+15:33:21 <hyrax42_> the error that made me ask was a capitalisation problem :(
+15:33:22 <Cale> millhouse: be careful when you unpack it -- the tar.gz unpacks in the current directory
+15:33:25 <stepcut> I like this one, personally: http://www.cs.uu.nl/~daan/download/papers/scopedlabels.pdf
+15:33:53 <stepcut> davidhouse: but no idea if it as actually good
+15:34:06 <stepcut> Taral: I have played with it a bit
+15:34:11 <davidhouse> Daan's? yes, i've heard them recommended.
+15:34:16 <Taral> stepcut: What did you think?
+15:34:41 <millhouse> Cale: thanks
+15:35:19 <stepcut> Taral: it is pretty neat -- I hope to use it for some selected projects
+15:35:25 <Taral> Hm.
+15:35:41 <Taral> I tried to understand it and found it kind of lacking :(
+15:35:55 <davidhouse> what does it do?
+15:36:05 <Taral> HAppS? It's an application server.
+15:36:14 <davidhouse> ah.
+15:36:17 <stepcut> Taral: well, there are certainly a number of things it does not do, what did you find lacking?
+15:36:29 <Taral> Documentation, design explanations.
+15:36:38 <stepcut> davidhouse: it is a database and webserver all roled into one
+15:37:21 <Taral> Why is StartState a typeclass? What are the two parts of a SyncH handler?
+15:37:34 <Taral> By the looks of it, the author has *completely* misunderstood the SEDA principles.
+15:37:50 <stepcut> Taral: heh, well, I have not looked at it that much yet :-/
+15:38:02 <Taral> I could go on... but I won't.
+15:38:13 <Taral> The ideas are good -- the implementation is severely lacking.
+15:38:55 <stepcut> in what way do you think he misunderstood SEDA?
+15:39:02 <Taral> He's missing the S part.
+15:39:06 <Taral> "Staged"
+15:39:12 <ihope> What's SEDA?
+15:39:19 <Taral> Oh, and the whole overflow-management thing.
+15:39:23 <Taral> Completely missing.
+15:39:29 <stepcut> Taral: yeah -- it did look a bit like, one stage only
+15:39:32 <Taral> Staged Event-Driven Architecture
+15:39:54 <Taral> Yeah, basically everything in one big stage, losing all of the flexibility and power of SEDA.
+15:39:59 <Taral> He's got EDA, not SEDA.
+15:40:44 <Taral> Okay, I'm done shredding HAppS. Now I have to find a way to do ACID and transparent persistence correctly
+15:40:45 <Taral> :)
+15:40:50 <stepcut> :p
+15:41:08 <stepcut> I look for to using THAppS
+15:41:15 <stepcut> for*ward*
+15:41:23 <hyrax42_> THApps?
+15:41:29 <hyrax42_> S
+15:41:45 <Taral> HAppS with TH?
+15:41:47 <stepcut> Taral's Haskell Application Server
+15:41:51 <hyrax42_> oh
+15:41:51 <Taral> heh
+15:41:53 <ihope> :-)
+15:41:56 <Taral> We'll see.
+15:43:04 <Taral> does GHC support real OS multithreading?
+15:43:10 <stepcut> For the stuff I wanted to use HAppS for, I think the lack of overflow-management, and having only one-stage would not make a difference -- because I don't expect more than a few queries per day any ;)
+15:43:20 <tony2> Taral, yup, via bounds threads.
+15:43:24 <Taral> ok
+15:43:27 <tony2> --threaded 
+15:43:39 <tony2> at compile and forkOS instead of forkIO
+15:44:13 <eivuokko> Well, it is much more real if you use 6.5 and -smp (now alias for -threaded)
+15:44:43 <eivuokko> Then it really can run two haskell threads at once.  With old -threaded only blocking foreign calls are run in other threads.  As far as I understand.
+15:45:25 <davidhouse> grr. Daan's records have sucky syntax.
+15:45:37 <Philippa> in what way?
+15:45:56 <davidhouse> "The selection operation (r .l ) selects the value of a label l from a record r." Composition, anyone?
+15:46:03 <Philippa> oh please
+15:46:10 <Philippa> a) that's not a proposition for haskell itself
+15:46:15 <Philippa> b) it's a fricking token. Pick another already
+15:46:43 <davidhouse> all i was saying is that he chose a bad token.
+15:46:47 <Philippa> . for selection is as traditional and . for composition
+15:46:53 <Philippa> er, as, not and
+15:47:03 <Philippa> really, outside the context of haskell it's not a horrific thing
+15:47:28 <davidhouse> sure. as long as it changes before inclusion.
+15:48:37 <hyrax42_> @index fromJust
+15:48:38 <lambdabot> Data.Maybe
+15:48:42 <hyrax42_> oh data
+15:49:27 <Cale> I kind of like the idea of | for record selection
+15:49:45 <davidhouse> he uses | for record extension
+15:49:50 <Cale> (and possibly module paths)
+15:50:08 <davidhouse> e.g. origin = { x = 0, y = 0 }; origin3 = { origin | z = 0 }
+15:53:13 <Philippa> I'm tempted to allow extension and update via the same syntax - it appeals to me. Unfortunately it doesn't quite work as-is if you want lexically-scoped labels, but you can keep the distinction down to = vs |= inside the braces, say
+15:53:26 <Philippa> (assuming we're using the usual n-fields-at-once sugar)
+15:53:49 <Philippa> which'd give origin3 = origin { z |= 0}
+15:54:19 <davidhouse> why not just origin { z = 0 }?
+15:54:34 <Philippa> because that'd be an update requiring origin to already have a z field
+15:54:50 <Cale> how would you distinguish the case where you're adding a second field named z?
+15:54:50 <Philippa> origin {z |= 0} adds a z field regardless of whether origin had one
+15:54:54 <yip> would the selection operation allow for custom "getter" functions?
+15:54:58 <davidhouse> but if extension and updating were unified?
+15:55:03 <Philippa> Cale: from which case?
+15:55:23 <Cale> from the case where you're updating an existing field named z
+15:55:23 <Philippa> davidhouse: then you wouldn't have lexically-scoped labels any more
+15:55:35 <Cale> (I'm referring to davidhouse's idea)
+15:55:39 <Philippa> ah
+15:55:49 <Philippa> I think davidhouse's proposing extend-if-not-already-there
+15:56:16 <Cale> Daan's system has nice properties that are easy to break
+15:56:20 * Philippa nods
+15:56:23 <davidhouse> i see records as associative arrays from, say, PHP.
+15:56:39 <davidhouse> destructive updates, extension = updating
+15:56:39 <Philippa> does Daan's system allow extend-if-not-present as a compound operation? I'm guessing not
+15:56:45 <davidhouse> nope.
+15:56:50 <Philippa> davidhouse: you're not in PHP, have fun
+15:57:02 <davidhouse> extension and updating are quite seperated in Daan's.
+15:57:11 <davidhouse> Philippa: come on. i was making a comparison.
+15:57:38 <Philippa> sure. But there're implementations of records which have notably different properties, especially once you want tight typing on them
+15:58:03 <Philippa> extend-if-not-present puts a nice little wrinkle in the type system all on its own
+15:58:18 <davidhouse> i think at the end of the day i'd be happy with any system that replaces the current one.
+15:58:36 <Philippa> I'm not happy if all we get is anonymous records, nominal typing matters
+15:58:48 <Philippa> (yes, yes, unbox and rebox all the time - no thanks...)
+15:59:27 <davidhouse> anyway, time for bed.
+16:00:05 <Philippa> in the meantime, I'm wondering if maybe midnight isn't the time to teach myself new stuff about category theory after all
+16:00:26 <Philippa> I'm trying to pick up a lead franka threw me a few months back, but I suspect my brain's not working well enough
+16:01:19 <hyrax42_> hm
+16:01:52 <hyrax42_> I tried a whois on Philippa and it broke my irc client
+16:02:01 <Philippa> or perhaps more accurately, I'm not attuned to reading maths rather than code atm
+16:02:01 <hyrax42_> well
+16:02:09 <Philippa> broke how?
+16:02:12 <hyrax42_> not entirely, but I can't quit, for example
+16:02:24 <hyrax42_> just strange is all
+16:02:32 <hyrax42_> was trying to work out wher you are
+16:02:35 <hyrax42_> UK?
+16:02:38 <Philippa> yep
+16:03:08 <hyrax42_> ok well I'm goint to cycle this stupid thing
+16:05:00 <Philippa> in case anyone's wondering, I'm trying to grok internal category theory, 'cos there's a knot I'm looking to tie
+16:24:35 <hyrax42> woah
+16:24:50 <hyrax42> you can do pattern matching on lhs in definitions?
+16:25:04 <hyrax42> well seems you can
+16:25:05 <hyrax42> as in
+16:25:18 <hyrax42> [f1,f2] = map (. g) [h1, h2]
+16:25:20 <hyrax42> seems valid
+16:25:24 <psnl> hyrax42: yes
+16:25:28 <hyrax42> sweeet
+16:25:39 <psnl> hyrax42: -wall on ghc will tell you if you cover all cases
+16:25:39 <hyrax42> what is that called
+16:25:46 <hyrax42> so I can read the rules
+16:26:20 <psnl> pattern matching
+16:26:32 <hyrax42> oh that's it?
+16:26:38 <psnl> yes
+16:26:53 <psnl> so things like x! are:
+16:27:05 <psnl> fac 0 = 1
+16:27:17 <psnl> fac n = n * fac n-1
+16:27:36 <hyrax42> but here I'm defining multiple functions in one line
+16:27:53 <hyrax42> [sname, lname] = map (. names) [long, short]
+16:27:55 <hyrax42> is what I have
+16:28:05 <hyrax42> as a top level definition
+16:28:45 <hyrax42> (not really any better than just defining them in this case, but if there were more...)
+16:32:02 <tony2> it's still just pattern matching.
+16:35:16 <ihope> @type foldl1'
+16:35:17 <lambdabot> forall a. (a -> a -> a) -> [a] -> a
+16:35:46 <ihope> How fast is "fac n = foldl1' (*) [1..n]"?
+16:36:39 <psnl> how are you defining speed?
+16:39:23 <tony2> are you 'evolving' ihope?
+16:39:50 <ihope> tony2: hmm?
+16:39:59 <tony2> http://www.willamette.edu/~fruehr/haskell/evolution.html
+16:40:18 <ihope> psnl: asymptopic... thingy
+16:40:55 <ihope> In the sense that "\x -> 2^x" grows faster than "\x -> x^100000000000"
+16:41:52 <edwinb> you mean what's the time complexity?
+16:42:12 <ihope> edwinb: I guess.
+16:42:44 <edwinb> linear, in that case...
+16:42:53 <ihope> Oh.
+16:43:16 <ihope> Is there one that's O(log (n!))? :-)
+16:43:24 <edwinb> now there's a challenge...
+16:43:26 <ihope> Might as well make that "log n!".
+16:44:55 <jcreigh> ihope: Isn't that simply O(N)? I'm probably missing something really obvious...
+16:45:25 <ihope> jcreigh: well, n! is faster than exponential.
+16:45:59 <GeniXPro> ihope, ot always
+16:46:25 <ihope> GeniXPro: what do you mean?
+16:46:38 <GeniXPro> ihope, ! as in factorial, yes?
+16:46:43 <ihope> Yep.
+16:47:06 <GeniXPro> well O(2^n) is faster than O(n!) in all cases, except for when n=1
+16:47:27 <GeniXPro> O(3^n) is faster than O(n!) in all cases except for when n=2 or n=1
+16:47:35 <ihope> Um...
+16:47:51 <ihope> Oh, I see what you're saying.
+16:47:52 <edwinb> People don't tend to worry about cases with small n...
+16:48:38 <GeniXPro> In large n of O(2^n) or O(3^n) and O(n!), the exponential version is tighter
+16:49:06 <GeniXPro> but anyway
+16:56:52 <Philippa> edwinb: there are occasional times when it matters, like when you're running over lots of small datasets
+17:02:16 <edwinb> practically yes, but that's not what the complexity theorists worry about...
+17:04:01 <Philippa> sure. They're a distinctly smaller group than "people" though :-)
+17:04:30 <edwinb> many people don't worry about complexity at all...
+17:06:08 <mux> is (a:b@(_:_)) a good way to grab the first element of a list as 'a' and 'b' as the rest of the list, ensuring there are at least two elements?
+17:09:35 <Igloo> Yes
+17:09:47 <mux> thank you
+17:12:35 <Cale> you could just use (a:b) if the single element case is handled specifically above that
+17:12:57 <mux> yes of course, but my aim was to do it all at once
+17:13:04 <Cale> okay
+17:14:44 <mux> I have a case where I do it by checking for [_] above because it much clearer, but in that case I find it nice to do it this way
+17:24:40 <sjanssen> @ttow
+17:24:40 <lambdabot> I'm EMOTIONAL now because I have MERCHANDISING CLOUT!!
+17:26:38 <mux> @palomer
+17:26:38 <lambdabot> As someone who's studied GADTs, I've never found a use for them.
+17:29:31 <sjanssen> ihope: regarding the complexity of Fibonacci -- you can find F_n in O(log n) time
+17:48:53 <dons> morning
+17:51:04 <sjanssen> @seen RyanT5000
+17:51:05 <lambdabot> I saw RyanT5000 leaving #haskell 2 days, 3 hours, 50 minutes and 21 seconds ago, and .
+17:56:19 <hyrax42> @hoogle Ord a => [(a,b)] -> Map a b
+17:56:20 <lambdabot> Data.Map.fromList :: Ord k => [(k, a)] -> Map k a
+17:56:20 <lambdabot> Data.Map.fromListWith :: Ord k => (a -> a -> a) -> [(k, a)] -> Map k a
+17:56:20 <lambdabot> Data.Map.fromListWithKey :: Ord k => (k -> a -> a -> a) -> [(k, a)] -> Map k a
+17:56:54 <ihope> Can I stick two modules in one file?
+17:57:12 <hyrax42> @index assoc
+17:57:13 <lambdabot> bzzt
+17:57:30 <hyrax42> @hoogle a -> [(a,b)] -> Maybe b
+17:57:31 <lambdabot> Prelude.lookup :: Eq a => a -> [(a, b)] -> Maybe b
+17:57:33 <hyrax42> ah
+17:58:44 <hyrax42> > fromJust . lookup 10 [(1,2),(10,5)]
+17:58:45 <lambdabot> Couldn't match `Maybe b' against `t -> t1'
+17:58:57 <hyrax42> > fromJust $ lookup 10 [(1,2),(10,5)]
+17:58:58 <lambdabot> 5
+17:59:11 <hyrax42> > fromJust $ lookup 11 [(1,2),(10,5)]
+17:59:12 <lambdabot> Exception: Maybe.fromJust: Nothing
+18:01:36 <sjanssen> dons: has Google said how many students Haskell.org will get?
+18:02:01 <heatsink> To use the ghc2hs debian packages, do I need only the libghc6-*.deb packages from the gtk2hs page?
+18:03:42 <heatsink> ooh incremental gc
+18:29:45 <SamB> okay, so like how do I poke at Mozilla embedded in GTK?
+18:33:29 <dons> sjanssen: doesn't appear to have done this yet.
+18:33:56 <sjanssen> dons: okay, thanks
+18:34:19 <sjanssen> this waiting is tough
+18:34:24 * sjanssen stops whining
+18:34:42 <dons> sjanssen: well, we will all know by the 23rd. unless the deadline slips again..
+18:34:47 <dons> not long to wait.
+18:34:53 <sjanssen> no, it really isn't
+18:35:21 <dons> i'll have a look and see if anything's changed
+18:36:02 <dons> well, they've frozen our maximum project number now (at 34)
+18:36:44 <sjanssen> "no, it really isn't" is one of those phrases that is ambiguous over IRC
+18:36:53 <dons> hehe
+18:37:00 <sjanssen> 34 seems very large
+18:37:21 <dons> since they've frozen the maximum number, they've probably now moved into deciding the actual N they'll give us, <= 34
+18:37:49 <SamB> there aren't Haskell bindings to XPCOM, are there?
+18:46:06 <SamB> hmm, first hit on google is someone expressing surprise that the Haskell COM stuff hasn't been ported to XPCOM
+18:47:12 <vincenz> http://oasis.yi.org:8080/test/
+18:47:47 <dons> SamB: there's COM stuff listed on the libraries and tools page of haskell.org
+18:48:11 * dons is com clueless though
+18:48:25 <SamB> how similar is COM to XPCOM? but you don't know because you haven't a clue.
+18:49:03 <SamB> All I want is (a) to implement an inform:/ URL type and (b) a context menu with "back" in it
+18:49:19 <SamB> in a mozembedded window
+18:49:28 <SamB> maybe I should just figure out how to do it in C++
+19:11:44 <dons> ?yow
+19:11:44 <lambdabot> Are we THERE yet?  My MIND is a SUBMARINE!!
+19:14:04 <ihope> Submarine?
+19:14:09 <ihope> Ah well.
+19:14:17 <Cale> @meow
+19:14:17 <lambdabot> YOW!!  What should the entire human race DO??  Consume a fifth of
+19:14:18 <lambdabot> CHIVAS REGAL, ski NUDE down MT. EVEREST, and have a wild SEX WEEKEND!
+19:21:34 <Cale> http://www.qwantz.com/ :)
+19:22:26 <heatsink> haha
+19:23:54 <SamB> where can get recent hdirect?
+19:24:04 <SamB> like, one that will build?
+19:25:05 * SamB wants XPCOM
+19:26:23 <Frederick> Hello
+19:26:37 <SamB> hello
+19:26:46 <Frederick> SamB, I missed you folks :(
+19:27:11 * Frederick has been slaved and now just codes in C and Java :(
+19:27:47 <SamB> oh noes! not JAVA!!!!
+19:27:56 <heatsink> If you try hard enough, you can write haskell code in C
+19:28:12 * SamB would much rather write C code in Haskell
+19:28:25 <Frederick> SamB, I got a huge assignment in java :p
+19:28:35 <SamB> and I have seen some C code that really *did* look an *awful* lot like Haskell...
+19:29:04 <heatsink> SamB: unsafePerformIO on every line of code? ;)
+19:29:51 <Frederick> heatsink, gets rules supreme!
+19:30:18 <heatsink> @hoogle gets
+19:30:18 <lambdabot> Control.Monad.State.gets :: MonadState s m => (s -> a) -> m a
+19:30:18 <lambdabot> Random.getStdGen :: IO StdGen
+19:30:18 <lambdabot> Random.getStdRandom :: (StdGen -> (a, StdGen)) -> IO a
+19:30:36 <Frederick> heatsink, C gets
+19:31:27 <Frederick> I gonna check cboard.com and do someones homework since I can't do my own
+19:31:39 <SamB> okay.... you like buffer overruns?
+19:31:54 <Frederick> SamB, nope that is why I use fgets :)
+19:32:13 <SamB> ah
+19:32:43 <heatsink> @pl (\n -> all ((0 /=) . (n `mod`)) . fst . break (> floor (sqrt $ fromIntegral n)))
+19:32:43 <lambdabot> ap ((.) . all . ((0 /=) .) . mod) ((fst .) . break . flip (>) . floor . sqrt . fromIntegral)
+19:37:28 <heatsink> > take 10 $ fix (\p -> 2:filter (flip (\n -> all ((0 /=) . (n `mod`)) . fst . break (> floor (sqrt $ fromIntegral n))) p) [3..])
+19:37:30 <lambdabot> [2,3,5,7,11,13,17,19,23,29]
+19:37:48 <heatsink> There's my bit of useless code for tonight.
+19:40:58 <SamB> you can't figure out atoi?
+19:41:54 <SamB> Frederick: ?
+19:42:33 <Frederick> SamB, just solved, i'm tired =/
+19:56:45 <Cale> > let sieve (x:xs) = x : sieve [y | y <- xs, y `mod` x /= 0] in take 10 (sieve [2..])
+19:56:46 <lambdabot> [2,3,5,7,11,13,17,19,23,29]
+20:18:57 <SamB> @hoogle trace
+20:18:57 <lambdabot> Debug.Trace.trace :: String -> a -> a
+20:18:57 <lambdabot> Debug.Trace :: module
+20:18:57 <lambdabot> Debug.Trace.putTraceMsg :: String -> IO ()
+20:20:17 <SamB> @index IORef
+20:20:17 <lambdabot> Data.IORef
+20:20:31 <SamB> @index unsafePerformIO
+20:20:31 <lambdabot> System.IO.Unsafe, Foreign
+20:26:30 * SamB hopes that haskell/direct will now build
+20:30:34 <SamB> @index bounds
+20:30:35 <lambdabot> Data.Array.IArray, Data.Array.Unboxed, Data.Array.MArray, Data.Array.IO, Data.Array.ST, Data.Array.Storable, Data.Array.Diff, Data.Array
+20:46:06 * SamB didn't know JNI had anything to do with Haskell Direct
+21:47:32 <bringert> I started a GHC on Intel Macs wiki page: http://www.haskell.org/haskellwiki/GHC_on_Intel_Macs
+21:47:49 <bringert> if anyone has any info, please add it
+21:50:38 <khaladan> if you can provide me with an intel mac i'd be more than happy to oblige
+21:51:09 <hyrax42> not sure what the deal is, but I'll take one too
+21:51:16 <hyrax42> if you're handing them out, that is
+21:52:22 <bringert> umm, yeah, sure. just send $1 to Happy Dude, 742 Evergreen Terrace
+21:52:34 <hyrax42> done
+21:52:35 <hyrax42> and done
+21:55:04 <khaladan> still need city, state, zip
+21:56:31 <bringert> Springfield, whatever state springfield is in
+21:56:43 <bringert> gotta go, need more RAM
+21:56:47 <bringert> good night
+22:29:17 <dons> hmm. java to javascript compilers , eh. maybe we need a javascript backend for ghc now..
+22:29:32 <dons> and all because the jvm is such a heavy beast.
+22:52:34 <JohnnyL> uh huh, the jvm is 64k
+22:59:44 <piggybox> well, jvm itself is ok. the problem is that you can't tailor the lib, which is indeed a heavy beast.
